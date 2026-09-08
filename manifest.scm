@@ -34,7 +34,7 @@
    "dbus"
    "mesa"
    "fuse@2"
-   "atk"
+   "at-spi2-core"
    "pulseaudio"
    "pipewire"
    "cups"
