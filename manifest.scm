@@ -24,6 +24,7 @@
    "make"
    "git"
    "python"
+   "pnpm"
    ;; app image
    "gtk+"
    "libx11"
