@@ -54,7 +54,6 @@
         "@tiptap/suggestion": "^3.20.0",
         "@xmldom/xmldom": "^0.9.10",
         "emojibase-data": "^17.0.0",
-        "eve-native": "github:SeniorCareMarket/eve",
         "ffi-bindings": "^1.0.6",
         "livekit-client": "^2.21.0",
         "matrix-widget-api": "^1.17.0",
