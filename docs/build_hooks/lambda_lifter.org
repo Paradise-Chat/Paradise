@@ -288,22 +288,70 @@ Have to avoid registering in the few files that do not need it.
 
 #+begin_src clojurescript :tangle ../../hooks/lambda_lifter.clj
 (defn process-file [file out-file]
-  (let [raw-code (slurp file)]
+  (let [raw-code (slurp file)
+        file-path (.getPath file)]
     (if (skip-file? raw-code)
-      (do (io/make-parents out-file) (spit out-file raw-code))
-      (let [{:keys [new-source registry]} (rewrite-lambdas raw-code)
-            registry-code (generate-registry-code registry)
-            lifted-code   (if (empty? registry) new-source (str new-source "\n\n" registry-code))
-            wrapped-text  (str "(do\n" lifted-code "\n)")
-            ast-form      (read-cljs wrapped-text)
-            instrumented  (instrument-host-file ast-form [])]
+      (do
         (io/make-parents out-file)
+        (spit out-file raw-code))
+
+      (let [{:keys [new-source registry]}
+            (try
+              (rewrite-lambdas raw-code)
+              (catch Throwable e
+                (throw
+                 (ex-info
+                  (str "lambda-lifter failed parsing/rewriting: " file-path)
+                  {:file file-path
+                   :stage :rewrite-lambdas}
+                  e))))
+
+            registry-code
+            (generate-registry-code registry)
+
+            lifted-code
+            (if (empty? registry)
+              new-source
+              (str new-source "\n\n" registry-code))
+
+            wrapped-text
+            (str "(do\n" lifted-code "\n)")
+
+            ast-form
+            (try
+              (read-cljs wrapped-text)
+              (catch Throwable e
+                (let [debug-file
+                      (io/file
+                       (str (.getPath out-file) ".lambda-lifter-error.cljs"))]
+                  (io/make-parents debug-file)
+                  (spit debug-file wrapped-text)
+
+                  (throw
+                   (ex-info
+                    (str "lambda-lifter generated invalid CLJS for: "
+                         file-path
+                         "\nGenerated source dumped to: "
+                         (.getPath debug-file))
+                    {:file file-path
+                     :output-file (.getPath out-file)
+                     :debug-file (.getPath debug-file)
+                     :stage :read-generated-source}
+                    e)))))
+
+            instrumented
+            (instrument-host-file ast-form [])]
+
+        (io/make-parents out-file)
+
         (with-open [w (io/writer out-file)]
           (binding [*out* w
                     *print-meta* true
                     pprint/*print-right-margin* 100]
             (doseq [form (rest instrumented)]
-              (pprint/write (clean-meta form) :dispatch pprint/code-dispatch)
+              (pprint/write
+               (clean-meta form)
+               :dispatch pprint/code-dispatch)
               (.write w "\n\n"))))))))
 #+end_src
 
