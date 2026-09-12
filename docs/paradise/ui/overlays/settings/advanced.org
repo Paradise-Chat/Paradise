@@ -1,0 +1,84 @@
+
+** Advanced Settings
+
+**** Preface
+
+This tab is for anything that doesn't neatly fit in the others.
+Primarily where plugin loading lives. Perhaps at a later point that can be
+pulled out of this tab and into its own. Until release though, it'll
+live here.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/advanced.cljs
+(ns paradise.ui.overlays.settings.advanced
+  (:require
+   [paradise.shared.plugins :as plugins]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]))
+#+end_src
+
+
+
+**** Tab
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/advanced.cljs
+(defn ^:ui advanced-preferences-view []
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        policy      @(re-frame/subscribe [:settings/media-preview-policy])
+        previews-on? (= policy :on)]
+    [:div.settings-section
+     [:h3.settings-subheading
+      (tr [:settings.advanced/prefs-subheading])]
+
+     [:div.settings-row.is-toggle
+      [:div.settings-row-text
+       [:div.settings-row-title
+        (tr [:settings.advanced/link-previews-title])]
+       [:div.settings-row-description
+        (tr [:settings.advanced/link-previews-description])]]
+      [:label.settings-toggle
+       [:input
+        {:type "checkbox"
+         :checked previews-on?
+         :on-change #(re-frame/dispatch
+                      [:settings/update-media-preview-policy
+                       (if (.. % -target -checked)
+                         :on
+                         :off)])}]
+       [:div.settings-toggle-track
+        [:div.settings-toggle-knob]]]]]))
+
+(defn ^:ui advanced-plugins-view []
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [:div.settings-section
+     [:p.settings-description
+      (tr [:settings.advanced/description])]
+     [plugins/plugins-installer]]))
+
+(defn ^:ui advanced-tab []
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    (r/with-let [!active-sub-tab (r/atom :preferences)]
+      [:div.settings-tab-content
+       [:div.settings-page-header
+        [:h2.settings-heading
+         (tr [:settings.advanced/title])]]
+
+       [:div.settings-subtabs
+        [:button.settings-subtab
+         {:class (when (= @!active-sub-tab :preferences)
+                   "is-active")
+          :on-click #(reset! !active-sub-tab :preferences)}
+         (tr [:settings.advanced/section-prefs])]
+
+        [:button.settings-subtab
+         {:class (when (= @!active-sub-tab :plugins)
+                   "is-active")
+          :on-click #(reset! !active-sub-tab :plugins)}
+         (tr [:settings.plugins/section-title])]]
+
+       (case @!active-sub-tab
+         :preferences [advanced-preferences-view]
+         :plugins [advanced-plugins-view])])))
+#+end_src
+
