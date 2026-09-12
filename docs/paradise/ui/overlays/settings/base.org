@@ -1,0 +1,988 @@
+
+** Settings Overlay Base
+
+**** Preface
+
+Initially one singular file until it grew a bit much. At this point, it is
+broken up into its tabs and the tabs are collected here.
+
+The settings account for much of the i18n contents as well.
+
+This is also where the registry for actual settings exist (so entries into
+storage for resuming between sessions).
+
+
+Now to answer why we would want to put these in the corner,
+there is actually a predictive model that describes human movement.
+en.wikipedia.org/wiki/Fitts's_law
+Not entirely important to read, but certainly interesting.
+
+
+
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
+(ns paradise.ui.overlays.settings.base
+  (:require
+   [re-frame.core :as re-frame]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.overlays.base :refer [modal-component]]
+   [paradise.shared.client.session-store :as store]
+   [paradise.ui.overlays.settings.localization :refer [language-time-tab]]
+   [paradise.ui.overlays.settings.profile :refer [my-account-tab]]
+   [paradise.ui.overlays.settings.notifications :refer [notifications-tab]]
+   [paradise.ui.overlays.settings.advanced :refer [advanced-tab]]
+   [paradise.ui.overlays.settings.accounts :refer [accounts-tab]]
+   [paradise.ui.overlays.settings.verification :refer [verification-tab]]
+   [paradise.ui.overlays.settings.about :refer [credits-tab about-tab]]
+   [paradise.ui.overlays.settings.voice-video :refer [voice-video-tab]]
+   ))
+#+end_src
+
+
+
+**** Base
+
+
+***** Registry
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
+(def settings-registry
+  {;; DB Key                  Hydration Event                       Default Value
+   "show_previews"         {:event :push/hydrate-previews-setting :default true      :stage  :login}
+   "theme"                 {:event :ui/hydrate-theme              :default :default  :stage  :boot}
+   "disabled_plugin_urls"  {:event :plugins/hydrate-disabled-urls :default []        :stage  :boot}
+   "plugin_urls"           {:event :plugins/hydrate-urls          :default []        :stage  :boot}
+   "space_hierarchies"    {:event :space/hydrate-hierarchies     :default {}        :stage  :login}
+   "call_audio_input"     {:event :settings/hydrate-audio-input  :default nil       :stage  :boot}
+   "call_video_input"     {:event :settings/hydrate-video-input  :default nil       :stage  :boot}
+   "call_audio_output"    {:event :settings/hydrate-audio-output :default nil       :stage  :boot}
+   "call_voice_threshold"
+   {:event   :settings/hydrate-voice-threshold
+    :default 0.12
+    :stage   :boot}
+   "call_noise_suppression"
+   {:event   :settings/hydrate-noise-suppression
+    :default true
+    :stage   :boot}})
+
+
+(re-frame/reg-event-fx
+ :settings/load
+ (fn [_ [_ idb-key hydrate-event default-val]]
+   (-> (store/get-setting idb-key)
+       (.then (fn [saved-val]
+                (let [final-val (if (nil? saved-val) default-val saved-val)]
+                  (re-frame/dispatch [hydrate-event final-val])))))
+   {}))
+
+
+(re-frame/reg-event-fx
+ :settings/save
+ (fn [_ [_ idb-key new-val]]
+   (store/set-setting! idb-key new-val)
+   {}))
+
+(re-frame/reg-event-fx
+ :app/load-settings-by-stage
+ (fn [_ [_ target-stage]]
+   (let [staged-settings (filter (fn [[_ config]]
+                                   (= (:stage config) target-stage))
+                                 settings-registry)]
+     {:fx (mapv (fn [[db-key config]]
+                  [:dispatch [:settings/load db-key (:event config) (:default config)]])
+                staged-settings)})))
+
+#+end_src
+
+
+***** UI Components
+
+
+****** Reframe
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
+(re-frame/reg-event-fx
+ :settings/open
+ (fn [{:keys [db]} [_ tab-id]]
+   {:db (cond-> db
+          tab-id (assoc :settings/active-tab tab-id))
+    :fx [[:dispatch [:ui/open-modal :settings
+                     {:backdrop-props {:class "settings-backdrop"}
+                      :window-props   {:class "settings-window"}}]]
+         [:dispatch [:settings/load-accounts]]]}))
+
+(re-frame/reg-event-db
+ :settings/set-tab
+ (fn [db [_ tab-id]]
+   (assoc db :settings/active-tab tab-id)))
+
+(re-frame/reg-sub
+ :settings/active-tab
+ (fn [db _]
+   (:settings/active-tab db :my-account)))
+#+end_src
+
+
+***** UI Sauce
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
+(defn ^:ui settings-sidebar [active-tab]
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [:div.settings-sidebar
+     [:div.settings-group-label (tr [:settings.groups/user-settings])]
+     (for [[id label-key] [[:my-account    :settings.tabs/my-account]
+                           [:verification  :settings.tabs/verification]
+                           [:accounts      :settings.tabs/accounts]
+                           [:notifications :settings.tabs/notifications]
+                           [:language-time :settings.tabs/language-time]]]
+       ^{:key id}
+       [:div.settings-tab
+        {:class (when (= active-tab id) "is-active")
+         :on-click #(re-frame/dispatch [:settings/set-tab id])}
+        (tr [label-key])])
+
+     [:div.settings-tab
+      {:class (when (= active-tab :voice-video) "is-active")
+       :on-click #(re-frame/dispatch [:settings/set-tab :voice-video])}
+      "Voice & Video"]
+
+     [:div.settings-group-label {:style {:margin-top "1rem"}}
+      (tr [:settings.groups/app])]
+
+     [:div.settings-tab
+      {:class (when (= active-tab :about) "is-active")
+       :on-click #(re-frame/dispatch [:settings/set-tab :about])}
+      (tr [:settings.tabs/about])]
+
+     [:div.settings-tab
+      {:class (when (= active-tab :credits) "is-active")
+       :on-click #(re-frame/dispatch [:settings/set-tab :credits])}
+      (tr [:settings.credits/title])]
+
+     [:div.settings-tab
+      {:class (when (= active-tab :advanced) "is-active")
+       :on-click #(re-frame/dispatch [:settings/set-tab :advanced])}
+      (tr [:settings.tabs/advanced])]]))
+
+
+(defn ^:ui settings-content [_props]
+  (let [tr         @(re-frame/subscribe [:i18n/tr])
+        active-tab @(re-frame/subscribe [:settings/active-tab])
+        profile    @(re-frame/subscribe [:sdk/profile])]
+    [:<>
+     [settings-sidebar active-tab]
+     [:div.settings-content
+      [:div.close-button
+       {:on-click #(re-frame/dispatch [:ui/close-modal])}
+       [:span [icons/exit]]
+       [:span.esc-text (tr [:settings.modal/esc])]]
+      (case active-tab
+        :my-account    [my-account-tab profile]
+        :verification  [verification-tab]
+        :accounts      [accounts-tab]
+
+        :notifications [notifications-tab]
+        :voice-video   [voice-video-tab]
+        :language-time [language-time-tab]
+        :about         [about-tab]
+        :credits       [credits-tab]
+        :advanced      [advanced-tab]
+        [:div {:style {:color "#fff"}} (tr [:settings.modal/not-found])])]]))
+
+(defmethod modal-component :settings [_]
+  settings-content)
+#+end_src
+
+
+**** CSS (Shared)
+
+
+
+#+begin_src css :tangle ../../../../../css/settings.css
+.settings-backdrop {
+  position: fixed;
+  inset: env(safe-area-inset-top, 0px) 0 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.settings-window {
+  width: 800px;
+  height: 600px;
+  display: flex;
+  overflow: hidden;
+  background: #313338;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.settings-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  padding: 20px 10px;
+  background: #2b2d31;
+}
+
+.settings-group-label {
+  padding: 0 10px 10px;
+  color: #949ba4;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settings-tab {
+  margin-bottom: 4px;
+  padding: 10px;
+  color: #b5bac1;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.settings-tab:hover {
+  color: #dbdee1;
+  background: #35373c;
+}
+
+.settings-tab.is-active {
+  color: #fff;
+  background: #404249;
+}
+
+.settings-content {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 40px;
+  overflow: hidden;
+}
+
+.close-button {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #949ba4;
+  font-size: 1.2em;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.close-button:hover {
+  color: #dbdee1;
+}
+
+.esc-text {
+  margin-top: 4px;
+  font-size: 0.5em;
+}
+
+.settings-tab-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 24px;
+  padding-right: 4px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.settings-page-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-heading {
+  margin: 0;
+  color: #f2f3f5;
+}
+
+.settings-subheading {
+  margin: 0;
+  color: #f2f3f5;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.settings-description {
+  margin: 0;
+  color: #b5bac1;
+  font-size: 0.9em;
+  line-height: 1.45;
+}
+
+.settings-section {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: auto;
+}
+
+.settings-section.is-fill {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-spacer {
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 400px;
+  gap: 8px;
+}
+
+.settings-label {
+  color: #b5bac1;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settings-input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  color: #dbdee1;
+  background: #1e1f22;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  outline: none;
+  box-sizing: border-box;
+  font-size: 16px;
+}
+
+.settings-input:focus {
+  border-color: #5865f2;
+}
+
+.settings-input.is-invalid {
+  border-color: #f23f42;
+}
+
+.settings-error {
+  margin-top: 4px;
+  color: #f23f42;
+  font-size: 12px;
+}
+
+.settings-button {
+  margin: 0;
+  padding: 9px 14px;
+  color: #fff;
+  background: #5865f2;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background-color 0.2s ease;
+}
+
+.settings-button:hover:not(:disabled) {
+  background: #4752c4;
+}
+
+.settings-button:disabled {
+  color: #949ba4;
+  background: #3f4147;
+  cursor: not-allowed;
+}
+
+.settings-button.is-busy:disabled {
+  color: #fff;
+  background: #5865f280;
+}
+
+.settings-button.destructive {
+  background: #8b0000;
+}
+
+.settings-button.destructive:hover:not(:disabled) {
+  background: #660000;
+}
+
+.settings-button.is-compact {
+  padding: 6px 12px;
+  font-size: 0.9em;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 16px;
+}
+
+.settings-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row-title {
+  color: #f2f3f5;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-row-description {
+  margin-top: 3px;
+  color: #949ba4;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-toggle {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  cursor: pointer;
+}
+
+.settings-toggle input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+.settings-toggle-track {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: #e5e5ea;
+  border-radius: 999px;
+  transition: background-color 0.2s ease;
+}
+
+.settings-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: left 0.2s ease;
+}
+
+.settings-toggle input:checked + .settings-toggle-track {
+  background: #34c759;
+}
+
+.settings-toggle input:checked + .settings-toggle-track .settings-toggle-knob {
+  left: 22px;
+}
+
+.settings-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #17181c;
+}
+
+.settings-banner.success {
+  border-color: #23a55a;
+}
+
+.settings-banner.warning {
+  align-items: flex-start;
+  border-color: rgba(255, 165, 0, 0.55);
+  background: rgba(255, 165, 0, 0.08);
+}
+
+.settings-banner-icon {
+  flex: 0 0 auto;
+  font-size: 24px;
+}
+
+.settings-banner-copy {
+  min-width: 0;
+}
+
+.settings-banner-title {
+  color: #dbdee1;
+  font-weight: 700;
+}
+
+.settings-banner.warning .settings-banner-title {
+  color: orange;
+}
+
+.settings-banner-description {
+  margin-top: 4px;
+  color: #949ba4;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.settings-loading,
+.settings-empty {
+  padding: 20px;
+  color: #949ba4;
+  text-align: center;
+}
+
+.settings-card {
+  padding: 20px;
+  background: #1e1f22;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+
+.settings-profile-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.settings-profile-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-profile-name {
+  color: #f2f3f5;
+  font-size: 1.2em;
+  font-weight: 700;
+}
+
+.settings-profile-id {
+  margin-top: 4px;
+  color: #b5bac1;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.settings-inline-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-inline-header h3 {
+  margin: 0;
+}
+
+.settings-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 2px 8px;
+  color: #fff;
+  background: var(--accent-color, #4a90e2);
+  border-radius: 999px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.settings-badge.success {
+  color: #28a745;
+  background: rgba(40, 167, 69, 0.12);
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-secondary, #2b2d31);
+  border: 1px solid var(--border, #404249);
+  border-radius: 8px;
+}
+
+.settings-list.is-scrollable {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, #404249);
+  transition: background-color 0.15s ease;
+}
+
+.settings-list-item:last-child {
+  border-bottom: none;
+}
+
+.settings-list-item.is-clickable {
+  cursor: pointer;
+}
+
+.settings-list-item.is-clickable:hover {
+  background: var(--bg-hover, #35373c);
+}
+
+.settings-list-item.is-active {
+  background: var(--bg-active-highlight, rgba(88, 101, 242, 0.12));
+}
+
+.settings-list-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-list-title {
+  color: #f2f3f5;
+  font-size: 0.95rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.settings-list-item.is-active .settings-list-title {
+  color: var(--primary, #5865f2);
+}
+
+.settings-list-description {
+  margin-top: 3px;
+  color: #949ba4;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.settings-list-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-subtabs {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #404249;
+}
+
+.settings-subtab {
+  padding: 6px 16px;
+  color: #b5bac1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.settings-subtab:hover {
+  color: #dcddde;
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.settings-subtab.is-active {
+  color: #fff;
+  background: #404249;
+}
+
+.settings-media-preview {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #0b0b0d;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+}
+
+.settings-media-preview-video {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+.settings-media-preview-video.is-active {
+  display: block;
+}
+
+.settings-media-preview-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #949ba4;
+  font-size: 13px;
+}
+
+.settings-meter {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 560px;
+  gap: 6px;
+}
+
+.settings-meter-bars {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 22px;
+  gap: 3px;
+}
+
+.settings-meter-segment {
+  flex: 1;
+  min-width: 3px;
+  max-height: 16px;
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 2px;
+  transition: background 70ms linear;
+}
+
+.settings-meter-segment.is-detected {
+  background: #23a55a;
+}
+
+.settings-meter-segment.is-below-threshold {
+  background: #f0b232;
+}
+
+.settings-meter-threshold {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transform: translateX(-1px);
+  z-index: 2;
+}
+
+.settings-meter-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.settings-meter-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #949ba4;
+  font-size: 11px;
+}
+
+.segmented-control {
+  display: flex;
+  margin-top: 0.5rem;
+  padding: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+
+.segmented-control button {
+  flex: 1;
+  padding: 0.5rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s ease;
+}
+
+.segmented-control button.active {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.sidebar-profile-mini {
+  position: absolute;
+  bottom: env(safe-area-inset-bottom, 16px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 0;
+  border-top: 1px solid #1e1f22;
+}
+
+.profile-trigger {
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.1s ease;
+}
+
+.profile-trigger:active {
+  transform: scale(0.92);
+}
+
+.profile-avatar,
+.avatar-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.status-dot {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 2;
+  width: 14px;
+  height: 14px;
+  background: #23a55a;
+  border: 3px solid #1e1f22;
+  border-radius: 50%;
+}
+
+.profile-popover {
+  position: absolute;
+  bottom: 20px;
+  left: 75px;
+  z-index: 1000;
+  width: 180px;
+  padding: 8px;
+  background: #111214;
+  border-radius: 8px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+}
+
+.popover-item {
+  padding: 8px;
+  color: #dbdee1;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.popover-item:hover {
+  color: #fff;
+  background: #35373c;
+}
+
+.popover-item.logout {
+  margin-top: 4px;
+  color: #f23f42;
+}
+
+.popover-item.logout:hover {
+  color: #fff;
+  background: #f23f42;
+}
+
+@media (max-width: 850px) {
+  .settings-window {
+    width: 100%;
+    height: 100%;
+    flex-direction: column;
+    border-radius: 0;
+  }
+
+  .settings-sidebar {
+    display: flex;
+    width: 100%;
+    height: auto;
+    padding: 10px;
+    overflow-x: auto;
+    white-space: nowrap;
+    border-bottom: 1px solid #1e1f22;
+    box-sizing: border-box;
+  }
+
+  .settings-group-label {
+    display: none;
+  }
+
+  .settings-tab {
+    display: inline-block;
+    margin-right: 8px;
+    margin-bottom: 0;
+    padding: 8px 15px;
+  }
+
+  .settings-content {
+    padding: 20px;
+    overflow: hidden;
+  }
+
+  .close-button {
+    top: 10px;
+    right: 15px;
+    z-index: 100;
+    font-size: 1.5em;
+  }
+
+  .esc-text {
+    display: none;
+  }
+
+  .settings-field,
+  .settings-meter,
+  .settings-media-preview {
+    max-width: none;
+  }
+
+  .settings-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-row.is-toggle {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .settings-profile-card {
+    flex-direction: column;
+    text-align: center;
+    gap: 12px;
+  }
+}
+#+end_src
+
