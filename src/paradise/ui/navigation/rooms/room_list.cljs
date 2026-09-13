@@ -329,7 +329,8 @@
                                      [:container/set-main-focus new-focus]
                                      (when focus-override [:container/set-side-panel focus-override])
                                      (when (and (= current-side-panel :timeline) (nil? side-panel-update)) [:container/set-side-panel nil])
-                                     (when is-call-room? [:call/init-widget room-id {:join-directly? join-directly?}])])]
+                                     ;;(when is-call-room? [:call/init-widget room-id {:join-directly? join-directly?}])
+                                     ])]
      {:db                 base-db
       :input/focus-composer (not mobile?)
       :dispatch-n         dispatches})))
