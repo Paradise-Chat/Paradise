@@ -48,6 +48,7 @@
         "@livekit/components-react": "^2.9.23",
         "@livekit/components-styles": "^1.2.0",
         "@tiptap/core": "^3.20.0",
+        "@tiptap/extension-link": "^3.31.3",
         "@tiptap/extension-mention": "^3.20.0",
         "@tiptap/extension-placeholder": "^3.20.0",
         "@tiptap/react": "^3.20.0",
