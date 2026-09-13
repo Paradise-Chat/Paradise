@@ -5,27 +5,33 @@
 
 (defn init! []
   (binding/register-handlers! :matrix
-    {"home-rooms-diff"       (fn [_ get-val] (re-frame/dispatch [:room-list/set-home-rooms-sync (get-val "rooms" :rooms)]))
-     "bg-rooms-diff"         (fn [_ get-val] (re-frame/dispatch [:room-list/set-bg-rooms-sync (get-val "rooms" :rooms)]))
-     "global-spaces-diff"    (fn [_ get-val] (re-frame/dispatch [:sdk/set-spaces-list-sync (get-val "spaces" :spaces)]))
-     "space-rooms-diff"      (fn [_ get-val] (re-frame/dispatch [:sdk/update-space-view (get-val "space-id" :space-id) (get-val "rooms" :rooms)]))
-     "room-parent-resolved"  (fn [_ get-val] (re-frame/dispatch [:rooms/apply-parent-resolution (get-val "room-id" :room-id) (get-val "first-parent-id" :first-parent-id)]))
-     "room-preview-resolved" (fn [_ get-val] (re-frame/dispatch [:rooms/set-preview (get-val "room-id" :room-id) (get-val "preview" :preview)]))
-     "timeline-ready"
-     (fn [_ get-val]
-       (let [source-str (get-val "source" :source)
-             room-id    (get-val "room-id" :room-id)
-             ast-nodes  (get-val "ast-nodes" :ast-nodes)
-             paths      (get-val "lambda-paths" :lambda-paths)]
-         (swap! state/!ast-handoff assoc room-id {:ast-nodes ast-nodes :paths paths})
-         (re-frame/dispatch [:timeline/process-virtualized-data room-id source-str])
-         (re-frame/dispatch [:app/worker-redraw-ping])))
+                              {"home-rooms-diff"       (fn [_ get-val] (re-frame/dispatch [:room-list/set-home-rooms-sync (get-val "rooms" :rooms)]))
+                               "bg-rooms-diff"         (fn [_ get-val] (re-frame/dispatch [:room-list/set-bg-rooms-sync (get-val "rooms" :rooms)]))
+                               "global-spaces-diff"    (fn [_ get-val] (re-frame/dispatch [:sdk/set-spaces-list-sync (get-val "spaces" :spaces)]))
+                               "space-rooms-diff"      (fn [_ get-val] (re-frame/dispatch [:sdk/update-space-view (get-val "space-id" :space-id) (get-val "rooms" :rooms)]))
+                               "room-parent-resolved"  (fn [_ get-val] (re-frame/dispatch [:rooms/apply-parent-resolution (get-val "room-id" :room-id) (get-val "first-parent-id" :first-parent-id)]))
+                               "room-preview-resolved" (fn [_ get-val] (re-frame/dispatch [:rooms/set-preview (get-val "room-id" :room-id) (get-val "preview" :preview)]))
+                               "timeline-ready"
+                               (fn [_ get-val]
+                                 (let [source-str (get-val "source" :source)
+                                       room-id    (get-val "room-id" :room-id)
+                                       ast-nodes  (get-val "ast-nodes" :ast-nodes)
+                                       paths      (get-val "lambda-paths" :lambda-paths)]
+                                   (swap! state/!ast-handoff assoc room-id {:ast-nodes ast-nodes :paths paths})
+                                   (re-frame/dispatch [:timeline/process-virtualized-data room-id source-str])
+                                   (re-frame/dispatch [:app/worker-redraw-ping])))
 
-     "widget-message"        (fn [_ get-val] (re-frame/dispatch [:call/recv-widget-message (get-val "data" :data)]))
-     "recovery-state-update" (fn [_ get-val] (re-frame/dispatch [:sdk/handle-recovery-stream (keyword (get-val "state" :state))]))
-     "timeline-loading"      (fn [_ get-val] (re-frame/dispatch [:timeline/set-loading (get-val "room-id" :room-id) (get-val "loading?" :loading?)]))
-     "typing-update"         (fn [_ get-val] (re-frame/dispatch [:sdk/update-typing-users (get-val "room-id" :room-id) (get-val "users" :users)]))
-     "pagination-status"     (fn [_ get-val] (re-frame/dispatch [:sdk/update-pagination-status (get-val "room-id" :room-id) (get-val "status" :status)]))
-     "media-preview-config"  (fn [_ get-val] (re-frame/dispatch [:settings/receive-media-preview-config (keyword (get-val "policy" :policy))]))
-     "pins-sync"             (fn [_ get-val] (re-frame/dispatch [:room/sync-pinned-ids (get-val "room-id" :room-id) (get-val "pinned-ids" :pinned-ids)]))
-     "pin-update"            (fn [_ get-val] (re-frame/dispatch [:room/update-pinned-event (get-val "room-id" :room-id) (get-val "event" :event)]))}))
+                               "widget-message"        (fn [_ get-val] (re-frame/dispatch [:call/recv-widget-message (get-val "data" :data)]))
+                               "recovery-state-update" (fn [_ get-val] (re-frame/dispatch [:sdk/handle-recovery-stream (keyword (get-val "state" :state))]))
+                               "timeline-loading"      (fn [_ get-val] (re-frame/dispatch [:timeline/set-loading (get-val "room-id" :room-id) (get-val "loading?" :loading?)]))
+                               "typing-update"         (fn [_ get-val] (re-frame/dispatch [:sdk/update-typing-users (get-val "room-id" :room-id) (get-val "users" :users)]))
+                               "pagination-status"     (fn [_ get-val] (re-frame/dispatch [:sdk/update-pagination-status (get-val "room-id" :room-id) (get-val "status" :status)]))
+                               "media-preview-config"  (fn [_ get-val] (re-frame/dispatch [:settings/receive-media-preview-config (keyword (get-val "policy" :policy))]))
+                               "pins-sync"             (fn [_ get-val] (re-frame/dispatch [:room/sync-pinned-ids (get-val "room-id" :room-id) (get-val "pinned-ids" :pinned-ids)]))
+                               "pin-update"            (fn [_ get-val] (re-frame/dispatch [:room/update-pinned-event (get-val "room-id" :room-id) (get-val "event" :event)]))
+                               "call-keys-update"      (fn [_ get-val]
+                                                         (re-frame/dispatch [:call/e2ee-key-received
+                                                                             {:participant-id (get-val "participant-id" :participant-id)
+                                                                              :key-index      (get-val "key-index" :key-index)
+                                                                              :key-array      (get-val "key-array" :key-array)}]))}))
+
