@@ -20,7 +20,7 @@ not (among many other indicators).
    [paradise.shared.client.state :as state]
    [paradise.shared.client.session-store :as store]
    [cljs.core.async :refer [go <!]]
-   [paradise.ui.overlays.settings :refer [sidebar-profile-mini]]
+   [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [paradise.shared.utils.svg :as icons]
    [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.global :refer [avatar]]))
