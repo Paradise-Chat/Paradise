@@ -25,7 +25,6 @@
    [paradise.ui.container.base]
    [paradise.ui.container.call.call-container]
    [paradise.ui.container.call.call-view]
-   [paradise.ui.container.call.core]
    [paradise.ui.container.call.events]
    [paradise.ui.container.members]
    [paradise.ui.container.pins]
@@ -49,7 +48,7 @@
    [paradise.ui.overlays.profiles]
    [paradise.ui.overlays.quick-switcher]
    [paradise.ui.overlays.reactions]
-   [paradise.ui.overlays.settings]
+   [paradise.ui.overlays.settings.base]
    [paradise.shared.utils.logger]
    [paradise.shared.utils.helpers]
    [paradise.media.component]
@@ -82,7 +81,6 @@
                      'plugin-debug paradise.shared.utils.logger/plugin-debug}
    'paradise.ui.auth.events (expose-ns paradise.ui.auth.events)
    'paradise.ui.container.base (expose-ns paradise.ui.container.base)
-   'paradise.ui.container.call.core (expose-ns paradise.ui.container.call.core)
    'paradise.ui.container.call.call-view (expose-ns paradise.ui.container.call.call-view)
    'paradise.ui.container.call.call-container (expose-ns paradise.ui.container.call.call-container)
    'paradise.ui.container.call.events (expose-ns paradise.ui.container.call.events)
@@ -108,7 +106,7 @@
    'paradise.ui.overlays.profiles (expose-ns paradise.ui.overlays.profiles)
    'paradise.ui.overlays.quick-switcher (expose-ns paradise.ui.overlays.quick-switcher)
    'paradise.ui.overlays.reactions (expose-ns paradise.ui.overlays.reactions)
-   'paradise.ui.overlays.settings (expose-ns paradise.ui.overlays.settings)
+   'paradise.ui.overlays.settings.base (expose-ns paradise.ui.overlays.settings.base)
    'paradise.shared.utils.macros    (expose-ns paradise.shared.utils.macros)
    'paradise.ui.global (expose-ns paradise.ui.global)
    'paradise.shared.utils.helpers   (expose-ns paradise.shared.utils.helpers)
