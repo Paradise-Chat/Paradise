@@ -1,0 +1,691 @@
+(ns paradise.ui.container.call.audio-processor
+  (:require
+   [shadow.esm :refer [dynamic-import]]
+   [promesa.core :as p]
+   [taoensso.timbre :as log]))
+
+(defonce !rnnoise-module
+  (atom nil))
+
+(defonce !rnnoise-module-promise
+  (atom nil))
+
+(defonce !registration-promises
+  (js/WeakMap.))
+
+
+(def ^:private rnnoise-worklet-url
+  "/rnnoise/rnnoise.worklet.js")
+
+(def ^:private rnnoise-wasm-url
+  "/rnnoise/rnnoise.wasm")
+
+
+(defn audio-worklet-supported? []
+  (and
+   (exists? js/AudioContext)
+   (exists? js/AudioWorkletNode)
+   (true? js/window.isSecureContext)))
+
+
+(defn- module-export
+  [module export-name]
+  (or
+   (aget module export-name)
+   (when-let [default
+              (.-default module)]
+     (aget default export-name))))
+
+
+(defn load-rnnoise! []
+  (cond
+    @!rnnoise-module
+    (p/resolved
+     @!rnnoise-module)
+
+    @!rnnoise-module-promise
+    @!rnnoise-module-promise
+
+    (not (audio-worklet-supported?))
+    (p/rejected
+     (js/Error.
+      (str
+       "RNNoise requires AudioWorklet support in a secure browser context. "
+       "secureContext="
+       js/window.isSecureContext
+       ", AudioWorkletNode="
+       (exists? js/AudioWorkletNode))))
+
+    :else
+    (let [promise
+          (-> (dynamic-import
+               "/rnnoise/rnnoise.mjs")
+
+              (p/then
+               (fn [module]
+                 (let [RNNoiseNode
+                       (module-export
+                        module
+                        "RNNoiseNode")
+
+                       load-assets
+                       (module-export
+                        module
+                        "rnnoise_loadAssets")]
+
+                   (when-not RNNoiseNode
+                     (throw
+                      (js/Error.
+                       (str
+                        "RNNoise module loaded, but RNNoiseNode was missing. "
+                        "Exports: "
+                        (js/Object.keys module)))))
+
+                   (when-not load-assets
+                     (throw
+                      (js/Error.
+                       (str
+                        "RNNoise module loaded, but rnnoise_loadAssets was missing. "
+                        "Exports: "
+                        (js/Object.keys module)))))
+
+                   (reset!
+                    !rnnoise-module
+                    module)
+
+                   module)))
+
+              (p/catch
+               (fn [err]
+                 (reset!
+                  !rnnoise-module-promise
+                  nil)
+
+                 (throw err))))]
+
+      (reset!
+       !rnnoise-module-promise
+       promise)
+
+      promise)))
+
+
+
+(defn- ensure-rnnoise-registered!
+  [audio-context]
+
+  (if-let [existing
+           (.get
+            !registration-promises
+            audio-context)]
+
+    existing
+
+    (let [registration
+          (-> (p/let [module
+                      (load-rnnoise!)
+
+                      RNNoiseNode
+                      (module-export
+                       module
+                       "RNNoiseNode")
+
+                      load-assets
+                      (module-export
+                       module
+                       "rnnoise_loadAssets")
+
+                      assets
+                      (load-assets
+                       #js {:scriptSrc
+                            rnnoise-worklet-url
+
+                            :moduleSrc
+                            rnnoise-wasm-url})
+
+                      _
+                      (.register
+                       RNNoiseNode
+                       audio-context
+                       assets)]
+
+                RNNoiseNode)
+
+              (p/catch
+               (fn [err]
+                 (.delete
+                  !registration-promises
+                  audio-context)
+
+                 (throw err))))]
+
+      (.set
+       !registration-promises
+       audio-context
+       registration)
+
+      registration)))
+
+(defn- clamp01 [x]
+  (max 0.0
+       (min 1.0
+            (or x 0.0))))
+
+
+(defn- calculate-rms
+  [analyser samples]
+  (.getFloatTimeDomainData
+   analyser
+   samples)
+
+  (let [n
+        (.-length samples)
+
+        sum
+        (loop [idx 0
+               total 0.0]
+
+          (if (< idx n)
+            (let [sample
+                  (aget samples idx)]
+
+              (recur
+               (inc idx)
+               (+ total
+                  (* sample sample))))
+
+            total))]
+
+    (if (pos? n)
+      (js/Math.sqrt
+       (/ sum n))
+
+      0.0)))
+
+
+(defn- ramp-gate!
+  [audio-context gate-node open?]
+  (let [param
+        (.-gain gate-node)
+
+        now
+        (.-currentTime audio-context)
+
+        target
+        (if open?
+          1.0
+          0.0)
+
+        duration
+        (if open?
+          0.008
+          0.035)]
+
+    (.cancelScheduledValues
+     param
+     now)
+
+    (.setValueAtTime
+     param
+     (.-value param)
+     now)
+
+    (.linearRampToValueAtTime
+     param
+     target
+     (+ now duration))))
+
+(defn create-processor
+  [{:keys [threshold
+           gate-enabled?
+           hangover-ms
+           on-level]
+
+    :or
+    {threshold     0.12
+     gate-enabled? true
+     hangover-ms   180}}]
+
+  (let [!threshold
+        (atom
+         (clamp01 threshold))
+
+        !gate-enabled?
+        (atom
+         (boolean gate-enabled?))
+
+        !audio-context
+        (atom nil)
+
+        !source
+        (atom nil)
+
+        !rnnoise
+        (atom nil)
+
+        !analyser
+        (atom nil)
+
+        !gate
+        (atom nil)
+
+        !destination
+        (atom nil)
+
+        !samples
+        (atom nil)
+
+        !raf-id
+        (atom nil)
+
+        !running?
+        (atom false)
+
+        !gate-open?
+        (atom false)
+
+        !last-active
+        (atom 0)
+
+        !level
+        (atom 0.0)
+
+        !rnnoise-enabled?
+        (atom true)
+
+        !raw-gain
+        (atom nil)
+
+        !rnnoise-gain
+        (atom nil)
+
+        processor
+        #js {}]
+
+    (letfn
+     [(stop-meter! []
+        (reset! !running? false)
+
+        (when-let [raf-id @!raf-id]
+          (js/cancelAnimationFrame
+           raf-id)
+
+          (reset! !raf-id nil)))
+
+      (destroy-graph! []
+        (stop-meter!)
+
+        (when-let [node @!rnnoise]
+          (try
+            (.update node false)
+
+            (catch :default err
+              (log/debug
+               err
+               "Failed to stop RNNoise worklet"))))
+
+        (doseq [node
+                [@!source
+                 @!rnnoise
+                 @!raw-gain
+                 @!rnnoise-gain
+                 @!analyser
+                 @!gate
+                 @!destination]]
+
+          (when node
+            (try
+              (.disconnect node)
+              (catch :default _))))
+
+        (when-let [processed
+                   (.-processedTrack processor)]
+
+          (try
+            (.stop processed)
+            (catch :default _)))
+
+        (reset! !audio-context nil)
+        (reset! !source nil)
+        (reset! !rnnoise nil)
+        (reset! !analyser nil)
+        (reset! !gate nil)
+        (reset! !destination nil)
+        (reset! !samples nil)
+        (reset! !gate-open? false)
+        (reset! !last-active 0)
+        (reset! !level 0.0)
+
+        (set!
+         (.-processedTrack processor)
+         nil))
+
+      (start-meter! []
+        (reset! !running? true)
+
+        (letfn
+         [(tick []
+            (when @!running?
+
+              (when-let [analyser @!analyser]
+                (when-let [samples @!samples]
+
+                  (let [level
+                        (clamp01
+                         (calculate-rms
+                          analyser
+                          samples))
+
+                        threshold
+                        @!threshold
+
+                        close-threshold
+                        (* threshold 0.75)
+
+                        now
+                        (js/performance.now)
+
+                        open?
+                        (cond
+
+                          (not @!gate-enabled?)
+                          true
+
+                          (>= level threshold)
+                          (do
+                            (reset! !last-active now)
+                            true)
+
+                          (and @!gate-open?
+                               (>= level
+                                   close-threshold))
+                          (do
+                            (reset! !last-active now)
+                            true)
+
+                          (and @!gate-open?
+                               (< (- now
+                                     @!last-active)
+                                  hangover-ms))
+                          true
+
+                          :else
+                          false)]
+
+                    (reset! !level level)
+
+                    (when (not=
+                           open?
+                           @!gate-open?)
+
+                      (reset!
+                       !gate-open?
+                       open?)
+
+                      (when (and
+                             @!audio-context
+                             @!gate)
+
+                        (ramp-gate!
+                         @!audio-context
+                         @!gate
+                         open?)))
+
+                    (when on-level
+                      (try
+                        (on-level
+                         level
+                         open?)
+
+                        (catch :default err
+                          (log/debug
+                           err
+                           "Audio processor level callback failed")))))))
+
+              (reset!
+               !raf-id
+               (js/requestAnimationFrame
+                tick))))]
+
+          (tick)))
+
+      (build! [opts]
+        (destroy-graph!)
+
+        (let [audio-context
+              (.-audioContext opts)
+
+              input-track
+              (.-track opts)]
+
+          (if-not
+           (and audio-context
+                input-track)
+
+            (p/rejected
+             (js/Error.
+              "LiveKit audio processor did not receive audioContext/track"))
+
+            (p/let
+             [RNNoiseNode
+              (ensure-rnnoise-registered!
+               audio-context)
+
+              _
+              (if (= "suspended"
+                     (.-state audio-context))
+
+                (.resume audio-context)
+
+                (p/resolved nil))]
+
+              (let [source
+                    (.createMediaStreamSource
+                     audio-context
+                     (js/MediaStream.
+                      #js [input-track]))
+
+                    rnnoise-node
+                    (new RNNoiseNode
+                         audio-context)
+
+                    analyser
+                    (.createAnalyser
+                     audio-context)
+
+                    gate
+                    (.createGain
+                     audio-context)
+
+                    destination
+                    (.createMediaStreamDestination
+                     audio-context)
+
+                    raw-gain
+                    (.createGain audio-context)
+
+                    rnnoise-gain
+                    (.createGain audio-context)
+
+                    mixer
+                    (.createGain audio-context)
+
+                    samples
+                    (js/Float32Array.
+                     1024)]
+
+                (set!
+                 (.-fftSize analyser)
+                 1024)
+
+                (set!
+                 (.-smoothingTimeConstant analyser)
+                 0.0)
+
+                (set!
+                 (.. gate -gain -value)
+                 (if @!gate-enabled?
+                   0.0
+                   1.0))
+
+                (set!
+                 (.. raw-gain -gain -value)
+                 (if @!rnnoise-enabled?
+                   0
+                   1))
+
+                (set!
+                 (.. rnnoise-gain -gain -value)
+                 (if @!rnnoise-enabled?
+                   1
+                   0))
+
+                (.connect source raw-gain)
+
+                (.connect source rnnoise-node)
+                (.connect rnnoise-node rnnoise-gain)
+
+                (.connect raw-gain mixer)
+                (.connect rnnoise-gain mixer)
+
+                (.connect mixer analyser)
+
+                (.connect
+                 analyser
+                 gate)
+
+                (.connect
+                 gate
+                 destination)
+
+                (reset!
+                 !audio-context
+                 audio-context)
+
+                (reset!
+                 !source
+                 source)
+
+                (reset!
+                 !rnnoise
+                 rnnoise-node)
+
+                (reset! !raw-gain raw-gain)
+
+                (reset! !rnnoise-gain rnnoise-gain)
+
+                (reset!
+                 !analyser
+                 analyser)
+
+                (reset!
+                 !gate
+                 gate)
+
+                (reset!
+                 !destination
+                 destination)
+
+                (reset!
+                 !samples
+                 samples)
+
+                (reset!
+                 !gate-open?
+                 (not @!gate-enabled?))
+
+                (set!
+                 (.-processedTrack processor)
+                 (aget
+                  (.getAudioTracks
+                   (.-stream destination))
+                  0))
+
+                (start-meter!)
+
+                (log/info
+                 "RNNoise audio processor initialized"
+                 {:sample-rate
+                  (.-sampleRate
+                   audio-context)})
+
+                nil)))))]
+
+
+      (aset processor
+            "setNoiseSuppressionEnabled"
+            (fn [enabled?]
+              (let [enabled?
+                    (boolean enabled?)]
+
+                (reset!
+                 !rnnoise-enabled?
+                 enabled?)
+
+                (when (and @!audio-context
+                           @!raw-gain
+                           @!rnnoise-gain)
+
+                  (let [now
+                        (.-currentTime
+                         @!audio-context)]
+
+                    (.setValueAtTime
+                     (.. @!raw-gain -gain)
+                     (if enabled? 0 1)
+                     now)
+
+                    (.setValueAtTime
+                     (.. @!rnnoise-gain -gain)
+                     (if enabled? 1 0)
+                     now)))
+
+                enabled?)))
+
+      (aset processor
+            "name"
+            "paradise-rnnoise")
+
+      (aset processor
+            "init"
+            (fn [opts]
+              (build! opts)))
+
+      (aset processor
+            "restart"
+            (fn [opts]
+              (build! opts)))
+
+      (aset processor
+            "destroy"
+            (fn []
+              (destroy-graph!)
+              (p/resolved nil)))
+
+      (aset processor
+            "setThreshold"
+            (fn [threshold]
+              (reset!
+               !threshold
+               (clamp01 threshold))))
+
+      (aset processor
+            "setGateEnabled"
+            (fn [enabled?]
+              (reset!
+               !gate-enabled?
+               (boolean enabled?))
+
+              nil))
+
+      (aset processor
+            "getLevel"
+            (fn []
+              @!level))
+
+      (aset processor
+            "isGateOpen"
+            (fn []
+              @!gate-open?))
+
+      processor)))
