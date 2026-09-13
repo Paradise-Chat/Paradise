@@ -12,7 +12,7 @@
    [paradise.shared.client.key-handler :refer [global-key-listener]]
    [paradise.ui.overlays.notifications :as notifications]
    [paradise.ui.overlays.messages]
-   [paradise.ui.overlays.settings]
+   [paradise.ui.overlays.settings.base]
    [paradise.ui.overlays.invites]
    [paradise.ui.overlays.creation]
    [paradise.ui.overlays.quick-switcher]
