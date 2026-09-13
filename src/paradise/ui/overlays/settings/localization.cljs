@@ -1,0 +1,32 @@
+(ns paradise.ui.overlays.settings.localization
+  (:require
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]))
+
+(defn ^:ui language-time-tab []
+  (let [tr     @(re-frame/subscribe [:i18n/tr])
+        locale @(re-frame/subscribe [:i18n/locale])]
+    [:div.settings-tab-content
+     [:div.settings-page-header
+      [:h2.settings-heading
+       (tr [:settings.language/title])]
+      [:p.settings-description
+       (tr [:settings.language/description])]]
+
+     [:div.settings-section
+      [:h3.settings-subheading
+       (tr [:settings.language/system-label])]
+
+      [:div.settings-list
+       (for [[id label native]
+             [[:en "English" "English"]
+              [:lorem "Lorem Ipsum" "Lorem Ipsum"]]]
+         ^{:key id}
+         [:div.settings-list-item.is-clickable
+          {:class (when (= locale id) "is-active")
+           :on-click #(re-frame/dispatch [:i18n/set-locale id])}
+          [:div.settings-list-main
+           [:div.settings-list-title native]
+           [:div.settings-list-description label]]
+          (when (= locale id)
+            [icons/check-circle-green])])]]]))
