@@ -3,15 +3,48 @@
             [clojure.edn :as edn]
             [clojure.string :as str]))
 
-(defn copy-wasm
+(defn copy-runtime-assets
   {:shadow.build/stage :flush}
-  [build-state & args]
-  (let [source (io/file "node_modules/ffi-bindings/src/generated-compat/wasm-bindgen/index_bg.wasm")
-        target (io/file "build/ffi-bindings/wasm-bindgen/index_bg.wasm")]
-    (when (.exists source)
-      (io/make-parents target)
-      (io/copy source target)
-      (println "--- WASM copied to public/js ---")))
+  [build-state & _args]
+
+  (let [assets
+        [["node_modules/ffi-bindings/src/generated-compat/wasm-bindgen/index_bg.wasm"
+          "build/ffi-bindings/wasm-bindgen/index_bg.wasm"]
+
+         ["node_modules/simple-rnnoise-wasm/dist/rnnoise.mjs"
+          "build/rnnoise/rnnoise.mjs"]
+
+         ["node_modules/simple-rnnoise-wasm/dist/rnnoise.mjs.map"
+          "build/rnnoise/rnnoise.mjs.map"]
+
+         ["node_modules/simple-rnnoise-wasm/dist/rnnoise.worklet.js"
+          "build/rnnoise/rnnoise.worklet.js"]
+
+         ["node_modules/simple-rnnoise-wasm/dist/rnnoise.worklet.js.map"
+          "build/rnnoise/rnnoise.worklet.js.map"]
+
+         ["node_modules/simple-rnnoise-wasm/dist/rnnoise.wasm"
+          "build/rnnoise/rnnoise.wasm"]]]
+
+    (doseq [[source-path target-path] assets]
+      (let [source (io/file source-path)
+            target (io/file target-path)]
+
+        (if (.exists source)
+          (do
+            (io/make-parents target)
+            (io/copy source target)
+            (println
+             "--- Copied runtime asset:"
+             source-path
+             "->"
+             target-path))
+
+          (when-not (.endsWith source-path ".map")
+            (println
+             "--- WARNING: runtime asset not found:"
+             source-path))))))
+
   build-state)
 
 (defn include-themes
