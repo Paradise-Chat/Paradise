@@ -345,7 +345,7 @@ call controls and some color styling.
 Now before we define the panel we may want to define media buttons...
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/entry.cljs
-(defui media-button [active? icon-on icon-off title on-click color-active color-inactive]
+(defn ^:ui media-button [active? icon-on icon-off title on-click color-active color-inactive]
   [:button.media-btn
    {:style {:background "transparent"
             :border "none"
@@ -364,7 +364,7 @@ Now before we define the panel we may want to define media buttons...
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/entry.cljs
-(defui active-call-panel []
+(defn ^:ui active-call-panel []
   (let [active-call-id  @(re-frame/subscribe [:call/active-room])
         audio-on?       @(re-frame/subscribe [:call/audio-enabled?])
         video-on?       @(re-frame/subscribe [:call/video-enabled?])
