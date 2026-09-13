@@ -8,10 +8,9 @@
    [cljs.core.async :refer [go <!]]
    [taoensso.timbre :as log]
    [paradise.shared.utils.svg :as icons]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.global :refer [avatar long-press-props]]))
 
-(defui media-button [active? icon-on icon-off title on-click color-active color-inactive]
+(defn ^:ui media-button [active? icon-on icon-off title on-click color-active color-inactive]
   [:button.media-btn
    {:style {:background "transparent"
             :border "none"
@@ -24,7 +23,7 @@
     :on-click on-click}
    (if active? icon-on icon-off)])
 
-(defui active-call-panel []
+(defn ^:ui active-call-panel []
   (let [active-call-id  @(re-frame/subscribe [:call/active-room])
         audio-on?       @(re-frame/subscribe [:call/audio-enabled?])
         video-on?       @(re-frame/subscribe [:call/video-enabled?])
