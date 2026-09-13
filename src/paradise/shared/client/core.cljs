@@ -20,7 +20,8 @@
    [taoensso.timbre :as log]))
 
 (defn init-worker! []
-  (when-not @state/!engine-pool
+  (go
+    (when-not @state/!engine-pool
     (reset! state/!engine-pool
             (main/create-pool 1 "engine.js"
                               {:worker-opts #js {:type "module"}
@@ -32,9 +33,10 @@
 
   (when-not @state/!virtualizer-pool
     (reset! state/!virtualizer-pool
-            (main/create-pool 1 "virtualizer.js"
+             (main/create-pool 1 "virtualizer.js"
                               {:worker-opts #js {:type "module"}
-                               :on-stream binding/handle-worker-stream!}))))
+                               :on-stream binding/handle-worker-stream!})
+            ))))
 
 (defn connect-main-to-pool! [pool pool-id]
   (let [chan (js/MessageChannel.)]
@@ -67,28 +69,35 @@
                          :transfer [:port]})))
 
 
-(defn bind-workers! [engine-pool media-pool virtualizer-pool]
-    (let [db-chan (js/MessageChannel.)]
-      (db/set-async-broadcaster! (fn [payload] (.postMessage (.-port1 db-chan) payload)))
-      (set! (.-onmessage (.-port1 db-chan)) (fn [e] (db/apply-remote-patch! (.-data e))))
-      (main/do-with-pool! virtualizer-pool
-                          {:handler :bind-app-db
-                           :arguments {:eve-payload {:mode :async
-                                                     :initial-state (db/get-encoded-state)}
-                                       :port (.-port2 db-chan)}
-                           :transfer [(.-port2 db-chan)]}))
+(defn bind-workers! [engine-pool media-pool virtualizer-pool app-db-payload]
+  (go
+    (let [db-chan  (js/MessageChannel.)
+          db-port1 (.-port1 db-chan)
+          db-port2 (.-port2 db-chan)]
+      (if (some? app-db-payload)
+        (main/do-with-pool! virtualizer-pool
+                            {:handler   :bind-app-db
+                             :arguments {:eve-payload app-db-payload}})
+        (do
+          (db/set-async-broadcaster! (fn [payload] (.postMessage db-port1 payload)))
+          (set! (.-onmessage db-port1) (fn [e] (db/apply-remote-patch! (.-data e))))
 
-  (connect-main-to-pool! engine-pool :engine-pool)
-  (connect-main-to-pool! media-pool :media-pool)
-  (connect-main-to-pool! virtualizer-pool :virtualizer-pool)
+          (main/do-with-pool! virtualizer-pool
+                              {:handler   :bind-app-db
+                               :arguments {:eve-payload {:mode :async
+                                                         :initial-state (db/get-encoded-state)}
+                                           :port        db-port2}
+                               :transfer  [:port]}))))
 
-  (connect-pools! engine-pool :engine-pool virtualizer-pool :virtualizer-pool)
-  (connect-pools! media-pool :media-pool virtualizer-pool :virtualizer-pool)
+    (connect-pools! engine-pool :engine-pool virtualizer-pool :virtualizer-pool)
+    (connect-pools! media-pool :media-pool virtualizer-pool :virtualizer-pool)
 
-  (connect-loopback! virtualizer-pool :virtualizer-pool :virtualizer-loopback)
-  (connect-loopback! engine-pool :engine-pool :engine-loopback))
+    (connect-main-to-pool! media-pool :media-pool)
+    (connect-main-to-pool! engine-pool :engine-pool)
+    (connect-main-to-pool! virtualizer-pool :virtualizer-pool)
 
-
+    (connect-loopback! virtualizer-pool :virtualizer-pool :virtualizer-loopback)
+    (connect-loopback! engine-pool :engine-pool :engine-loopback)))
 
 (re-frame/reg-event-fx
  :app/thread-boot
@@ -97,10 +106,18 @@
      (let [engine-pool      @state/!engine-pool
            media-pool       @state/!media-pool
            virtualizer-pool @state/!virtualizer-pool]
-       (bind-workers! engine-pool media-pool virtualizer-pool)
+       (bind-workers! engine-pool media-pool virtualizer-pool nil)
        )
    {}
    ))
+
+(defn boot-threads []
+  (go
+    (<! (init-worker!))
+    (let [engine-pool      @state/!engine-pool
+          media-pool       @state/!media-pool
+          virtualizer-pool @state/!virtualizer-pool]
+      (<! (bind-workers! engine-pool media-pool virtualizer-pool nil)))))
 
 (re-frame/reg-event-fx
  :app/bootstrap
@@ -173,9 +190,10 @@
          [:dispatch [:sdk/fetch-all-emotes]]]}))
 
 (defn ^:export init []
-  (binding/init-middleware!)
-  (init-worker!)
+  (go
+    (binding/init-middleware!)
+#_  (init-worker!)
+  (<! (boot-threads))
   (app/init)
   (logger/init!)
-  (log/debug  "Entering Paradise!")
-  )
+  (log/debug  "Entering Paradise!")))
