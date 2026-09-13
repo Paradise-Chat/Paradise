@@ -1,0 +1,270 @@
+
+** Call View
+
+**** Preface
+
+This hosts the main call container. It outlines the look and feel of the actual
+call interface. Even if at some point we move away from LiveKit as a base,
+this will be where that lives.
+
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
+(ns paradise.ui.container.call.call-view
+  (:require [reagent.core :as r]
+            [re-frame.core :as rf]
+            [promesa.core :as p]
+            ["react" :as react]
+            ["livekit-client" :as lkc]
+            ["@livekit/components-react" :as lk]
+            [paradise.ui.container.call.runtime :as rtc]
+            [paradise.ui.container.reusable :refer [room-header]]))
+#+end_src
+
+
+**** Code
+
+
+***** Defs
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
+
+(def GridLayout
+  (.-GridLayout lk))
+
+(def ControlBar
+  (.-ControlBar lk))
+
+(def ParticipantTile
+  (.-ParticipantTile lk))
+
+
+(def RoomContext
+  (.-RoomContext lk))
+
+
+(def track-sources
+  #js [#js {:source
+            (.-Camera (.-Source (.-Track lkc)))
+            :withPlaceholder true}
+
+       #js {:source
+            (.-ScreenShare (.-Source (.-Track lkc)))
+            :withPlaceholder false}])
+
+(defn- sync-local-media-state! [room]
+  (when-let [participant (.-localParticipant room)]
+    (rf/dispatch
+     [:call/update-media-state
+      {:audio
+       (boolean (.-isMicrophoneEnabled participant))
+       :video
+       (boolean (.-isCameraEnabled participant))
+       :screen-sharing
+       (boolean (.-isScreenShareEnabled participant))}])))
+
+#+end_src
+
+
+***** Component
+
+
+****** CSS
+
+
+#+begin_src css :tangle ../../../../../css/call.css
+.call-grid-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #0d0d0f;
+  padding: 24px;
+  position: relative;
+}
+
+.call-grid-layout-wrapper {
+  flex: 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #161619;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+.call-grid-layout {
+  height: 100%;
+  width: 100%;
+}
+
+.call-control-bar-wrapper {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(30, 30, 34, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 8px 16px;
+  border-radius: 100px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+.call-grid-loading {
+  color: #888;
+  padding: 2rem;
+  text-align: center;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.call-view-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #111;
+}
+
+.call-video-area {
+  flex: 1;
+  position: relative;
+}
+
+.call-token-negotiation {
+  color: white;
+  padding: 2rem;
+  text-align: center;
+}
+
+.call-idle-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.call-idle-text {
+  color: white;
+  margin-bottom: 20px;
+  font-size: 1.2rem;
+}
+
+.call-start-button {
+  padding: 12px 24px;
+  background-color: #1f8cf9;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+#+end_src
+
+
+
+***** Functions
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
+(defn custom-call-stage []
+  (let [room ((.-useMaybeRoomContext lk))]
+    (react/useEffect
+     (fn []
+       (when room
+         (rtc/set-room! room)
+         (sync-local-media-state! room)
+         (let [room-events             (.-RoomEvent lkc)
+               track-muted             (.-TrackMuted room-events)
+               track-unmuted           (.-TrackUnmuted room-events)
+               local-track-published   (.-LocalTrackPublished room-events)
+               local-track-unpublished (.-LocalTrackUnpublished room-events)
+               sync-handler            (fn [& _] (sync-local-media-state! room))]
+
+           (.on room track-muted sync-handler)
+           (.on room track-unmuted sync-handler)
+           (.on room local-track-published sync-handler)
+           (.on room local-track-unpublished sync-handler)
+
+           (-> (p/let [_ (rtc/set-e2ee-enabled! true)]
+                 (js/console.log "[CRYPTO] LiveKit E2EE enabled"))
+               (p/catch (fn [err]
+                          (js/console.error "[CRYPTO] Failed enabling LiveKit E2EE" err))))
+
+           (fn []
+             (.off room track-muted sync-handler)
+             (.off room track-unmuted sync-handler)
+             (.off room local-track-published sync-handler)
+             (.off room local-track-unpublished sync-handler)
+             (when (= room (rtc/current-room))
+               (rtc/clear-room!))))))
+     #js [room])
+    nil))
+
+
+(defn active-call-grid-inner []
+  (let [tracks ((.-useTracks lk) track-sources)]
+    [:div.call-grid-container
+     [:div.call-grid-layout-wrapper
+      [:> GridLayout {:tracks tracks :className "call-grid-layout"}
+       [:> ParticipantTile]]]
+
+     [:div.call-control-bar-wrapper
+      [:> ControlBar {:variation "minimal"
+                      :controls {:microphone true
+                                 :camera true
+                                 :screenShare true
+                                 :leave true}}]]]))
+
+
+(defn active-call-grid []
+  (let [[room set-room!] (react/useState @rtc/!room)
+        tr               @(rf/subscribe [:i18n/tr])]
+    (react/useEffect
+     (fn []
+       (let [watch-id (keyword (gensym "room-sync"))]
+         (add-watch rtc/!room watch-id
+                    (fn [_ _ _ new-room]
+                      (set-room! new-room)))
+         (set-room! @rtc/!room)
+         (fn []
+           (remove-watch rtc/!room watch-id))))
+     #js [])
+
+    (if room
+      [:> (.-Provider RoomContext) {:value room}
+       [:f> active-call-grid-inner]]
+      [:div.call-grid-loading
+       (tr [:container.call/bridging-context])])))
+
+
+(defn ^:ui call-view [room-id]
+  (let [call-state   @(rf/subscribe [:call/state])
+        room-meta    @(rf/subscribe [:rooms/active-metadata])
+        tr           @(rf/subscribe [:i18n/tr])
+        display-name (or (:name room-meta) room-id)
+        status       (:status call-state)]
+
+    [:div.call-view-host
+     [room-header {:display-name display-name :active-id room-id :compact? false}]
+
+     [:div.call-video-area
+      (cond
+        (= status :requesting-token)
+        [:div.call-token-negotiation
+         (tr [:container.call/negotiating-token])]
+
+        (= status :connected)
+        [:f> active-call-grid]
+
+        :else
+        [:div.call-idle-container
+         [:div.call-idle-text (tr [:call/idle])]
+         [:button.call-start-button
+          {:on-click (fn [_]
+                       (rf/dispatch [:call/init-widget room-id])
+                       (js/setTimeout #(rf/dispatch [:call/start room-id]) 500))}
+          (tr [:container.call/start-join])]])]]))
+#+end_src
