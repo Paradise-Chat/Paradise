@@ -24,7 +24,6 @@
    [paradise.shared.utils.logger]
    [paradise.ui.auth.events]
    [paradise.ui.container.base]
-   [paradise.ui.container.call.core]
    [paradise.ui.container.call.call-view]
    [paradise.ui.container.call.call-container]
    [paradise.ui.container.call.events]
@@ -50,7 +49,7 @@
    [paradise.ui.overlays.profiles]
    [paradise.ui.overlays.quick-switcher]
    [paradise.ui.overlays.reactions]
-   [paradise.ui.overlays.settings]
+   [paradise.ui.overlays.settings.base]
    [paradise.ui.global]
    [paradise.shared.utils.helpers]
    [paradise.media.component]
@@ -102,7 +101,6 @@
    'paradise.ui.container.base (expose-ns paradise.ui.container.base)
    'paradise.ui.container.call.call-container (expose-ns paradise.ui.container.call.call-container)
    'paradise.ui.container.call.call-view (expose-ns paradise.ui.container.call.call-view)
-   'paradise.ui.container.call.core (expose-ns paradise.ui.container.call.core)
    'paradise.ui.container.call.events (expose-ns paradise.ui.container.call.events)
    'paradise.ui.container.members (expose-ns paradise.ui.container.members)
    'paradise.ui.container.pins (expose-ns paradise.ui.container.pins)
@@ -127,7 +125,7 @@
    'paradise.ui.overlays.profiles (expose-ns paradise.ui.overlays.profiles)
    'paradise.ui.overlays.quick-switcher (expose-ns paradise.ui.overlays.quick-switcher)
    'paradise.ui.overlays.reactions (expose-ns paradise.ui.overlays.reactions)
-   'paradise.ui.overlays.settings (expose-ns paradise.ui.overlays.settings)})
+   'paradise.ui.overlays.settings.base (expose-ns paradise.ui.overlays.settings.base)})
 
 (def virtualizer-context
   (factory/build-context
