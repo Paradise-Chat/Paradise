@@ -1,0 +1,53 @@
+
+** Call Container
+
+**** Preface
+
+This just provides the container for the calls. Originally designed to house
+iframes it has massively simplified but still serves the same purpose.
+To enable the user to navigate away from the call without disconnecting
+the call.
+
+
+**** Import
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
+(ns paradise.ui.container.call.call-container
+  (:require [reagent.core :as r]
+            [re-frame.core :as rf]
+            ["@livekit/components-react" :as lk]
+            [paradise.ui.container.call.runtime :as rtc]
+            [paradise.ui.container.call.call-view :refer [custom-call-stage]]))
+#+end_src
+
+
+
+
+**** Code
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
+(defn persistent-call-container [children]
+  (let [call-state @(rf/subscribe [:call/state])
+        deafened?  @(rf/subscribe [:call/deafened?])
+        {:keys [status livekit-token livekit-url]} call-state]
+    [:div.persistent-call-host
+     {:style {:width "100%" :height "100%"}}
+
+     (if (and livekit-url livekit-token)
+       [:> (.-LiveKitRoom lk)
+        {:video false
+         :audio false
+         :token livekit-token
+         :serverUrl livekit-url
+         :options (rtc/get-lk-options)
+         :onError (fn [err] (js/console.error "LIVEKIT ERROR:" err))
+         :onDisconnected (fn [reason] (rf/dispatch [:call/livekit-disconnected reason]))}
+
+        [:> custom-call-stage]
+        [:> (.-RoomAudioRenderer lk) {:muted deafened?}]
+        children]
+       children)]))
+#+end_src
+
+
