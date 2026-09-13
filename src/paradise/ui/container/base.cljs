@@ -2,7 +2,6 @@
   (:require
    [re-frame.core :as re-frame]
    [paradise.ui.container.call.events]
-   [paradise.ui.container.call.core]
    [paradise.ui.container.call.call-view :refer [call-view]]
    [paradise.ui.container.timeline.base :refer [timeline]]
    [paradise.ui.container.members :refer [member-list]]
