@@ -12,9 +12,12 @@
     :threads "Threads"
     :search  "Search"
     :pins    "Pins"}
+   :call
+   {:negotiating-token "Negotiating secure connection..."
+    :bridging-context "Bridging room context..."
+    :start-join "Start / Join Call"}
    :timeline
-   {
-    :item
+   {:item
     {:react "Add Reaction"
      :reply "Reply"
      :edit-message "Edit Message"
@@ -137,16 +140,14 @@
     :mode-sticker "Sticker"}
    :suggestions
    {:no-results "No matches found"}}
-  :invites {
-     :loading "Loading..."
-     :empty-users "No users found."
-     :empty-rooms "No spaces or rooms found."
-     :add-by-alias-rooms "Add room/space by ID/Alias"
-     :space "Space"
-     :room "Room"
-     :placeholder-users "Search or enter Matrix ID..."
-     :placeholder-rooms "Search for a Space or Room..."
-   }
+  :invites {:loading "Loading..."
+            :empty-users "No users found."
+            :empty-rooms "No spaces or rooms found."
+            :add-by-alias-rooms "Add room/space by ID/Alias"
+            :space "Space"
+            :room "Room"
+            :placeholder-users "Search or enter Matrix ID..."
+            :placeholder-rooms "Search for a Space or Room..."}
   :navigation
   {:actions
    {:mark-read "Mark as Read"
@@ -182,8 +183,7 @@
   :quick-switcher
   {:placeholder "Jump to a room..."
    :empty "No rooms found."
-   :loading "Loading..."
-   }
+   :loading "Loading..."}
   :lightbox
   {:open-original "Open Original"
    :download "Download"
@@ -199,8 +199,7 @@
           :notifications "Notifications"
           :language-time "Language/Time"
           :about "About"
-          :advanced "Advanced"
-          }
+          :advanced "Advanced"}
    :groups {:user-settings "User Settings"
             :app "App"}
    :modal {:esc "ESC"
@@ -220,18 +219,14 @@
              "All early supporters. Shiro and Dark Wizard. My wife, Claudea.
 The Guix project for inspiration. Similarly, Clojure. Emacs for showing that
 code can be truly modular and that the user should own and control their
-environment."
-             }
-   :advanced {
-              :description  "Install custom modifications. Proceed with caution."
+environment."}
+   :advanced {:description  "Install custom modifications. Proceed with caution."
               :title "Plugins & Themes"
               :section-prefs "Preferences"
               :link-previews-description  "Automatically fetch and display rich previews for URLs in chat messages."
               :link-previews-title  "Link Previews"
-              :prefs-subheading "Chat Preferences"
-              }
-   :plugins {
-             :section-title "Plugins & Themes"
+              :prefs-subheading "Chat Preferences"}
+   :plugins {:section-title "Plugins & Themes"
              :security-title "Security Warning"
              :plugin-request "The plugin %1 is requesting to load external JavaScript from the internet."
              :warning-message "Only allow this if you absolutely trust the developer. Malicious scripts can compromise your session."
@@ -249,8 +244,7 @@ environment."
              :active-plugins "Active Plugins"
              :unknown-plugin "Unknown Plugin"
              :no-description "No description provided"
-             :uninstall-plugin "Uninstall Plugin"
-             }
+             :uninstall-plugin "Uninstall Plugin"}
 
    :verification
    {:title "Device Verification"
@@ -292,19 +286,15 @@ environment."
    {:title "Push Notifications"
     :description "Enable push notifications to receive alerts for new messages and mentions even when the app is in the background."
     :status {:active-title "Notifications Active"
-             :active-subtitle "You are receiving push alerts on this device."
-             }
-    :warning {
-              :another-active "Push routed to another account"
+             :active-subtitle "You are receiving push alerts on this device."}
+    :warning {:another-active "Push routed to another account"
               :swap-active "Notifications are currently active for %1. Activating them here will disable them for the other account."
-              :confirm-swap "Swap Notifications to This Account"
-              }
+              :confirm-swap "Swap Notifications to This Account"}
     :enable-btn "Enable Push Notifications"
     :disable-btn "Disable Push Notifications"
     :clear-btn "Clear All Pushers Everywhere"
     :show-previews "Show Previews"
-    :show-previews-description "Display message content within the notifications."
-    }
+    :show-previews-description "Display message content within the notifications."}
    :profile
    {:title "My Account"
     :unknown-user "Unknown User"}}}
@@ -446,6 +436,7 @@ environment."
           :accounts "Ducimus"
           :notifications "Blanditiis"
           :language-time "Praesentium"
+          :voice-video "Vox & Imago"
           :about "Voluptatum"}
    :groups {:user-settings "Deleniti atque"
             :app "Corrupti"}
@@ -497,7 +488,3 @@ environment."
    :profile
    {:title "Minima veniam"
     :unknown-user "Quis nostrum"}}}}
- }
-
-
-
