@@ -246,6 +246,37 @@ environment."}
              :no-description "No description provided"
              :uninstall-plugin "Uninstall Plugin"}
 
+   :voice-video
+   {:title "Voice & Video"
+    :description "Choose the devices Paradise uses for calls and test them before joining."
+    :devices {:default "Default"
+              :input-label "Input Device"
+              :video-label "Video Device"
+              :output-label "Output Device"
+              :microphone "Microphone"
+              :camera "Camera"
+              :output "Output"}
+    :microphone {:title "Microphone"
+                 :description "Select your input device and tune when Paradise considers you to be speaking."
+                 :sensitivity-title "Input Sensitivity"
+                 :sensitivity-description "Test your microphone and drag the marker to adjust the activation threshold."
+                 :threshold-aria "Microphone activation threshold"
+                 :voice-detected "Voice detected"
+                 :below-threshold "Below threshold"
+                 :activation-threshold "Activation threshold"
+                 :test "Mic Test"
+                 :stop-test "Stop Test"
+                 :noise-suppression-title "Noise Suppression"
+                 :noise-suppression-description "Reduce steady background noise with RNNoise before audio is sent to the call."}
+    :camera {:title "Camera"
+             :description "Preview your camera without joining or publishing it to a call."
+             :preview "Preview Video"
+             :stop-preview "Stop Preview"
+             :preview-off "Camera preview is off"}
+    :output {:title "Output"
+             :description "Choose where call audio should play."
+             :browser-support "Output selection is available when supported by your browser."}
+    :error {:title "Media device error"}}
    :verification
    {:title "Device Verification"
     :description "Enter your Security Key or Recovery Passphrase to verify this session and unlock encrypted messages."
@@ -446,6 +477,37 @@ environment."}
    {:set-status "Quas molestias"
     :copy-id "Excepturi sint"
     :logout "Occaecati"}
+   :voice-video
+   {:title "Vox & Imago"
+    :description "Elige machinas ad colloquia et experire eas antequam coniungas."
+    :devices {:default "Praedefinitum"
+              :input-label "Machina Vocis"
+              :video-label "Machina Imaginis"
+              :output-label "Machina Sonitus"
+              :microphone "Microphonum"
+              :camera "Camera"
+              :output "Sonitus"}
+    :microphone {:title "Microphonum"
+                 :description "Elige fontem vocis et compone limen quo Paradise te loqui putat."
+                 :sensitivity-title "Sensibilitas Vocis"
+                 :sensitivity-description "Experire microphonum et move signum ad limen activationis mutandum."
+                 :threshold-aria "Limen activationis microphoni"
+                 :voice-detected "Vox detecta"
+                 :below-threshold "Infra limen"
+                 :activation-threshold "Limen activationis"
+                 :test "Experire Microphonum"
+                 :stop-test "Siste Experimentum"
+                 :noise-suppression-title "Suppressio Strepitus"
+                 :noise-suppression-description "Minuit strepitum constantem per RNNoise antequam sonitus ad colloquium mittatur."}
+    :camera {:title "Camera"
+             :description "Praevisa cameram sine publicatione ad colloquium."
+             :preview "Praevisa Imaginem"
+             :stop-preview "Siste Praevisionem"
+             :preview-off "Praevisio camerae clausa est"}
+    :output {:title "Sonitus"
+             :description "Elige ubi sonitus colloquii audiatur."
+             :browser-support "Electio sonitus praesto est cum navigatrum eam sustinet."}
+    :error {:title "Error machinae mediae"}}
    :verification
    {:title "Cupiditate non"
     :description "Provident similique sunt in culpa qui officia deserunt mollitia animi id est laborum et dolorum."
