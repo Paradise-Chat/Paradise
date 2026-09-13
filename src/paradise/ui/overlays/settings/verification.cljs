@@ -1,0 +1,129 @@
+(ns paradise.ui.overlays.settings.verification
+  (:require
+   [cljs.core.async :refer [<! go]]
+   [cljs-workers.mesh :as mesh]
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
+
+(re-frame/reg-event-fx
+ :sdk/submit-verification
+ (fn [{:keys [db]} [_ recovery-key]]
+   (let [user-id (:active-user-id db)]
+     (go
+       (let [res (<! (mesh/do-with-thread!
+                      :engine-pool
+                      {:handler :recover-session
+                       :arguments {:recovery-key recovery-key}}))]
+         (if (= (:status res) "success")
+           (do
+             (log/info "Session successfully verified and recovered!")
+             (re-frame/dispatch [:push/verify-shadow user-id recovery-key])
+             (re-frame/dispatch [:sdk/verification-success]))
+           (do
+             (log/error "Verification failed:" (:msg res))
+             (re-frame/dispatch [:sdk/verification-error (:msg res)])))))
+     {:db (assoc db
+                 :verification/status :verifying
+                 :verification/error nil)})))
+
+(re-frame/reg-event-db
+ :sdk/verification-success
+ (fn [db _]
+   (assoc db
+          :verification/status :verified
+          :verification/error nil)))
+
+(re-frame/reg-event-db
+ :sdk/verification-error
+ (fn [db [_ err-msg]]
+   (assoc db
+          :verification/status :error
+          :verification/error err-msg)))
+
+(re-frame/reg-sub
+ :verification/status
+ (fn [db _]
+   (:verification/status db :unverified)))
+
+(re-frame/reg-sub
+ :verification/error
+ (fn [db _]
+   (:verification/error db)))
+
+
+(re-frame/reg-event-db
+ :sdk/handle-recovery-stream
+ (fn [db [_ state-kw]]
+   (assoc db
+          :verification/status state-kw
+          :verification/error nil)))
+
+(defn ^:ui verification-tab []
+  (r/with-let [!passphrase (r/atom "")]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          status        @(re-frame/subscribe [:verification/status])
+          error         @(re-frame/subscribe [:verification/error])
+          is-verifying? (= status :verifying)
+          is-empty?     (empty? @!passphrase)]
+      [:div.settings-tab-content
+       [:div.settings-page-header
+        [:h2.settings-heading
+         (tr [:settings.verification/title])]
+        (when (or (= status :incomplete)
+                  (= status :verifying)
+                  (= status :error))
+          [:p.settings-description
+           (tr [:settings.verification/description])])]
+
+       (cond
+         (= status :enabled)
+         [:div.settings-banner.success
+          [:div.settings-banner-icon
+           [icons/check-circle-green]]
+          [:div.settings-banner-copy
+           [:div.settings-banner-title
+            (tr [:settings.verification.status/success-title])]
+           [:div.settings-banner-description
+            (tr [:settings.verification.status/success-subtitle])]]]
+
+         (or (= status :incomplete)
+             (= status :verifying)
+             (= status :error))
+         [:div.settings-section
+          [:div.settings-field
+           [:label.settings-label
+            (tr [:settings.verification.form/label])]
+           [:input.settings-input
+            {:class (when error "is-invalid")
+             :type "password"
+             :value @!passphrase
+             :on-change #(reset! !passphrase (.. % -target -value))
+             :disabled is-verifying?
+             :placeholder (tr [:settings.verification.form/placeholder])}]
+           (when error
+             [:div.settings-error
+              (str
+               (tr [:settings.verification.form/error-prefix])
+               error)])
+           [:button.settings-button
+            {:class (when is-verifying? "is-busy")
+             :on-click #(re-frame/dispatch
+                         [:sdk/submit-verification @!passphrase])
+             :disabled (or is-empty? is-verifying?)}
+            (if is-verifying?
+              (tr [:settings.verification.status/is-verifying])
+              (tr [:settings.verification.status/verify-action]))]]]
+
+         (= status :disabled)
+         [:div.settings-banner.warning
+          [:div.settings-banner-copy
+           [:div.settings-banner-title
+            (tr [:settings.verification.status/warning-title])]
+           [:div.settings-banner-description
+            (tr [:settings.verification.status/warning-subtitle])]]]
+
+         :else
+         [:div.settings-loading
+          (tr [:settings.verification.status/checking])])])))
