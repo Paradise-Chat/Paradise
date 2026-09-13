@@ -14,6 +14,7 @@
         "me": "concurrently \"npx shadow-cljs watch app\" \"npx nbb tangler.cljs\" \"npx vite\"",
         "release": "npx shadow-cljs release app && npx vite build",
         "serve": "npx serve -s dist -l 8000",
+        "prep": "clojure -X:deps prep",
         "ubrn:web:build:release": "PATH=$HOME/.cargo/bin:/bin:$PATH && ubrn build web --config ubrn.config.yaml --release",
         "ubrn:web:build": "PATH=$HOME/.cargo/bin:/bin:$PATH && ubrn build web --config ubrn.config.yaml",
         "ubrn:checkout": "PATH=$HOME/.cargo/bin:/bin:$PATH && ubrn checkout --config ubrn.config.yaml",
