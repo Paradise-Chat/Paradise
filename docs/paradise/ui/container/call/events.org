@@ -58,15 +58,6 @@ Most of the call re-frame events and subscriptions are listed here
 
 
 
-(rf/reg-event-fx
- :call/e2ee-key-received
- (fn [{:keys [db]} [_ {:keys [participant-id key-index key-array room-id]}]]
-
-   (rtc/inject-key! participant-id key-index key-array)
-
-   {:db (assoc-in db [:call :e2ee-keys participant-id key-index] key-array)}))
-
-
 
 (rf/reg-event-fx
  :call/init-widget
