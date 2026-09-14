@@ -25,6 +25,9 @@ the call.
 
 **** Code
 
+To note, initially we just juggled two iframes that way we could allow Element Call to handle
+the lobby behavior. However, given we have full control over the UI now we can easily create
+that experience with just a single top level container.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defn persistent-call-container [children]
