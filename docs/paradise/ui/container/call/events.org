@@ -392,30 +392,19 @@ Most of the call re-frame events and subscriptions are listed here
 (rf/reg-event-fx
  :call/hangup
  (fn [{:keys [db]} [_ opts]]
-   (let [opts
-         (or opts {})
+   (let [opts         (or opts {})
+         room-id      (or (:room-id opts)
+                          (get-in db [:call :active-room-id]))
+         skip-native? (get opts :skip-native? false)]
 
-         room-id
-         (or (:room-id opts)
-             (get-in
-              db
-              [:call :active-room-id]))
-
-         skip-native?
-         (get opts :skip-native? false)]
-
-     (when (and room-id
-                (not skip-native?))
+     (when (and room-id (not skip-native?))
        (native/end-call! room-id))
 
-     {:db
-      (assoc-in
-       db
-       [:call :disconnecting?]
-       true)
+       (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
+                                 :arguments {:room-id room-id}})
 
-      :livekit/disconnect
-      true})))
+     {:livekit/disconnect true})))
+
 
 
 (rf/reg-event-fx
