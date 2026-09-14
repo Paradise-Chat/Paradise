@@ -410,27 +410,23 @@ Most of the call re-frame events and subscriptions are listed here
 (rf/reg-event-fx
  :call/livekit-disconnected
  (fn [{:keys [db]} [_ reason]]
-   (let [room-id
-         (get-in
-          db
-          [:call :active-room-id])
+   (let [room-id        (get-in db [:call :active-room-id])
+         disconnecting? (get-in db [:call :disconnecting?] false)]
 
-         disconnecting?
-         (get-in
-          db
-          [:call :disconnecting?]
-          false)]
+     (log/info "LiveKit disconnected:" reason)
+     (when (and room-id (not disconnecting?))
+       (native/end-call! room-id)
+         (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
+                                             :arguments {:room-id room-id}}))
 
-     (log/info
-      "LiveKit disconnected:"
-      reason)
-
-     (when (and room-id
-                (not disconnecting?))
-       (native/end-call! room-id))
-
-     {:dispatch
-      [:call/teardown]})))
+     {:db       (-> db
+                    (assoc-in [:call :active-room-id] nil)
+                    (assoc-in [:call :is-active?] false)
+                    (assoc-in [:call :livekit-url] nil)
+                    (assoc-in [:call :livekit-token] nil)
+                    (assoc-in [:call :e2ee-keys] nil)
+                    (assoc-in [:call :status] :idle))
+      :dispatch [:call/teardown]})))
 
 
 (rf/reg-event-fx
