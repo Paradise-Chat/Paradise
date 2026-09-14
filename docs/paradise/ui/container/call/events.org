@@ -71,16 +71,15 @@ Most of the call re-frame events and subscriptions are listed here
 (rf/reg-event-fx
  :call/start
  (fn [{:keys [db]} [_ room-id]]
-   (when-let [pool @state/!engine-pool]
      (go
-       (let [res (<! (main/do-with-pool! pool
+       (let [res (<! (mesh/do-with-thread! :engine-pool
                                          {:handler :call/request-sfu-token
                                           :arguments {:room-id room-id}}))]
          (if (or (= (:status res) :success) (= (:status res) "success"))
            (do
              (js/console.log "LiveKit Payload Received:" res)
              (rf/dispatch [:call/sfu-token-received {:url (:url res) :token (:token res)}]))
-           (log/error "Engine failed to negotiate LiveKit token:" (:msg res))))))
+           (log/error "Engine failed to negotiate LiveKit token:" (:msg res)))))
 
    {:db (-> db
             (assoc-in [:call :active-room-id] room-id)
