@@ -35,15 +35,6 @@
 
 
 
-(rf/reg-event-fx
- :call/e2ee-key-received
- (fn [{:keys [db]} [_ {:keys [participant-id key-index key-array room-id]}]]
-
-   (rtc/inject-key! participant-id key-index key-array)
-
-   {:db (assoc-in db [:call :e2ee-keys participant-id key-index] key-array)}))
-
-
 
 (rf/reg-event-fx
  :call/init-widget
@@ -57,16 +48,15 @@
 (rf/reg-event-fx
  :call/start
  (fn [{:keys [db]} [_ room-id]]
-   (when-let [pool @state/!engine-pool]
      (go
-       (let [res (<! (main/do-with-pool! pool
+       (let [res (<! (mesh/do-with-thread! :engine-pool
                                          {:handler :call/request-sfu-token
                                           :arguments {:room-id room-id}}))]
          (if (or (= (:status res) :success) (= (:status res) "success"))
            (do
              (js/console.log "LiveKit Payload Received:" res)
              (rf/dispatch [:call/sfu-token-received {:url (:url res) :token (:token res)}]))
-           (log/error "Engine failed to negotiate LiveKit token:" (:msg res))))))
+           (log/error "Engine failed to negotiate LiveKit token:" (:msg res)))))
 
    {:db (-> db
             (assoc-in [:call :active-room-id] room-id)
@@ -81,18 +71,6 @@
             (assoc-in [:call :livekit-token] token)
             (assoc-in [:call :status] :connected))}))
 
-(rf/reg-event-fx
- :call/hangup
- (fn [{:keys [db]} _]
-   (when-let [pool @state/!engine-pool]
-     (main/do-with-pool! pool {:handler :call/leave-sfu}))
-   {:db (-> db
-            (assoc-in [:call :active-room-id] nil)
-            (assoc-in [:call :is-active?] false)
-            (assoc-in [:call :livekit-url] nil)
-            (assoc-in [:call :livekit-token] nil)
-            (assoc-in [:call :e2ee-keys] nil)
-            (assoc-in [:call :status] :idle))}))
 
 (rf/reg-fx
  :livekit/set-microphone
@@ -372,56 +350,41 @@
 (rf/reg-event-fx
  :call/hangup
  (fn [{:keys [db]} [_ opts]]
-   (let [opts
-         (or opts {})
+   (let [opts         (or opts {})
+         room-id      (or (:room-id opts)
+                          (get-in db [:call :active-room-id]))
+         skip-native? (get opts :skip-native? false)]
 
-         room-id
-         (or (:room-id opts)
-             (get-in
-              db
-              [:call :active-room-id]))
-
-         skip-native?
-         (get opts :skip-native? false)]
-
-     (when (and room-id
-                (not skip-native?))
+     (when (and room-id (not skip-native?))
        (native/end-call! room-id))
 
-     {:db
-      (assoc-in
-       db
-       [:call :disconnecting?]
-       true)
+       (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
+                                 :arguments {:room-id room-id}})
 
-      :livekit/disconnect
-      true})))
+     {:livekit/disconnect true})))
+
 
 
 (rf/reg-event-fx
  :call/livekit-disconnected
  (fn [{:keys [db]} [_ reason]]
-   (let [room-id
-         (get-in
-          db
-          [:call :active-room-id])
+   (let [room-id        (get-in db [:call :active-room-id])
+         disconnecting? (get-in db [:call :disconnecting?] false)]
 
-         disconnecting?
-         (get-in
-          db
-          [:call :disconnecting?]
-          false)]
+     (log/info "LiveKit disconnected:" reason)
+     (when (and room-id (not disconnecting?))
+       (native/end-call! room-id)
+         (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
+                                             :arguments {:room-id room-id}}))
 
-     (log/info
-      "LiveKit disconnected:"
-      reason)
-
-     (when (and room-id
-                (not disconnecting?))
-       (native/end-call! room-id))
-
-     {:dispatch
-      [:call/teardown]})))
+     {:db       (-> db
+                    (assoc-in [:call :active-room-id] nil)
+                    (assoc-in [:call :is-active?] false)
+                    (assoc-in [:call :livekit-url] nil)
+                    (assoc-in [:call :livekit-token] nil)
+                    (assoc-in [:call :e2ee-keys] nil)
+                    (assoc-in [:call :status] :idle))
+      :dispatch [:call/teardown]})))
 
 
 (rf/reg-event-fx
