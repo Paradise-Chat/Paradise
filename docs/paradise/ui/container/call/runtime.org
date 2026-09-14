@@ -1,0 +1,728 @@
+
+** Call Runtime
+
+
+**** Preface
+
+A collection of helper functions and atoms for a call.
+
+
+
+**** Imports
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(ns paradise.ui.container.call.runtime
+  (:require
+   ["livekit-client" :as lkc]
+   [clojure.string :as str]
+   [promesa.core :as p]
+   [taoensso.timbre :as log]
+   [paradise.ui.container.call.audio-processor :as audio-processor]))
+#+end_src
+
+
+
+**** Code
+
+
+***** Atoms
+
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(defonce !room
+  (atom nil))
+
+(defonce !e2ee-key-provider
+  (atom nil))
+
+(defonce !cached-lk-options
+  (atom nil))
+
+(defonce !known-keys
+  (atom {}))
+
+(defonce !voice-threshold
+  (atom 0.12))
+
+(defonce !voice-gate-enabled?
+  (atom true))
+
+(defonce !noise-suppression-enabled?
+  (atom true))
+
+(defonce !audio-processor
+  (atom nil))
+
+(defonce !audio-processor-track
+  (atom nil))
+
+(defonce !local-track-published-listener
+  (atom nil))
+
+(defn- microphone-capture-options []
+  #js
+  {:echoCancellation true
+   :noiseSuppression false
+   :autoGainControl true
+   :channelCount 1
+   :sampleRate 48000})
+#+end_src
+
+
+
+***** Encryption
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(defn- decode-base64-key
+  [key-b64-string]
+
+  (let [std-b64
+        (-> key-b64-string
+            (str/replace "-" "+")
+            (str/replace "_" "/"))
+
+        remainder
+        (mod
+         (.-length std-b64)
+         4)
+
+        padded-b64
+        (if (zero? remainder)
+
+          std-b64
+
+          (str
+           std-b64
+           (str/join
+            (repeat
+             (- 4 remainder)
+             "="))))
+
+        raw-str
+        (js/atob
+         padded-b64)
+
+        length
+        (.-length raw-str)
+
+        key-buffer
+        (js/Uint8Array.
+         length)]
+
+    (dotimes [i length]
+      (aset
+       key-buffer
+       i
+       (.charCodeAt
+        raw-str
+        i)))
+
+    key-buffer))
+
+
+
+
+
+(defn replay-known-keys! []
+  (when-let [kp @!e2ee-key-provider]
+    (doseq [[participant-id keys-map] @!known-keys
+            [key-index crypto-key] keys-map]
+      (log/debug "Replaying LiveKit E2EE key" participant-id key-index)
+      (.onSetEncryptionKey kp crypto-key participant-id (js/Number. key-index)))))
+
+(defn inject-key!
+  [participant-id key-index key-b64-string]
+  (try
+    (let [key-buffer (decode-base64-key key-b64-string)]
+      (p/let [crypto-key (js/crypto.subtle.importKey
+                          "raw"
+                          (.-buffer key-buffer)
+                          "HKDF"
+                          false
+                          #js ["deriveBits" "deriveKey"])]
+        (log/debug "Injecting LiveKit E2EE key" participant-id key-index)
+        (swap! !known-keys assoc-in [participant-id key-index] crypto-key)
+        (when-let [kp @!e2ee-key-provider]
+          (.onSetEncryptionKey kp crypto-key participant-id (js/Number. key-index)))
+        crypto-key))
+    (catch :default err
+      (p/rejected err))))
+
+(defn get-lk-options []
+  (if-let [opts @!cached-lk-options]
+    opts
+    (let [kp   (new (.-BaseKeyProvider lkc) #js {:ratchetWindowSize 10 :keyringSize 256})
+          opts #js {:e2ee #js {:keyProvider kp
+                               :worker (js/Worker. "/livekit-e2ee-worker.js")}
+                    :audioCaptureDefaults (microphone-capture-options)
+                    :videoCaptureDefaults #js {:resolution (.-hd1080 (.-VideoPresets lkc))}
+                    :publishDefaults      #js {:simulcast false :videoCodec "vp8"}}]
+
+      (reset! !e2ee-key-provider kp)
+      (reset! !cached-lk-options opts)
+      (replay-known-keys!)
+      opts)))
+
+
+
+
+#+end_src
+
+
+***** Audio Processors
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(defn- clamp01 [x]
+  (max 0.0
+       (min 1.0
+            (or x 0.0))))
+
+
+(defn- microphone-source []
+  (.. lkc -Track -Source -Microphone))
+
+
+(defn switch-device!
+  [kind device-id]
+
+  (if-let [room
+           @!room]
+
+    (.switchActiveDevice
+     room
+     kind
+     device-id)
+
+    (p/rejected
+     (js/Error.
+      "No active LiveKit room"))))
+
+
+(defn get-or-create-audio-processor! []
+  (or
+   @!audio-processor
+
+   (let [processor
+         (audio-processor/create-processor
+          {:threshold @!voice-threshold
+           :gate-enabled? @!voice-gate-enabled?
+           :hangover-ms 180})]
+
+     (reset!
+      !audio-processor
+      processor)
+
+     (when-let [set-enabled
+                (aget processor
+                      "setNoiseSuppressionEnabled")]
+       (set-enabled
+        @!noise-suppression-enabled?))
+
+     processor)))
+
+
+(defn create-test-audio-processor
+  []
+  (let [processor
+        (audio-processor/create-processor
+         {:threshold @!voice-threshold
+          :gate-enabled? @!voice-gate-enabled?
+          :hangover-ms 180})]
+
+    (when-let [set-enabled
+               (aget processor
+                     "setNoiseSuppressionEnabled")]
+      (set-enabled
+       @!noise-suppression-enabled?))
+
+    processor))
+
+(defn ensure-active-microphone-processor!
+  []
+  (if-let [track
+           (current-microphone-track)]
+
+    (ensure-microphone-processor!
+     track)
+
+    (p/resolved nil)))
+
+
+(defn- detach-local-track-published-listener!
+  []
+  (when-let [room
+             @!room]
+
+    (when-let [listener
+               @!local-track-published-listener]
+
+      (.off
+       room
+       (.-LocalTrackPublished
+        (.-RoomEvent lkc))
+       listener)))
+
+  (reset!
+   !local-track-published-listener
+   nil))
+
+
+(defn- attach-local-track-published-listener!
+  [room]
+  (let [listener
+        (fn [publication _participant]
+          (when (= (.-source publication)
+                   (microphone-source))
+
+            (when-let [track
+                       (.-track publication)]
+
+              (-> (ensure-microphone-processor!
+                   track)
+
+                  (p/catch
+                   (fn [err]
+                     (log/error
+                      err
+                      "Failed to attach Paradise processor to published microphone")))))))]
+
+    (.on
+     room
+     (.-LocalTrackPublished
+      (.-RoomEvent lkc))
+     listener)
+
+    (reset!
+     !local-track-published-listener
+     listener)
+
+    listener))
+
+
+(defn current-room []
+  @!room)
+
+
+(defn set-room!
+  [room]
+  (detach-local-track-published-listener!)
+
+  (reset!
+   !room
+   room)
+
+  (when room
+    (attach-local-track-published-listener!
+     room)
+
+    (-> (ensure-active-microphone-processor!)
+
+        (p/catch
+         (fn [err]
+           (log/error
+            err
+            "Failed to attach Paradise processor to existing microphone")))))
+
+  room)
+
+
+(defn clear-room! []
+  (detach-local-track-published-listener!)
+
+  (reset!
+   !room
+   nil))
+
+
+(defn local-participant []
+  (some->
+   @!room
+   .-localParticipant))
+
+
+(defn current-microphone-publication
+  []
+  (when-let [participant
+             (local-participant)]
+    (.getTrackPublication
+     participant
+     (microphone-source))))
+
+
+(defn current-microphone-track
+  []
+  (some->
+   (current-microphone-publication)
+   .-track))
+
+
+(defn current-microphone-processor
+  []
+  (when-let [track
+             (current-microphone-track)]
+    (.getProcessor track)))
+
+(defn- apply-processor-settings!
+  [processor]
+  (when processor
+    (when-let [set-threshold
+               (aget processor
+                     "setThreshold")]
+      (set-threshold
+       @!voice-threshold))
+
+    (when-let [set-gate-enabled
+               (aget processor
+                     "setGateEnabled")]
+      (set-gate-enabled
+       @!voice-gate-enabled?))
+
+    (when-let [set-noise-enabled
+               (aget processor
+                     "setNoiseSuppressionEnabled")]
+      (set-noise-enabled
+       @!noise-suppression-enabled?)))
+
+  processor)
+
+(defn ensure-microphone-processor!
+  [track]
+
+  (if-not track
+
+    (p/resolved nil)
+
+    (let [current
+          (.getProcessor track)]
+
+      (if current
+
+        (do
+          (reset!
+           !audio-processor
+           current)
+
+          (reset!
+           !audio-processor-track
+           track)
+
+          (apply-processor-settings!
+           current)
+
+          (p/resolved
+           track))
+
+        (let [processor
+              (get-or-create-audio-processor!)]
+
+          (-> (p/let [_ (.setProcessor
+                         track
+                         processor)]
+
+                (reset!
+                 !audio-processor
+                 processor)
+
+                (reset!
+                 !audio-processor-track
+                 track)
+
+                (apply-processor-settings!
+                 processor)
+
+                (log/info
+                 "Paradise audio processor attached to published microphone"
+                 {:processor
+                  (aget processor "name")
+
+                  :track-id
+                  (some-> track
+                          .-mediaStreamTrack
+                          .-id)})
+
+                track)
+
+              (p/catch
+               (fn [err]
+                 (when (identical?
+                        processor
+                        @!audio-processor)
+                   (reset!
+                    !audio-processor
+                    nil))
+
+                 (when (identical?
+                        track
+                        @!audio-processor-track)
+                   (reset!
+                    !audio-processor-track
+                    nil))
+
+                 (throw err)))))))))
+
+
+(defn ensure-active-microphone-processor!
+  []
+  (if-let [track
+           (current-microphone-track)]
+
+    (ensure-microphone-processor!
+     track)
+
+    (p/resolved nil)))
+
+(defn- apply-processor-settings!
+  [processor]
+  (when processor
+    (when-let [set-threshold
+               (aget processor
+                     "setThreshold")]
+      (set-threshold
+       @!voice-threshold))
+
+    (when-let [set-gate-enabled
+               (aget processor
+                     "setGateEnabled")]
+      (set-gate-enabled
+       @!voice-gate-enabled?))
+
+    (when-let [set-noise-enabled
+               (aget processor
+                     "setNoiseSuppressionEnabled")]
+      (set-noise-enabled
+       @!noise-suppression-enabled?)))
+
+  processor)
+
+
+(defn- apply-to-live-audio-processors!
+  [f]
+  (let [track-processor
+        (current-microphone-processor)
+
+        runtime-processor
+        @!audio-processor]
+
+    (when track-processor
+      (f track-processor))
+
+    (when (and runtime-processor
+               (not (identical?
+                     runtime-processor
+                     track-processor)))
+      (f runtime-processor))))
+
+#+end_src
+
+
+***** Enablers
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(defn set-e2ee-enabled!
+  [enabled?]
+
+  (if-let [room
+           @!room]
+
+    (.setE2EEEnabled
+     room
+     enabled?)
+
+    (p/rejected
+     (js/Error.
+      "No active LiveKit room"))))
+
+
+
+(defn set-microphone-enabled!
+  [enabled?]
+
+  (if-let [participant
+           (local-participant)]
+
+    (if enabled?
+
+      (p/let
+          [publication
+           (.setMicrophoneEnabled
+            participant
+            true
+            (microphone-capture-options))
+
+           _
+           (if-let [track
+                    (some->
+                     publication
+                     .-track)]
+
+             (ensure-microphone-processor!
+              track)
+
+             (ensure-active-microphone-processor!))]
+
+        publication)
+
+      (.setMicrophoneEnabled
+       participant
+       false))
+
+    (p/rejected
+     (js/Error.
+      "No active LiveKit room"))))
+
+
+(defn set-noise-suppression-enabled!
+  [enabled?]
+  (let [enabled?
+        (boolean enabled?)]
+
+    (reset!
+     !noise-suppression-enabled?
+     enabled?)
+
+    (apply-to-live-audio-processors!
+     (fn [processor]
+       (when-let [set-enabled
+                  (aget processor
+                        "setNoiseSuppressionEnabled")]
+         (set-enabled
+          enabled?))))
+
+    enabled?))
+
+
+(defn set-voice-threshold!
+  [threshold]
+  (let [threshold
+        (clamp01 threshold)]
+
+    (reset!
+     !voice-threshold
+     threshold)
+
+    (apply-to-live-audio-processors!
+     (fn [processor]
+       (when-let [set-threshold
+                  (aget processor
+                        "setThreshold")]
+         (set-threshold
+          threshold))))
+
+    threshold))
+
+(defn set-camera-enabled!
+  [enabled?]
+
+  (if-let [participant
+           (local-participant)]
+
+    (.setCameraEnabled
+     participant
+     enabled?)
+
+    (p/rejected
+     (js/Error.
+      "No active LiveKit room"))))
+
+
+(defn set-screen-share-enabled!
+  [enabled?]
+
+  (if-let [participant
+           (local-participant)]
+
+    (.setScreenShareEnabled
+     participant
+     enabled?)
+
+    (p/rejected
+     (js/Error.
+      "No active LiveKit room"))))
+#+end_src
+
+
+
+
+***** Destroy
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
+(defn destroy-audio-processor!
+  []
+  (let [track
+        @!audio-processor-track
+
+        processor
+        @!audio-processor]
+
+    (if (and track
+             (identical?
+              processor
+              (.getProcessor track)))
+
+      (-> (.stopProcessor
+           track
+           false)
+
+          (p/catch
+           (fn [err]
+             (log/debug
+              err
+              "Failed to stop LiveKit microphone processor"))))
+
+      (when-let [destroy
+                 (some-> processor
+                         (aget "destroy"))]
+
+        (-> (destroy)
+
+            (p/catch
+             (fn [err]
+               (log/debug
+                err
+                "Audio processor cleanup failed"))))))
+
+    (reset!
+     !audio-processor-track
+     nil)
+
+    (reset!
+     !audio-processor
+     nil)))
+
+
+(defn disconnect! []
+  (if-let [room
+           @!room]
+
+    (.disconnect room)
+
+    (p/resolved nil)))
+
+
+(defn reset-session! []
+  (destroy-audio-processor!)
+
+  (clear-room!)
+
+  (reset!
+   !e2ee-key-provider
+   nil)
+
+  (reset!
+   !cached-lk-options
+   nil)
+
+  (reset!
+   !known-keys
+   {}))
+#+end_src
+
+
+
+
+
+
+
