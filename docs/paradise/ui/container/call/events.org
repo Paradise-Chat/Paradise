@@ -95,18 +95,6 @@ Most of the call re-frame events and subscriptions are listed here
             (assoc-in [:call :livekit-token] token)
             (assoc-in [:call :status] :connected))}))
 
-(rf/reg-event-fx
- :call/hangup
- (fn [{:keys [db]} _]
-   (when-let [pool @state/!engine-pool]
-     (main/do-with-pool! pool {:handler :call/leave-sfu}))
-   {:db (-> db
-            (assoc-in [:call :active-room-id] nil)
-            (assoc-in [:call :is-active?] false)
-            (assoc-in [:call :livekit-url] nil)
-            (assoc-in [:call :livekit-token] nil)
-            (assoc-in [:call :e2ee-keys] nil)
-            (assoc-in [:call :status] :idle))}))
 #+end_src
 
 ****** LiveKit Events
