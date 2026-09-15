@@ -331,7 +331,6 @@
 (defn ^:export init []
   (re-frame/dispatch-sync [:initialize-db])
   (init-native-listeners!)
-  (re-frame/dispatch [:app/thread-boot])
   (re-frame/dispatch [:app/load-settings-by-stage :boot])
   (re-frame/dispatch [:app/start-boot-sequence])
   (mount-root))
