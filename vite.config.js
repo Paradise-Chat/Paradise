@@ -112,7 +112,15 @@ export default defineConfig(({ mode }) => {
         },
 
         optimizeDeps: {
-            include: ["react", "react-dom"],
+            include: [
+                "react",
+                "react-dom",
+                "workbox-precaching",
+                "workbox-expiration",
+                "workbox-strategies",
+                "workbox-routing",
+                "workbox-range-requests",
+            ],
             exclude: ["ffi-bindings", "uniffi-bindgen-react-native"],
         },
         build: {
