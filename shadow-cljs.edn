@@ -23,11 +23,6 @@
                   :engine {:entries [paradise.engine.core]
                            :web-worker true
                            :depends-on #{:base}}
-;;                  :engine-matrix {:entries [paradise.engine.matrix.core]
-;;                                  :web-worker true
-;;                                  :depends-on #{:engine}
-;;                                  :exports {init paradise.engine.matrix.core/bootstrap}
-;;                                  }
 
                   :virtualizer {:entries [paradise.virtualizer.base]
                                 :web-worker true
