@@ -1,0 +1,87 @@
+.call-grid-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #0d0d0f;
+  padding: 24px;
+  position: relative;
+}
+
+.call-grid-layout-wrapper {
+  flex: 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #161619;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+.call-grid-layout {
+  height: 100%;
+  width: 100%;
+}
+
+.call-control-bar-wrapper {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(30, 30, 34, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 8px 16px;
+  border-radius: 100px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+.call-grid-loading {
+  color: #888;
+  padding: 2rem;
+  text-align: center;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.call-view-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #111;
+}
+
+.call-video-area {
+  flex: 1;
+  position: relative;
+}
+
+.call-token-negotiation {
+  color: white;
+  padding: 2rem;
+  text-align: center;
+}
+
+.call-idle-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.call-idle-text {
+  color: white;
+  margin-bottom: 20px;
+  font-size: 1.2rem;
+}
+
+.call-start-button {
+  padding: 12px 24px;
+  background-color: #1f8cf9;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
