@@ -1,0 +1,401 @@
+
+** Paradise Build Prep
+
+**** Preface
+
+Paradise has a rather intricate build process as it relies on a variable amount of steps
+depending on the goal in mind.
+
+So some users might find themselves using the tangler where others might just want the
+cljs itself and to ignore the tangling. Or they just want to perform UI work and
+just want the engine to just 'work'.
+
+All are absolutely valid approaches to development for and with Paradise.
+
+That said, we should enable and empower these users (and ourselves) to easily maximize
+the ease of use.
+
+One key reason this file exists is for handling the engine loading for development.
+Prod builds are perfect, but if you want to develop an engine... the prior path was
+extremely manual. Instead we can provide more tooling to help the developer.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../build.clj
+(ns build
+  (:require [clojure.tools.build.api :as b]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.edn :as edn]
+            [rewrite-clj.zip :as z]
+            [cljfmt.core :as cljfmt]))
+#+end_src
+
+
+
+**** Code
+
+
+***** File Locations
+
+
+****** Engine State
+
+So we need to neatly store the state so the dev nevers ends in a state
+where their engine can't easily be dismounted. This isn't perfect as
+they may find themselves deleting the .shadow-cljs directory.
+However, it keeps it neatly out of sight of the developer.
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(def state-file ".shadow-cljs/engine-state.edn")
+#+end_src
+
+
+****** Engine Manifest
+
+We need to consistently define the location of where the engine's
+definition will be. We'll actually provide a lookup in two locations
+though it really should only ever be in the config.edn at the base.
+
+The background for the config.edn is that our build process looks for
+the existence of that file and it was just convenient to reuse that
+scheme we used in the client.
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn find-manifest [engine-path]
+  (let [f1 (io/file engine-path "config.edn")
+        f2 (io/file engine-path "dist" "manifest.edn")]
+
+    (cond
+      (.exists f1) f1
+      (.exists f2) f2
+      :else nil)))
+#+end_src
+
+
+****** Community Registry
+
+We want to be able to bake in a prebuilt list of engines.
+While it could be fetched at runtime, we want to ensure
+the login page is already populated for the end user.
+If for some reason... Github is having issues.
+Thus it makes more sense to have this baked in and
+enable the end user to update a registry.edn file
+at runtime.
+
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn fetch-registry []
+  (let [config (try (edn/read-string (slurp "config.edn")) (catch Exception _ {}))
+        registry-url (:registry-url config "https://paradise-chat.github.io/community-repo/registry.edn")]
+    (try
+      (println "Downloading registry from:" registry-url)
+      (let [data (slurp registry-url)]
+        (spit "registry.edn" data)
+        (println "Successfully downloaded registry.edn"))
+      (catch Exception e
+        (if (.exists (io/file "registry.edn"))
+          (println "WARNING: Failed to fetch registry. Cache used.")
+          (do
+            (println "FATAL ERROR: Failed to fetch registry and no cached registry.edn exists!")
+            (System/exit 1)))))))
+
+#+end_src
+
+
+
+
+
+***** Parsing
+
+
+****** Rewrite CLJ Zipping
+
+
+****** Parse Node
+
+We need to be able to take a string of Clojure code
+and extract the underlying AST
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn parse-node [s]
+  (z/node (z/of-string s)))
+#+end_src
+
+
+****** Find Key
+
+Then we need to be able to traverse down into zipper locations
+and evaluate S-expressions to check for matches for passed keys
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn find-key [zloc k]
+  (loop [loc (z/down zloc)]
+    (when loc
+      (if (= (z/sexpr loc) k)
+        loc
+        (when-let [vloc (z/right loc)]
+          (recur (z/right vloc)))))))
+
+#+end_src
+
+
+****** Assoc
+
+Next we need to be able to neatly update a key-value pair
+within the map zipper
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn z-assoc [zloc k v]
+  (if-let [kloc (find-key zloc k)]
+    (let [vloc (z/right kloc)]
+      (-> vloc (z/replace v) z/up))
+    (if-let [last-loc (some-> zloc z/down z/rightmost)]
+      (-> last-loc
+          (z/insert-right v)
+          (z/insert-space-right 1)
+          (z/insert-right k)
+          (z/insert-newline-right)
+          z/up)
+      (-> zloc
+          (z/append-child k)
+          (z/append-child v)))))
+#+end_src
+
+
+****** Dissoc
+
+And lastly we need to be able to remove from said zipper.
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn z-dissoc [zloc k]
+  (if-let [kloc (find-key zloc k)]
+    (let [vloc (z/right kloc)]
+      (if vloc
+        (-> vloc z/remove z/remove z/up)
+        (-> kloc z/remove z/up)))
+    zloc))
+
+#+end_src
+
+
+
+
+***** Manipulate Files
+
+There are three files that get updated.
+The deps.edn, shadow-cljs.edn, config.edn, and package.json.
+
+****** EDN editing
+
+This just gives us a neat function to handle EDN files
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn edit-edn [file edit-fn]
+  (when (.exists (io/file file))
+    (-> (z/of-file file)
+        edit-fn
+        z/root-string
+        cljfmt/reformat-string
+        (->> (spit file)))))
+#+end_src
+
+
+****** package.json
+
+For the package.json we parse it in and check the diff between our
+dependencies and the engines. Then we take note of those, store
+them in our state file, and place them in the client package.json
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn get-unique-deps [engine-path]
+  (let [script (str "const fs = require('fs');\n"
+                    "const engine = JSON.parse(fs.readFileSync('" engine-path "/package.json'));\n"
+                    "const client = JSON.parse(fs.readFileSync('package.json'));\n"
+                    "const toAdd = Object.entries(engine.dependencies || {})\n"
+                    "  .filter(([k]) => !client.dependencies[k])\n"
+                    "  .map(([k, v]) => k + '@' + v);\n"
+                    "if (toAdd.length > 0) { console.log(toAdd.join(':::')); }")
+        result (b/process {:command-args ["node" "-e" script]
+                           :out :capture})]
+    (when (and (zero? (:exit result)) (string? (:out result)))
+      (let [out (str/trim (:out result))]
+        (when (not-empty out)
+          (str/split out #":::"))))))
+#+end_src
+
+
+****** Reading State
+
+Just a simple function to consume the contents of an EDN file
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn read-state []
+  (let [f (io/file state-file)]
+    (if (.exists f)
+      (try (edn/read-string (slurp f)) (catch Exception _ {}))
+      {})))
+#+end_src
+
+***** Entry Points
+
+We have the mounting of the engine, dismounting of the engine, and
+prep of the client to handle.
+
+****** Prep
+
+For prep we just load the registry.edn for bundling later
+and then run a release build. It'll handle getting the Clojure
+dependencies and make the engine able to build proper.
+(Mostly a downstream need)
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn prep [_]
+  (fetch-registry)
+  (b/process {:command-args ["npx" "shadow-cljs" "release" "app"]}))
+#+end_src
+
+
+
+****** Mounting
+
+Mounting utilizes the functions described above to manipulate
+the deps.edn, shadow-cljs.edn, config.edn, and package.json
+
+It steps through the AST to add the entries to the EDNs
+and more clunkily drops the dependency into the package.json
+
+It can be called directly like so:
+clojure -T:prep mount :engine-path '"../../Alternative-Path/Matrix-Engine"'
+
+An engine path will always need to be supplied as we can't know
+what engine the developer intends to work on otherwise.
+If they wish, they can modify the execution script to include
+their path so that the command is shortened.
+
+However, they'll only need to run it once for mounting and again
+for dismounting.
+
+For testing the local PROD build of the engine (so when it becomes
+a JS bundle) it is easiest then to modify the registry.edn to point
+to the local bundle. Eventually, arbitrary engines will be easier
+to point to.
+
+Now some extra detail as to why we log the engine in the config.edn is
+so we can do a dynamic dev/prod load. If you loaded the engine for Matrix
+in dev but tried to use the Nostr engine we don't want that to just fail.
+So it needs to know that Matrix should use the 'dev' dependency and Nostr
+(or any other protocol engine) should use their own.
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn mount [{:keys [engine-path]}]
+  (when-not engine-path
+    (println "FATAL ERROR: :engine-path is required!")
+    (System/exit 1))
+  (let [engine-path (str engine-path)
+        manifest-file (find-manifest engine-path)]
+    (when-not manifest-file
+      (println "FATAL ERROR: Could not find manifest.edn in" engine-path)
+      (System/exit 1))
+    (let [manifest (edn/read-string (slurp manifest-file))
+          {:keys [deps-sym module-id config-key path shadow-module]} manifest
+          config-kw (keyword config-key)
+          dev-path (str "/" (last (str/split path #"/")))
+          deps (get-unique-deps engine-path)
+          current-state (read-state)
+          new-state (assoc current-state module-id {:manifest manifest :deps deps})]
+      (edit-edn "deps.edn"
+                (fn [zloc]
+                  (-> zloc
+                      (z/find-value z/next :deps)
+                      z/right
+                      (z-assoc deps-sym {:local/root engine-path}))))
+      (edit-edn "shadow-cljs.edn"
+                (fn [zloc]
+                  (-> zloc
+                      (z/find-value z/next :app)
+                      (z/find-value z/next :modules)
+                      z/right
+                      (z-assoc module-id shadow-module))))
+      (edit-edn "config.edn"
+                (fn [zloc]
+                  (if-let [engines-loc (z/find-value zloc z/next :engines)]
+                    (-> engines-loc z/right (z-assoc config-kw {:path dev-path}))
+                    (z-assoc zloc :engines {config-kw {:path dev-path}}))))
+      (io/make-parents state-file)
+      (spit state-file (pr-str new-state))
+      (when (seq deps)
+        (b/process {:command-args (into ["pnpm" "add" "--ignore-scripts" "--prefer-offline"] deps)}))
+      (println "Successfully mounted:" module-id))))
+#+end_src
+
+
+****** Dismounting
+
+Dismounting is effectively doing the operations in reverse.
+
+To run it directly you can pass a module key directly to remove one
+engine should you be working on multiple at once or no key
+to remove them all at once (or for faster removal).
+
+
+
+clojure -T:prep dismount :module-ids '[:engine-matrix]'
+
+or
+
+clojure -T:prep dismount
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn dismount [{:keys [module-ids]}]
+  (let [state-f (io/file state-file)]
+    (if (.exists state-f)
+      (let [current-state (read-state)
+            targets (if (seq module-ids) (map keyword module-ids) (keys current-state))]
+        (if (empty? targets)
+          (println "No engines to dismount.")
+          (let [remaining-state
+                (reduce (fn [state target-id]
+                          (if-let [engine-state (get state target-id)]
+                            (let [{:keys [deps-sym module-id config-key]} (:manifest engine-state)
+                                  deps (:deps engine-state)
+                                  config-kw (keyword config-key)]
+                              (edit-edn "deps.edn"
+                                        (fn [zloc]
+                                          (-> zloc
+                                              (z/find-value z/next :deps)
+                                              z/right
+                                              (z-dissoc deps-sym))))
+                              (edit-edn "shadow-cljs.edn"
+                                        (fn [zloc]
+                                          (-> zloc
+                                              (z/find-value z/next :app)
+                                              (z/find-value z/next :modules)
+                                              z/right
+                                              (z-dissoc module-id))))
+                              (edit-edn "config.edn"
+                                        (fn [zloc]
+                                          (if-let [engines-loc (z/find-value zloc z/next :engines)]
+                                            (-> engines-loc z/right (z-dissoc config-kw))
+                                            zloc)))
+                              (when (seq deps)
+                                (let [pkg-names (map #(first (str/split % #"@")) deps)]
+                                  (b/process {:command-args (into ["pnpm" "remove"] pkg-names)})))
+                              (println "Successfully dismounted engine:" target-id)
+                              (dissoc state target-id))
+                            state))
+                        current-state
+                        targets)]
+            (if (empty? remaining-state)
+              (do (.delete state-f) (println "All engines dismounted."))
+              (spit state-file (pr-str remaining-state))))))
+      (println "No active mount state found. Skipping dismount."))))
+#+end_src
+
