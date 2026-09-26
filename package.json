@@ -12,6 +12,8 @@
         "notangle": "concurrently \"npx shadow-cljs watch app\" \"npx vite\"",
         "dev": "concurrently \"npx shadow-cljs watch app\" \"npx nbb tangler.cljs\" \"npx vite\"",
         "me": "concurrently \"npx shadow-cljs watch app\" \"npx nbb tangler.cljs\" \"npx vite\"",
+        "engine:mount": "clojure -T:prep mount :engine-path",
+        "engine:dismount": "clojure -T:prep dismount",
         "release": "npx shadow-cljs release app && npx vite build",
         "serve": "npx serve -s dist -l 8000",
         "prep": "clojure -X:deps prep",
