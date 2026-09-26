@@ -144,6 +144,30 @@ worry about the code itself.
 #+end_src
 
 
+***** Communiy Registry
+
+
+#+begin_src clojurescript :tangle ../../hooks/build_hooks.clj
+(defn fetch-community-registry
+  {:shadow.build/stage :compile-prepare}
+  [build-state & _]
+  (let [config-path "config.edn"
+        config (try (edn/read-string (slurp config-path))
+                    (catch Exception _ {}))
+        registry-url (:registry-url config)
+        target-file (io/file "build/registry.edn")]
+    (when registry-url
+      (try
+        (println "Fetching baseline community registry from:" registry-url)
+        (let [registry-data (slurp registry-url)]
+          (spit target-file registry-data)
+          (println "Successfully cached registry.edn to build/"))
+        (catch Exception e
+          (println "Failed to fetch community registry:" (.getMessage e)))))
+    build-state))
+#+end_src
+
+
 ***** Element call
 
 #+begin_src clojurescript :tangle ../../hooks/build_hooks.clj
