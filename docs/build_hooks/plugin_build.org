@@ -208,6 +208,7 @@ easily done. It'll be something that needs to be revisited.
            (:macro (meta macro-var))
            (= (ns-name (:ns (meta macro-var))) 'paradise.shared.utils.macros)))))
 
+
 (defn expand-macros [form]
   (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
     (walk/prewalk
@@ -217,19 +218,23 @@ easily done. It'll be something that needs to be revisited.
             (cond
               (#{'go 'cljs.core.async/go} sym)
               (let [unrolled-promises (walk/prewalk
-                                       (fn [node]
-                                         (if (and (seq? node) (= (first node) '<p!))
-                                           (list '<! (list 'cljs.core.async.interop/p->c (second node)))
-                                           node))
-                                       (rest x))
+                                        (fn [node]
+                                          (if (and (seq? node) (= (first node) '<p!))
+                                            (list '<! (list 'cljs.core.async.interop/p->c (second node)))
+                                            node))
+                                        (rest x))
                     qualified         (walk/prewalk
-                                       #(case %
-                                          <! 'clojure.core.async/<!
-                                          put! 'clojure.core.async/put!
-                                          timeout 'clojure.core.async/timeout
-                                          alts! 'clojure.core.async/alts!
-                                          %)
-                                       unrolled-promises)
+                                        #(case %
+                                           <! 'clojure.core.async/<!
+                                           cljs.core.async/<! 'clojure.core.async/<!
+                                           put! 'clojure.core.async/put!
+                                           cljs.core.async/put! 'clojure.core.async/put!
+                                           timeout 'clojure.core.async/timeout
+                                           cljs.core.async/timeout 'clojure.core.async/timeout
+                                           alts! 'clojure.core.async/alts!
+                                           cljs.core.async/alts! 'clojure.core.async/alts!
+                                           %)
+                                        unrolled-promises)
                     expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
                 (scrub-jvm-artifacts expanded))
 
@@ -239,7 +244,6 @@ easily done. It'll be something that needs to be revisited.
               :else x))
           x))
       form)))
-
 #+end_src
 
 
