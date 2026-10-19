@@ -259,12 +259,12 @@ easily done. It'll be something that needs to be revisited.
 (defn process-and-expand-file [file-path]
   (let [raw-code     (slurp file-path)
         wrapped-text (str "(do\n" raw-code "\n)")
-        ast-form     (read-cljs wrapped-text)
+        ast-form     (-> (read-cljs wrapped-text)
+                         desugar-js-literals)
         ast-deferred (inject-defer-boundaries ast-form)
         expanded-ast (expand-macros ast-deferred)
         pure-ast     (sanitize-ast expanded-ast)]
     (pr-str pure-ast)))
-
 
 (defn determine-target-from-ns [raw-code]
   (if-let [match (re-find #"\(ns\s+([^\s\)]+)" raw-code)]
@@ -294,18 +294,23 @@ easily done. It'll be something that needs to be revisited.
 
 #+begin_src clojurescript :tangle ../../hooks/plugin_build.clj
 (defn -main [& args]
-  (let [metadata (edn/read-string (slurp "manifest.edn"))
-        modules  (process-src-directory "src")
-        payload  (assoc metadata :modules modules)
-
-        out-dir  (io/file "dist")
-        out-file (io/file out-dir "plugin.edn")]
+  (let [raw-meta      (edn/read-string (slurp "manifest.edn"))
+        manifest-data (assoc (dissoc raw-meta :modules)
+                             :path (or (:path raw-meta) "plugin.edn"))
+        modules       (process-src-directory "src")
+        plugin-data   {:modules modules}
+        out-dir       (io/file "dist")
+        manifest-file (io/file out-dir "manifest.edn")
+        plugin-file   (io/file out-dir "plugin.edn")]
 
     (when-not (.exists out-dir)
-      (.mkdir out-dir))
+      (.mkdirs out-dir))
 
-    (spit out-file (pr-str payload))
-    (println "Plugin packed and AOT-expanded successfully. Processed" (count modules) "files to" (.getPath out-file))))
+    (spit manifest-file (pr-str manifest-data))
+    (spit plugin-file (pr-str plugin-data))
+    (println "Plugin packed and AOT-expanded successfully.")
+    (println "Wrote manifest to" (.getPath manifest-file))
+    (println "Wrote" (count modules) "compiled modules to" (.getPath plugin-file))))
 #+end_src
 
 
