@@ -27,15 +27,25 @@
        x))
    form))
 
+(defn desugar-js-literals [form]
+  (walk/prewalk
+   (fn [x]
+     (if (instance? cljs.tagged_literals.JSValue x)
+       (list 'cljs.core/clj->js (desugar-js-literals (:val x)))
+       x))
+   form))
+
+
 (defn sanitize-ast [form]
   (walk/prewalk
     (fn [x]
       (cond
+        (record? x) (into {} x)
         (or (seq? x) (vector? x) (map? x) (set? x) (list? x)) x
         (or (symbol? x) (keyword? x) (string? x) (number? x) (boolean? x) (nil? x)) x
         (instance? java.util.regex.Pattern x) x
         (instance? cljs.tagged_literals.JSValue x)
-        (list 'cljs.core/clj->js (:val x))
+        (list 'cljs.core/clj->js (desugar-js-literals (:val x)))
         (instance? java.lang.Class x)
         (symbol (.getName ^java.lang.Class x))
         (instance? clojure.lang.Var x)
@@ -50,6 +60,14 @@
     form))
 
 
+(def catch-all-targets
+  #{:default
+    'java.lang.Throwable java.lang.Throwable 'Throwable
+    'java.lang.Exception java.lang.Exception 'Exception
+    'js/Error 'js/Object})
+
+
+
 (defn scrub-jvm-artifacts [form]
   (walk/prewalk
     (fn [x]
@@ -57,15 +75,14 @@
         (and (seq? x) (= (first x) 'clojure.lang.Var/getThreadBindingFrame)) nil
         (and (seq? x) (= (first x) 'clojure.lang.Var/resetThreadBindingFrame)) nil
         (and (seq? x) (= (first x) 'java.util.concurrent.atomic.AtomicReferenceArray.)) (list 'clojure.core/make-array (second x))
+
+        (and (seq? x)
+             (symbol? (first x))
+             (= (name (first x)) "instance?")
+             (contains? catch-all-targets (second x)))
+        (list 'clojure.core/some? (nth x 2))
+
         (or (= x 'java.lang.Throwable) (= x java.lang.Throwable)) ':default
-        (and (seq? x) (symbol? (first x)) (= (name (first x)) "return-chan"))
-        (let [state-arr (second x)
-              ret-val   (nth x 2)]
-          (list 'let ['c (list 'clojure.core/aget state-arr 5)]
-                (list 'if-not (list 'nil? ret-val)
-                      (list 'cljs.core.async/put! 'c ret-val (list 'fn ['_] (list 'cljs.core.async/close! 'c)))
-                      (list 'cljs.core.async/close! 'c))
-                'c))
 
         (and (seq? x) (symbol? (first x)) (= (name (first x)) "aget-object") (str/includes? (namespace (first x)) "ioc-macros"))
         (cons 'clojure.core/aget (rest x))
@@ -79,26 +96,23 @@
         (let [ns-str   (namespace x)
               name-str (name x)]
           (cond
-            (and ns-str (str/includes? ns-str "ioc-macros") (str/ends-with? name-str "-IDX"))
-            (case name-str
-              "STATE-IDX" 1
-              "EXCEPTION-IDX" 2
-              "BINDINGS-IDX" 3
-              "RUN-FN-IDX" 4
-              "USER-START-IDX" 5
-              x)
+            (and ns-str (str/includes? ns-str "ioc-macros"))
+            (case (str/upper-case name-str)
+              "FN-IDX"           0
+              "STATE-IDX"        1
+              "VALUE-IDX"        2
+              "BINDINGS-IDX"     3
+              "EXCEPTION-FRAMES" 4
+              "USER-START-IDX"   5
+              (symbol "cljs.core.async.impl.ioc-helpers" name-str))
 
             ns-str
-            (let [cljs-ns  (str/replace ns-str #"^clojure" "cljs")
-                  final-ns (if (= cljs-ns "cljs.core.async.impl.ioc-macros")
-                             "cljs.core.async.impl.ioc-helpers"
-                             cljs-ns)]
-              (symbol final-ns name-str))
+            (let [cljs-ns (str/replace ns-str #"^clojure" "cljs")]
+              (symbol cljs-ns name-str))
 
             :else x))
         :else x))
     form))
-
 
 (defn custom-macro? [sym]
   (when (symbol? sym)
@@ -106,6 +120,7 @@
       (and macro-var
            (:macro (meta macro-var))
            (= (ns-name (:ns (meta macro-var))) 'paradise.shared.utils.macros)))))
+
 
 (defn expand-macros [form]
   (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
@@ -116,19 +131,23 @@
             (cond
               (#{'go 'cljs.core.async/go} sym)
               (let [unrolled-promises (walk/prewalk
-                                       (fn [node]
-                                         (if (and (seq? node) (= (first node) '<p!))
-                                           (list '<! (list 'cljs.core.async.interop/p->c (second node)))
-                                           node))
-                                       (rest x))
+                                        (fn [node]
+                                          (if (and (seq? node) (= (first node) '<p!))
+                                            (list '<! (list 'cljs.core.async.interop/p->c (second node)))
+                                            node))
+                                        (rest x))
                     qualified         (walk/prewalk
-                                       #(case %
-                                          <! 'clojure.core.async/<!
-                                          put! 'clojure.core.async/put!
-                                          timeout 'clojure.core.async/timeout
-                                          alts! 'clojure.core.async/alts!
-                                          %)
-                                       unrolled-promises)
+                                        #(case %
+                                           <! 'clojure.core.async/<!
+                                           cljs.core.async/<! 'clojure.core.async/<!
+                                           put! 'clojure.core.async/put!
+                                           cljs.core.async/put! 'clojure.core.async/put!
+                                           timeout 'clojure.core.async/timeout
+                                           cljs.core.async/timeout 'clojure.core.async/timeout
+                                           alts! 'clojure.core.async/alts!
+                                           cljs.core.async/alts! 'clojure.core.async/alts!
+                                           %)
+                                        unrolled-promises)
                     expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
                 (scrub-jvm-artifacts expanded))
 
@@ -139,7 +158,6 @@
           x))
       form)))
 
-
 (defn read-cljs [s]
   (binding [*data-readers* tags/*cljs-data-readers*]
     (read-string s)))
@@ -147,12 +165,12 @@
 (defn process-and-expand-file [file-path]
   (let [raw-code     (slurp file-path)
         wrapped-text (str "(do\n" raw-code "\n)")
-        ast-form     (read-cljs wrapped-text)
+        ast-form     (-> (read-cljs wrapped-text)
+                         desugar-js-literals)
         ast-deferred (inject-defer-boundaries ast-form)
         expanded-ast (expand-macros ast-deferred)
         pure-ast     (sanitize-ast expanded-ast)]
     (pr-str pure-ast)))
-
 
 (defn determine-target-from-ns [raw-code]
   (if-let [match (re-find #"\(ns\s+([^\s\)]+)" raw-code)]
@@ -177,17 +195,21 @@
                :code expanded}))
           cljs-files)))
 
-
 (defn -main [& args]
-  (let [metadata (edn/read-string (slurp "manifest.edn"))
-        modules  (process-src-directory "src")
-        payload  (assoc metadata :modules modules)
-
-        out-dir  (io/file "dist")
-        out-file (io/file out-dir "plugin.edn")]
+  (let [raw-meta      (edn/read-string (slurp "manifest.edn"))
+        manifest-data (assoc (dissoc raw-meta :modules)
+                             :path (or (:path raw-meta) "plugin.edn"))
+        modules       (process-src-directory "src")
+        plugin-data   {:modules modules}
+        out-dir       (io/file "dist")
+        manifest-file (io/file out-dir "manifest.edn")
+        plugin-file   (io/file out-dir "plugin.edn")]
 
     (when-not (.exists out-dir)
-      (.mkdir out-dir))
+      (.mkdirs out-dir))
 
-    (spit out-file (pr-str payload))
-    (println "Plugin packed and AOT-expanded successfully. Processed" (count modules) "files to" (.getPath out-file))))
+    (spit manifest-file (pr-str manifest-data))
+    (spit plugin-file (pr-str plugin-data))
+    (println "Plugin packed and AOT-expanded successfully.")
+    (println "Wrote manifest to" (.getPath manifest-file))
+    (println "Wrote" (count modules) "compiled modules to" (.getPath plugin-file))))
