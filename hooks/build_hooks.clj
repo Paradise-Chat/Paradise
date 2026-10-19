@@ -8,8 +8,12 @@
   [build-state & _args]
 
   (let [assets
-        [["node_modules/ffi-bindings/src/generated-compat/wasm-bindgen/index_bg.wasm"
-          "build/ffi-bindings/wasm-bindgen/index_bg.wasm"]
+        [
+;;         ["node_modules/ffi-bindings/src/generated-compat/wasm-bindgen/index_bg.wasm"
+;;          "build/ffi-bindings/wasm-bindgen/index_bg.wasm"]
+
+         ["node_modules/livekit-client/dist/livekit-client.e2ee.worker.js"
+          "build/livekit-e2ee-worker.js"]
 
          ["node_modules/simple-rnnoise-wasm/dist/rnnoise.mjs"
           "build/rnnoise/rnnoise.mjs"]
@@ -97,6 +101,24 @@
         (io/make-parents target)
         (io/copy source target))))
   build-state)
+
+(defn fetch-community-registry
+  {:shadow.build/stage :compile-prepare}
+  [build-state & _]
+  (let [config-path "config.edn"
+        config (try (edn/read-string (slurp config-path))
+                    (catch Exception _ {}))
+        registry-url (:registry-url config)
+        target-file (io/file "build/registry.edn")]
+    (when registry-url
+      (try
+        (println "--- Fetching baseline community registry from:" registry-url)
+        (let [registry-data (slurp registry-url)]
+          (spit target-file registry-data)
+          (println "--- Successfully cached registry.edn to build/"))
+        (catch Exception e
+          (println "!!! Warning: Failed to fetch community registry:" (.getMessage e) "!!!"))))
+    build-state))
 
 (defn copy-element-call
   {:shadow.build/stage :flush}
