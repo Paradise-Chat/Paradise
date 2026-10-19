@@ -102,6 +102,15 @@ We need to ensure we don't leak any Java specific namespaces into the code
 as well as ensuring no invalid CLJS pieces are evaluated
 
 #+begin_src clojurescript :tangle ../../hooks/plugin_build.clj
+(defn desugar-js-literals [form]
+  (walk/prewalk
+   (fn [x]
+     (if (instance? cljs.tagged_literals.JSValue x)
+       (list 'cljs.core/clj->js (desugar-js-literals (:val x)))
+       x))
+   form))
+
+
 (defn sanitize-ast [form]
   (walk/prewalk
     (fn [x]
