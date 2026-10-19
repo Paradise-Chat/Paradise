@@ -135,6 +135,14 @@ as well as ensuring no invalid CLJS pieces are evaluated
     form))
 
 
+(def catch-all-targets
+  #{:default
+    'java.lang.Throwable java.lang.Throwable 'Throwable
+    'java.lang.Exception java.lang.Exception 'Exception
+    'js/Error 'js/Object})
+
+
+
 (defn scrub-jvm-artifacts [form]
   (walk/prewalk
     (fn [x]
