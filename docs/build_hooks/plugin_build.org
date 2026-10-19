@@ -115,11 +115,12 @@ as well as ensuring no invalid CLJS pieces are evaluated
   (walk/prewalk
     (fn [x]
       (cond
+        (record? x) (into {} x)
         (or (seq? x) (vector? x) (map? x) (set? x) (list? x)) x
         (or (symbol? x) (keyword? x) (string? x) (number? x) (boolean? x) (nil? x)) x
         (instance? java.util.regex.Pattern x) x
         (instance? cljs.tagged_literals.JSValue x)
-        (list 'cljs.core/clj->js (:val x))
+        (list 'cljs.core/clj->js (desugar-js-literals (:val x)))
         (instance? java.lang.Class x)
         (symbol (.getName ^java.lang.Class x))
         (instance? clojure.lang.Var x)
