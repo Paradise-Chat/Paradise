@@ -163,12 +163,12 @@ worry about the code itself.
         target-file (io/file "build/registry.edn")]
     (when registry-url
       (try
-        (println "Fetching baseline community registry from:" registry-url)
+        (println "--- Fetching baseline community registry from:" registry-url)
         (let [registry-data (slurp registry-url)]
           (spit target-file registry-data)
-          (println "Successfully cached registry.edn to build/"))
+          (println "--- Successfully cached registry.edn to build/"))
         (catch Exception e
-          (println "Failed to fetch community registry:" (.getMessage e)))))
+          (println "!!! Warning: Failed to fetch community registry:" (.getMessage e) "!!!"))))
     build-state))
 #+end_src
 
