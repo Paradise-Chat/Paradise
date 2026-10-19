@@ -171,25 +171,25 @@ as well as ensuring no invalid CLJS pieces are evaluated
         (let [ns-str   (namespace x)
               name-str (name x)]
           (cond
-            (and ns-str (str/includes? ns-str "ioc-macros") (str/ends-with? name-str "-IDX"))
-            (case name-str
-              "STATE-IDX" 1
-              "EXCEPTION-IDX" 2
-              "BINDINGS-IDX" 3
-              "RUN-FN-IDX" 4
-              "USER-START-IDX" 5
-              x)
+            (and ns-str (str/includes? ns-str "ioc-macros"))
+            (case (str/upper-case name-str)
+              "FN-IDX"           0
+              "STATE-IDX"        1
+              "VALUE-IDX"        2
+              "BINDINGS-IDX"     3
+              "EXCEPTION-FRAMES" 4
+              "USER-START-IDX"   5
+              (symbol "cljs.core.async.impl.ioc-helpers" name-str))
 
             ns-str
-            (let [cljs-ns  (str/replace ns-str #"^clojure" "cljs")
-                  final-ns (if (= cljs-ns "cljs.core.async.impl.ioc-macros")
-                             "cljs.core.async.impl.ioc-helpers"
-                             cljs-ns)]
-              (symbol final-ns name-str))
+            (let [cljs-ns (str/replace ns-str #"^clojure" "cljs")]
+              (symbol cljs-ns name-str))
 
             :else x))
         :else x))
     form))
+
+
 #+end_src
 
 
