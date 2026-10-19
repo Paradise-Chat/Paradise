@@ -150,15 +150,14 @@ as well as ensuring no invalid CLJS pieces are evaluated
         (and (seq? x) (= (first x) 'clojure.lang.Var/getThreadBindingFrame)) nil
         (and (seq? x) (= (first x) 'clojure.lang.Var/resetThreadBindingFrame)) nil
         (and (seq? x) (= (first x) 'java.util.concurrent.atomic.AtomicReferenceArray.)) (list 'clojure.core/make-array (second x))
+
+        (and (seq? x)
+             (symbol? (first x))
+             (= (name (first x)) "instance?")
+             (contains? catch-all-targets (second x)))
+        (list 'clojure.core/some? (nth x 2))
+
         (or (= x 'java.lang.Throwable) (= x java.lang.Throwable)) ':default
-        (and (seq? x) (symbol? (first x)) (= (name (first x)) "return-chan"))
-        (let [state-arr (second x)
-              ret-val   (nth x 2)]
-          (list 'let ['c (list 'clojure.core/aget state-arr 5)]
-                (list 'if-not (list 'nil? ret-val)
-                      (list 'cljs.core.async/put! 'c ret-val (list 'fn ['_] (list 'cljs.core.async/close! 'c)))
-                      (list 'cljs.core.async/close! 'c))
-                'c))
 
         (and (seq? x) (symbol? (first x)) (= (name (first x)) "aget-object") (str/includes? (namespace (first x)) "ioc-macros"))
         (cons 'clojure.core/aget (rest x))
