@@ -230,7 +230,6 @@ environment."}
               :link-previews-title  "Link Previews"
               :prefs-subheading "Chat Preferences"}
    :plugins {:section-title "Plugins & Themes"
-             :registries-title "Registries & Engines"
              :security-title "Security Warning"
              :plugin-request "The plugin %1 is requesting to load external JavaScript from the internet."
              :warning-message "Only allow this if you absolutely trust the developer. Malicious scripts can compromise your session."
@@ -245,18 +244,17 @@ environment."}
              :placeholder-plugin-url "https://raw.githubusercontent.com/.../plugin.edn"
              :install "Install"
              :installed "Installed"
-
              :active-plugins "Active Plugins"
              :available-in-registry "Available in Registry"
              :unknown-plugin "Unknown Plugin"
              :no-description "No description provided"
-             :uninstall-plugin "Uninstall Plugin"
-
-             :custom-registries "Custom Registries"
-             :placeholder-registry-url "https://example.com/registry.edn"
-             :add-registry "Add Registry"
-             :remove-registry "Remove Registry"
-             :resolved-engines "Resolved Protocol Engines"}
+             :uninstall-plugin "Uninstall Plugin"}
+   :registry {:section-title "Registries & Engines"
+                :custom-registries "Custom Registries"
+                :placeholder-registry-url "https://example.com/registry.edn"
+                :add-registry "Add Registry"
+                :remove-registry "Remove Registry"
+                :resolved-engines "Resolved Protocol Engines"}
    :voice-video
    {:title "Voice & Video"
     :description "Choose the devices Paradise uses for calls and test them before joining."
