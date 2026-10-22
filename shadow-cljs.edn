@@ -7,6 +7,7 @@
                       [build-hooks/include-themes]
                       [build-hooks/stamp-version]
                       [build-hooks/include-css]
+                      [build-hooks/fetch-community-registry]
                       [build-hooks/copy-runtime-assets]]
         :output-dir "build"
         :asset-path "/"
