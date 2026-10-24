@@ -10,28 +10,25 @@ const copyFiles = {
         {
             src: path.resolve(
                 __dirname,
-                "node_modules/@element-hq/element-call-embedded/dist/*"
+                "node_modules/livekit-client/dist/livekit-client.e2ee.worker.mjs"
             ),
-            dest: "element-call",
-        },
-        {
-            src: path.resolve(
-                __dirname,
-                "node_modules/ffi-bindings/src/generated-compat/wasm-bindgen"
-            ),
-            dest: "generated-compat",
-        },
-        {
-            src: "config.edn",
             dest: ".",
         },
         {
-            src: "i18n.edn",
+            src: path.resolve(__dirname, "build/config.edn"),
             dest: ".",
         },
         {
-            src: "css/*",
+            src: path.resolve(__dirname, "build/i18n.edn"),
+            dest: ".",
+        },
+        {
+            src: path.resolve(__dirname, "build/css/*"),
             dest: "css",
+        },
+        {
+            src: "themes/*",
+            dest: "themes",
         },
     ],
 };
