@@ -37,166 +37,92 @@ const copyFiles = {
     ],
 };
 
-export default defineConfig(({ mode }) => {
-    const env = loadEnv(mode, process.cwd());
+export default defineConfig({
+    root: "./build",
+    base: "./",
 
-    return {
-        publicDir: "../public",
-        root: "./build",
-        plugins: [
-            wasm(),
-            commonjs({
-                filter(id) {
-                    if (
-                        id.includes("uniffi-bindgen-react-native") ||
-                        id.includes("ffi-bindings")
-                    ) {
-                        return true;
-                    }
+    define: {
+        "process.env.NODE_ENV": JSON.stringify(
+            process.env.NODE_ENV || "production"
+        ),
+        global: "globalThis",
+    },
+
+    resolve: {
+        alias: {
+            react: path.resolve(__dirname, "node_modules/react"),
+            "react-dom": path.resolve(__dirname, "node_modules/react-dom"),
+        },
+    },
+
+    plugins: [
+        wasm(),
+        commonjs({
+            filter(id) {
+                if (id.includes("cljs-runtime")) {
                     return false;
-                },
-            }),
-            viteStaticCopy(copyFiles),
-            VitePWA({
-                strategies: "injectManifest",
-                srcDir: ".",
-                filename: "sw.js",
-                injectRegister: "inline",
-                injectManifest: {
-                    injectionPoint: "self.__WB_MANIFEST",
-                    minify: false,
-                    swSrc: "./sw.js",
-                    swDest: "./dist/sw.js",
-                    globIgnores: ["**/*.wasm", "**/element-call/assets/*"],
-                    maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
-                },
-                devOptions: {
-                    enabled: false,
-                    type: "module",
-                },
-                manifest: {
-                    name: "Paradise",
-                    short_name: "Paradise",
-                    start_url: "/",
-                    display: "standalone",
-                    icons: [
-                        {
-                            src: "icon-192x192.png",
-                            sizes: "192x192",
-                            type: "image/png",
-                        },
-                        {
-                            src: "icon-512x512.png",
-                            sizes: "512x512",
-                            type: "image/png",
-                        },
-                    ],
-                },
-            }),
-        ],
-
-        define: {
-            "process.env.VAPID_KEY": JSON.stringify(env.VITE_VAPID_KEY),
-            "process.env.PUSH_NOTIFY_URL": JSON.stringify(
-                env.VITE_PUSH_NOTIFY_URL
-            ),
-            "process.env.WEB_PUSH_APP_ID": JSON.stringify(
-                env.VITE_WEB_PUSH_APP_ID
-            ),
-            "process.env.MATRIX_HOMESERVER": JSON.stringify(
-                env.VITE_MATRIX_HOMESERVER || "https://matrix.org"
-            ),
-            global: "globalThis",
-        },
-
-        optimizeDeps: {
-            include: [
-                "react",
-                "react-dom",
-                "workbox-precaching",
-                "workbox-expiration",
-                "workbox-strategies",
-                "workbox-routing",
-                "workbox-range-requests",
-            ],
-            exclude: ["ffi-bindings", "uniffi-bindgen-react-native"],
-        },
-        build: {
-            target: "es2022",
-            outDir: "../dist",
-            commonjsOptions: {
-                transformMixedEsModules: true,
+                }
+                if (id.includes("uniffi-bindgen-react-native")) {
+                    return true;
+                }
+                return false;
             },
-            terserOptions: {
-                keep_classnames: true,
-                keep_fnames: true,
+        }),
+        viteStaticCopy(copyFiles),
+        VitePWA({
+            strategies: "injectManifest",
+            srcDir: ".",
+            filename: "sw.js",
+            injectRegister: false,
+            manifest: false,
+            injectManifest: {
+                injectionPoint: "self.__WB_MANIFEST",
+                maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
             },
-            minify: false,
-            minifyHtml: false,
-            rollupOptions: {
-                input: {
-                    main: path.resolve(__dirname, "build/index.html"),
-                    engine: path.resolve(__dirname, "build/engine.js"),
-                    virtualizer: path.resolve(
-                        __dirname,
-                        "build/virtualizer.js"
-                    ),
-                    media: path.resolve(__dirname, "build/media.js"),
-                },
-                output: {
-                    entryFileNames: (chunkInfo) => {
-                        if (
-                            chunkInfo.name === "engine" ||
-                            chunkInfo.name === "virtualizer" ||
-                            chunkInfo.name === "media"
-                        ) {
-                            return `${chunkInfo.name}.js`;
-                        }
+            devOptions: {
+                enabled: true,
+                type: "module",
+            },
+        }),
+    ],
 
-                        return "assets/[name]-[hash].js";
-                    },
-                    assetFileNames: "assets/[name].[ext]",
+    worker: {
+        format: "es",
+        plugins: () => [wasm()],
+    },
+
+    server: {
+        port: 8000,
+        host: true,
+        headers: {
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "credentialless",
+        },
+    },
+
+    build: {
+        target: "esnext",
+        outDir: "../dist",
+        emptyOutDir: true,
+        rollupOptions: {
+            input: {
+                main: path.resolve(__dirname, "build/index.html"),
+                engine: path.resolve(__dirname, "build/engine.js"),
+                virtualizer: path.resolve(__dirname, "build/virtualizer.js"),
+            },
+            output: {
+                entryFileNames: (chunkInfo) => {
+                    if (
+                        chunkInfo.name === "engine" ||
+                        chunkInfo.name === "virtualizer"
+                    ) {
+                        return "[name].js";
+                    }
+                    return "assets/[name]-[hash].js";
                 },
+                chunkFileNames: "assets/[name]-[hash].js",
+                assetFileNames: "assets/[name]-[hash].[ext]",
             },
         },
-        resolve: {
-            alias: {
-                "generated-compat": path.resolve(
-                    __dirname,
-                    "./node_modules/ffi-bindings/src/index.web.js"
-                ),
-
-                react: path.resolve(__dirname, "./node_modules/react"),
-                "react-dom": path.resolve(
-                    __dirname,
-                    "./node_modules/react-dom"
-                ),
-                "react/jsx-runtime": path.resolve(
-                    __dirname,
-                    "./node_modules/react/jsx-runtime"
-                ),
-                "react/jsx-dev-runtime": path.resolve(
-                    __dirname,
-                    "./node_modules/react/jsx-dev-runtime"
-                ),
-            },
-        },
-
-        server: {
-            port: 8000,
-            host: true,
-            allowedHosts: true,
-            headers: {
-                "Cross-Origin-Opener-Policy": "unsafe-none",
-                "Cross-Origin-Embedder-Policy": "unsafe-none",
-            },
-            fs: {
-                allow: [
-                    path.resolve(__dirname, ".."),
-                    path.resolve(__dirname, "build"),
-                    path.resolve(__dirname, "node_modules"),
-                ],
-            },
-        },
-    };
+    },
 });
