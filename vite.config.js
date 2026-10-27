@@ -15,6 +15,10 @@ const copyFiles = {
             dest: ".",
         },
         {
+            src: path.resolve(__dirname, "build/*.wasm"),
+            dest: ".",
+        },
+        {
             src: path.resolve(__dirname, "build/config.edn"),
             dest: ".",
         },
