@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
-import MatrixRustSDK
+import JavaScriptCore
+import Security
 
 @objc(ShadowDevicePlugin)
 public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
