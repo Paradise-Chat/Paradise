@@ -1,5 +1,6 @@
 import UserNotifications
-import MatrixRustSDK
+import JavaScriptCore
+import Security
 
 class NotificationService: UNNotificationServiceExtension {
 
