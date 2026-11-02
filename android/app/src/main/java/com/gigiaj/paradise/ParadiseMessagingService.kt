@@ -2,168 +2,150 @@ package com.gigiaj.paradise
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
-import android.content.SharedPreferences
+import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.capacitorjs.plugins.pushnotifications.PushNotificationsPlugin
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
 import org.json.JSONObject
-import org.matrix.rustcomponents.sdk.Session
-import org.matrix.rustcomponents.sdk.SlidingSyncVersion
-import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
-import org.matrix.rustcomponents.sdk.Client
-import org.matrix.rustcomponents.sdk.ClientBuilder
-import org.matrix.rustcomponents.sdk.NotificationProcessSetup
-import org.matrix.rustcomponents.sdk.NotificationStatus
-import org.matrix.rustcomponents.sdk.NotificationEvent
-import org.matrix.rustcomponents.sdk.TimelineEventContent
-import org.matrix.rustcomponents.sdk.MessageType
-import org.matrix.rustcomponents.sdk.MessageLikeEventContent
 
 class ParadiseMessagingService : FirebaseMessagingService() {
 
-    private suspend fun restoreShadowSession(client: Client, sessionData: JSONObject) {
-        val accessToken = sessionData.optString("access_token", null)
-        val userId = sessionData.optString("user_id", null)
-        val deviceId = sessionData.optString("device_id", null)
-        val homeserverUrl = sessionData.optString("homeserver_url", null)
-        val slidingSyncStr = sessionData.optString("sliding_sync_version", "NONE")
-
-        if (!accessToken.isNullOrEmpty() && !userId.isNullOrEmpty() && !deviceId.isNullOrEmpty() && !homeserverUrl.isNullOrEmpty()) {
-            val ssVersion = when (slidingSyncStr) {
-                "NATIVE" -> SlidingSyncVersion.NATIVE
-                else -> SlidingSyncVersion.NONE
+    companion object {
+        private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val workerMutex = Mutex()
+        private val seenEventIds = object : LinkedHashSet<String>() {
+            override fun add(element: String): Boolean {
+                val added = super.add(element)
+                if (size > 100) {
+                    val it = iterator()
+                    if (it.hasNext()) {
+                        it.next()
+                        it.remove()
+                    }
+                }
+                return added
             }
-
-            val session = Session(
-                accessToken = accessToken,
-                refreshToken = null,
-                userId = userId,
-                deviceId = deviceId,
-                homeserverUrl = homeserverUrl,
-                oidcData = null,
-                slidingSyncVersion = ssVersion
-            )
-            client.restoreSession(session)
-        } else {
-            throw Exception("Missing session credentials in JSON object.")
         }
+    }
+
+    override fun onNewToken(token: String) {
+        super.onNewToken(token)
+        Log.d("ParadisePush", "FCM onNewToken received")
+        PushNotificationsPlugin.onNewToken(token)
+    }
+
+    private fun JSONObject.optCleanString(key: String): String? {
+        if (isNull(key)) return null
+        val v = optString(key, "").trim()
+        return if (v.isEmpty() || v == "null") null else v
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         val data = remoteMessage.data
-        val roomId = data["room_id"]
-        val eventId = data["event_id"]
+        Log.d("ParadisePush", "FCM onMessageReceived keys=${data.keys}")
 
-        if (roomId == null || eventId == null) {
+        val roomId = data["room_id"]?.trim()
+        val eventId = data["event_id"]?.trim()
+
+        if (roomId.isNullOrEmpty() || eventId.isNullOrEmpty()) {
+            Log.d("ParadisePush", "Ignoring non-event push payload keys=${data.keys}")
             return
         }
 
-        val sharedPrefs = applicationContext.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val showPreviews = sharedPrefs.getBoolean("show_previews", true)
-        if (!showPreviews) {
-            showNotification(roomId, "New Message", "Open Paradise to view.")
+        synchronized(seenEventIds) {
+            if (!seenEventIds.add(eventId)) {
+                Log.d("ParadisePush", "Duplicate event_id=$eventId ignored")
+                return
+            }
+        }
+
+        val payloadJson = JSONObject()
+        for ((k, v) in data) {
+            payloadJson.put(k, v)
+        }
+        val defaultTag = roomId
+
+        if (!ShadowPushRuntime.getShowPreviews(applicationContext)) {
+            Log.d("ParadisePush", "Previews disabled, showing generic banner")
+            showNotification(defaultTag, "New Message", null, "Open Paradise to view.", data)
             return
         }
 
-        val activeUserId = sharedPrefs.getString("active_push_user", null) ?: return
-        val sessionsStr = sharedPrefs.getString("shadow_sessions", "{}")
-        val sessions = JSONObject(sessionsStr)
-        if (!sessions.has(activeUserId)) {
-            return
-        }
-        val sessionData = sessions.getJSONObject(activeUserId)
-        val homeserverUrl = sessionData.optString("homeserver_url", null)
-        val slidingSyncStr = sessionData.optString("sliding_sync_version", "NONE")
-        if (homeserverUrl.isNullOrEmpty()) {
+        val activeUserId = ShadowPushRuntime.getActiveUser(applicationContext)
+        if (activeUserId == null) {
+            Log.e("ParadisePush", "No active_push_user in shadow_state.json")
             return
         }
 
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val safeUserId = activeUserId.replace(Regex("[^a-zA-Z0-9]"), "_")
-                val dataPath = applicationContext.filesDir.absolutePath + "/matrix-shadow/$safeUserId/data"
-                val cachePath = applicationContext.filesDir.absolutePath + "/matrix-shadow/$safeUserId/cache"
+        val sessionData = ShadowPushRuntime.getShadowSession(applicationContext, activeUserId)
+        if (sessionData == null) {
+            Log.e("ParadisePush", "No shadow_session found for $activeUserId")
+            return
+        }
 
-                val ssBuilder = when (slidingSyncStr) {
-                    "NATIVE" -> SlidingSyncVersionBuilder.NATIVE
-                    "NONE" -> SlidingSyncVersionBuilder.NONE
-                    else -> SlidingSyncVersionBuilder.DISCOVER_NATIVE
+        val scriptName = sessionData.optString("notification_script", "push-matrix.js")
+
+        serviceScope.launch {
+            workerMutex.withLock {
+                try {
+                    Log.d("ParadisePush", "Invoking QuickJS ($scriptName) for event=$eventId")
+                    val args = JSONArray().apply {
+                        put(payloadJson)
+                        put(sessionData)
+                    }
+
+                    val res = ShadowPushRuntime.invokeWorkerFunction(
+                        context = applicationContext,
+                        userId = activeUserId,
+                        scriptName = scriptName,
+                        functionName = "resolvePushNotification",
+                        argsJsonArray = args
+                    )
+
+                    Log.d("ParadisePush", "QuickJS result: $res")
+
+                    if (res.optBoolean("ignore", false)) {
+                        return@withLock
+                    }
+
+                    val tag = res.optCleanString("tag") ?: defaultTag
+                    val title = res.optCleanString("title") ?: "New Message"
+                    val subtitle = res.optCleanString("subtitle")
+                    val body = res.optCleanString("body") ?: "Open Paradise to view."
+
+                    if (res.optBoolean("is_call", false)) {
+                        ParadiseCallPlugin.triggerIncomingCall(applicationContext, tag, title)
+                    }
+
+                    showNotification(tag, title, subtitle, body, data)
+                } catch (t: Throwable) {
+                    Log.e("ParadisePush", "Push worker evaluation failed", t)
+                    showNotification(defaultTag, "New Message", null, "Open Paradise to view.", data)
                 }
-
-                val client = ClientBuilder()
-                    .homeserverUrl(homeserverUrl)
-                    .sessionPaths(dataPath, cachePath)
-                    .systemIsMemoryConstrained()
-                    .slidingSyncVersionBuilder(ssBuilder)
-                    .build()
-
-                restoreShadowSession(client, sessionData)
-
-                val pushClient = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
-                val status = pushClient.getNotification(roomId, eventId)
-
-                when (status) {
-                    is NotificationStatus.Event -> {
-                        val item = status.item
-                        val senderName = item.senderInfo.displayName ?: "Unknown Sender"
-                        val roomName = item.roomInfo.displayName ?: "Unknown Room"
-
-                        val messageBody = when (val notifEvent = item.event) {
-                            is NotificationEvent.Timeline -> {
-                                when (val eventContent = notifEvent.event.content()) {
-                                    is TimelineEventContent.MessageLike -> {
-                                      when (val msgLikeContent = eventContent.content) {
-                                          is MessageLikeEventContent.RoomMessage -> {
-                                              when (val msgType = msgLikeContent.messageType) {
-                                                  is MessageType.Text -> msgType.content.body
-                                                  is MessageType.Image -> "📸 Sent an image"
-                                                  is MessageType.Video -> "🎥 Sent a video"
-                                                  is MessageType.Audio -> "🎵 Sent an audio clip"
-                                                  is MessageType.File -> "📁 Sent a file"
-                                                  is MessageType.Emote -> "* $senderName ${msgType.content.body}"
-                                                  is MessageType.Notice -> msgType.content.body
-                                                  else -> "Sent a message"
-                                              }
-                                          }
-                                          is MessageLikeEventContent.ReactionContent -> "Reacted to a message"
-                                          is MessageLikeEventContent.Sticker -> "Sent a sticker"
-                                          is MessageLikeEventContent.CallInvite -> "📞 Incoming call"
-                                          else -> "New activity in $roomName"
-                                      }
-                                    }
-                                    is TimelineEventContent.State -> "Room settings changed"
-                                }
-                            }
-                            is NotificationEvent.Invite -> "Invited you to the room"
-                        }
-
-                        showNotification(roomId, senderName, messageBody)
-                    }
-                    is NotificationStatus.EventNotFound -> {
-                        showNotification(roomId, "New Message", "Open Paradise to view.")
-                    }
-                    is NotificationStatus.EventFilteredOut -> {
-                        Log.d("ParadisePush", "Event filtered out by push rules. Ignoring.")
-                    }
-                    is NotificationStatus.EventRedacted -> {
-                        Log.d("ParadisePush", "Event was redacted. Ignoring.")
-                    }
-                }
-
-            } catch (e: Exception) {
-                Log.e("ParadisePush", "Decryption failed", e)
-                showNotification(roomId, "New Message", "Open Paradise to view.")
             }
         }
     }
 
-    private fun showNotification(roomId: String, title: String, body: String) {
+    private fun showNotification(
+        tag: String,
+        title: String,
+        subtitle: String?,
+        body: String,
+        rawExtras: Map<String, String>
+    ) {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "paradise_messages"
 
@@ -176,15 +158,38 @@ class ParadiseMessagingService : FirebaseMessagingService() {
             notificationManager.createNotificationChannel(channel)
         }
 
-        val notificationBuilder = NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(applicationInfo.icon)
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("push_tag", tag)
+            for ((k, v) in rawExtras) {
+                putExtra(k, v)
+            }
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            tag.hashCode(),
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val largeIcon = BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
+
+        val builder = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_stat_notify)
+            .setColor(0xCCDD51.toInt())
+            .setLargeIcon(largeIcon)
             .setContentTitle(title)
             .setContentText(body)
+            .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
 
-        val notificationId = roomId.hashCode()
+        if (!subtitle.isNullOrBlank()) {
+            builder.setSubText(subtitle)
+        }
 
-        notificationManager.notify(notificationId, notificationBuilder.build())
+        notificationManager.notify(tag, 0, builder.build())
     }
 }
+
