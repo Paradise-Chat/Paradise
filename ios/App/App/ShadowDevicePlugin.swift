@@ -5,107 +5,325 @@ import Security
 
 @objc(ShadowDevicePlugin)
 public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
-    
+
     public let identifier = "ShadowDevicePlugin"
     public let jsName = "ShadowDevice"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "syncPushScript", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "createSleepyShadow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "activateShadow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deactivateShadow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "verifyShadow", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "importRoomKeys", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getShadowStatus", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getActivePushUser", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPreviewPreferences", returnType: CAPPluginReturnPromise)
     ]
 
     let appGroupId = "group.com.gigiaj.paradise"
+    private let stateLock = NSLock()
 
-    private func buildMatrixClient(homeserverUrl: String, ssStr: String, userId: String) async throws -> Client {
-        guard let containerUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
-            throw NSError(domain: "ShadowDevice", code: 1, userInfo: [NSLocalizedDescriptionKey: "App Group container not found!"])
+    private func extractOptions(_ call: CAPPluginCall) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (key, value) in call.options {
+            if let k = key as? String, !(value is NSNull) {
+                out[k] = value
+            }
         }
-        
-        let safeUserId = userId.replacingOccurrences(of: "[^a-zA-Z0-9]", with: "_", options: .regularExpression)
-        
-        let dataPath = containerUrl.appendingPathComponent("matrix-shadow/\(safeUserId)/data").path
-        let cachePath = containerUrl.appendingPathComponent("matrix-shadow/\(safeUserId)/cache").path
-
-        let ssBuilder: SlidingSyncVersionBuilder
-        switch ssStr {
-        case "NATIVE": ssBuilder = .native
-        case "NONE": ssBuilder = .none
-        default: ssBuilder = .discoverNative
-        }
-        
-        return try await ClientBuilder()
-            .homeserverUrl(url: homeserverUrl)
-            .sessionPaths(dataPath: dataPath, cachePath: cachePath)
-            .systemIsMemoryConstrained()
-            .slidingSyncVersionBuilder(versionBuilder: ssBuilder)
-            .build()
+        return out
     }
-    
+
+    private func sanitizeScriptName(_ rawPath: String?) -> String? {
+        guard let raw = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        let lastComponent = (raw as NSString).lastPathComponent
+        return (lastComponent.isEmpty || !lastComponent.hasSuffix(".js")) ? nil : lastComponent
+    }
+
+    private func resolveScriptName(options: [String: Any], sessionData: [String: String]? = nil) -> String? {
+        if let fromOptions = sanitizeScriptName((options["notificationScript"] as? String) ?? (options["scriptName"] as? String)) {
+            return fromOptions
+        }
+        return sanitizeScriptName(sessionData?["notification_script"])
+    }
+
+    private func getContainerUrl() throws -> URL {
+        guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
+            throw NSError(domain: "ShadowDevice", code: 1, userInfo: [NSLocalizedDescriptionKey: "App Group container not found"])
+        }
+        return url
+    }
+
+    private func getStateFileUrl() throws -> URL {
+        return try getContainerUrl().appendingPathComponent("shadow_state.json")
+    }
+
+    private func readSharedState() -> [String: Any] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let url = try? getStateFileUrl(),
+              let data = try? Data(contentsOf: url),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return dict
+    }
+
+    private func writeSharedState(_ state: [String: Any]) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let url = try? getStateFileUrl(),
+              let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted]) else {
+            return
+        }
+        try? data.write(to: url, options: [.atomic])
+    }
 
     private func getShadowSession(userId: String) -> [String: String]? {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-        let sessions = sharedDefaults.dictionary(forKey: "shadow_sessions") as? [String: [String: String]] ?? [:]
-        return sessions[userId]
+        let state = readSharedState()
+        guard let sessions = state["shadow_sessions"] as? [String: Any],
+              let rawUserSession = sessions[userId] as? [String: Any] else {
+            return nil
+        }
+        var out: [String: String] = [:]
+        for (k, v) in rawUserSession {
+            out[k] = "\(v)"
+        }
+        return out
     }
 
-    private func restoreShadowSession(client: Client, sessionData: [String: String]) async throws {
-        guard let accessToken = sessionData["access_token"],
-              let userId = sessionData["user_id"],
-              let deviceId = sessionData["device_id"],
-              let homeserverUrl = sessionData["homeserver_url"] else {
-            throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing session data in dictionary"])
+    private func saveShadowSession(userId: String, sessionData: [String: String]) {
+        var state = readSharedState()
+        var sessions = state["shadow_sessions"] as? [String: [String: String]] ?? [:]
+        sessions[userId] = sessionData
+        state["shadow_sessions"] = sessions
+        writeSharedState(state)
+    }
+
+    private func setActiveUser(_ userId: String?) {
+        var state = readSharedState()
+        if let uid = userId {
+            state["active_push_user"] = uid
+        } else {
+            state.removeValue(forKey: "active_push_user")
         }
-        
-        let slidingSyncStr = sessionData["sliding_sync_version"] ?? "NONE"
-        let ssVersion: SlidingSyncVersion = (slidingSyncStr == "NATIVE") ? .native : .none
-        
-        let session = Session(
-            accessToken: accessToken,
-            refreshToken: nil,
-            userId: userId,
-            deviceId: deviceId,
-            homeserverUrl: homeserverUrl,
-            oidcData: nil,
-            slidingSyncVersion: ssVersion
-        )
-        
-        try await client.restoreSession(session: session)
+        writeSharedState(state)
+    }
+
+    private func stripSourceMap(_ source: String) -> String {
+        if let range = source.range(of: "//# sourceMappingURL=", options: .backwards) {
+            return String(source[..<range.lowerBound])
+        }
+        return source
+    }
+
+    private func syncScriptToAppGroup(scriptName: String, scriptSource: String? = nil) throws -> String {
+        let containerUrl = try getContainerUrl()
+        guard let cleanName = sanitizeScriptName(scriptName) else {
+            throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid script name: \(scriptName)"])
+        }
+        let destUrl = containerUrl.appendingPathComponent("scripts/\(cleanName)")
+        try? FileManager.default.createDirectory(at: destUrl.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        if let providedSource = scriptSource, !providedSource.isEmpty {
+            let cleanSource = stripSourceMap(providedSource)
+            try cleanSource.write(to: destUrl, atomically: true, encoding: .utf8)
+            return cleanSource
+        }
+
+        let baseName = (cleanName as NSString).deletingPathExtension
+        let ext = (cleanName as NSString).pathExtension
+
+        let bundleCandidates: [URL?] = [
+            Bundle.main.url(forResource: baseName, withExtension: ext, subdirectory: "public"),
+            Bundle.main.url(forResource: baseName, withExtension: ext, subdirectory: "public/push-workers"),
+            Bundle.main.url(forResource: baseName, withExtension: ext)
+        ]
+
+        if let bundledUrl = bundleCandidates.compactMap({ $0 }).first,
+           let bundledSource = try? String(contentsOf: bundledUrl, encoding: .utf8) {
+            let cleanSource = stripSourceMap(bundledSource)
+            try? cleanSource.write(to: destUrl, atomically: true, encoding: .utf8)
+            return cleanSource
+        }
+
+        if let existing = try? String(contentsOf: destUrl, encoding: .utf8), !existing.isEmpty {
+            return existing
+        }
+
+        throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not locate \(cleanName)"])
+    }
+
+    private func invokeWorkerFunction(
+        userId: String,
+        scriptName: String,
+        functionName: String,
+        arguments: [Any]
+    ) throws -> [String: Any] {
+        let containerUrl = try getContainerUrl()
+        guard let cleanScriptName = sanitizeScriptName(scriptName) else {
+            throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing or invalid notification script"])
+        }
+        let scriptSource = try syncScriptToAppGroup(scriptName: cleanScriptName)
+        let safeUserId = userId.replacingOccurrences(of: "[^a-zA-Z0-9]", with: "_", options: .regularExpression)
+        let storeDir = containerUrl.appendingPathComponent("push-store/\(safeUserId)")
+
+        guard let vm = JSVirtualMachine(),
+              let ctx = JSContext(virtualMachine: vm) else {
+            throw NSError(domain: "ShadowDevice", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create JSContext"])
+        }
+
+        let getRandomBytes: @convention(block) (Int) -> [UInt8] = { count in
+            guard count > 0 else { return [] }
+            var bytes = [UInt8](repeating: 0, count: count)
+            _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+            return bytes
+        }
+
+        let httpSync: @convention(block) (String, String, [String: String], String?) -> [String: Any] = { method, urlStr, headers, body in
+            guard let url = URL(string: urlStr) else {
+                return ["ok": false, "status": 0, "body": "Invalid URL: \(urlStr)"]
+            }
+            var req = URLRequest(url: url, timeoutInterval: 10.0)
+            req.httpMethod = method
+            for (k, v) in headers {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+            if method != "GET" && method != "HEAD",
+               let b = body, !b.isEmpty, b != "null", b != "undefined" {
+                req.httpBody = b.data(using: .utf8)
+            }
+
+            let sem = DispatchSemaphore(value: 0)
+            var responseDict: [String: Any] = ["ok": false, "status": 0, "body": "Timeout"]
+
+            URLSession.shared.dataTask(with: req) { data, response, error in
+                if let httpResp = response as? HTTPURLResponse {
+                    let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                    responseDict = [
+                        "ok": (200...299).contains(httpResp.statusCode),
+                        "status": httpResp.statusCode,
+                        "body": text
+                    ]
+                } else if let error = error {
+                    responseDict = [
+                        "ok": false,
+                        "status": 0,
+                        "body": error.localizedDescription
+                    ]
+                }
+                sem.signal()
+            }.resume()
+
+            _ = sem.wait(timeout: .now() + 12.0)
+            return responseDict
+        }
+
+        let storageGet: @convention(block) (String) -> String? = { relPath in
+            let clean = relPath.replacingOccurrences(of: "..", with: "_")
+            let url = storeDir.appendingPathComponent(clean)
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+
+        let storageSet: @convention(block) (String, String) -> Bool = { relPath, content in
+            let clean = relPath.replacingOccurrences(of: "..", with: "_")
+            let url = storeDir.appendingPathComponent(clean)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        ctx.setObject(getRandomBytes, forKeyedSubscript: "__nativeGetRandomBytes" as NSString)
+        ctx.setObject(httpSync, forKeyedSubscript: "__hostHttpSync" as NSString)
+        ctx.setObject(storageGet, forKeyedSubscript: "__hostStorageGet" as NSString)
+        ctx.setObject(storageSet, forKeyedSubscript: "__hostStorageSet" as NSString)
+
+        ctx.evaluateScript(scriptSource)
+
+        if let exception = ctx.exception {
+            throw NSError(domain: "ShadowDevice", code: 4, userInfo: [NSLocalizedDescriptionKey: "JS evaluation error: \(exception)"])
+        }
+
+        guard let fnVal = ctx.objectForKeyedSubscript(functionName),
+              !fnVal.isUndefined,
+              let resVal = fnVal.call(withArguments: arguments) else {
+            throw NSError(domain: "ShadowDevice", code: 5, userInfo: [NSLocalizedDescriptionKey: "Function \(functionName) missing or failed"])
+        }
+
+        if let exception = ctx.exception {
+            throw NSError(domain: "ShadowDevice", code: 6, userInfo: [NSLocalizedDescriptionKey: "JS execution error: \(exception)"])
+        }
+
+        return (resVal.toDictionary() as? [String: Any]) ?? [:]
+    }
+
+    @objc func syncPushScript(_ call: CAPPluginCall) {
+        let options = extractOptions(call)
+        guard let rawName = options["scriptName"] as? String,
+              let cleanName = sanitizeScriptName(rawName),
+              let scriptSource = options["scriptSource"] as? String else {
+            return call.reject("Missing or invalid scriptName or scriptSource")
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                _ = try self.syncScriptToAppGroup(scriptName: cleanName, scriptSource: scriptSource)
+                call.resolve(["status": "script_synced", "scriptName": cleanName])
+            } catch {
+                call.reject("Failed to sync push script", nil, error)
+            }
+        }
     }
 
     @objc func createSleepyShadow(_ call: CAPPluginCall) {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-        
-        guard let homeserver = call.getString("homeserverUrl"),
-              let username = call.getString("username"),
-              let password = call.getString("password"),
-              let userId = call.getString("userId")
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String) else {
+            return call.reject("Missing userId")
+        }
 
-              else {
-                    return call.reject("Missing arguments")
-              }
+        guard let cleanName = resolveScriptName(options: options) else {
+            return call.reject("Missing notificationScript")
+        }
 
-        Task {
+        if let providedSource = options["scriptSource"] as? String, !providedSource.isEmpty {
+            _ = try? syncScriptToAppGroup(scriptName: cleanName, scriptSource: providedSource)
+        }
+
+        let engine = (options["engine"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var workerArgs = options
+        workerArgs.removeValue(forKey: "scriptSource")
+
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let client = try await buildMatrixClient(homeserverUrl: homeserver, ssStr: "DISCOVER", userId: userId)
-                try await client.login(username: username, password: password, initialDeviceName: "Paradise Background Sync", deviceId: nil)
-                
-                let session = try client.session()
-                let ssName = (session.slidingSyncVersion == .native) ? "NATIVE" : "NONE"
-                
-                var sessions = sharedDefaults.dictionary(forKey: "shadow_sessions") as? [String: [String: String]] ?? [:]
-                sessions[session.userId] = [
-                    "access_token": session.accessToken,
-                    "user_id": session.userId,
-                    "device_id": session.deviceId,
-                    "homeserver_url": homeserver,
-                    "sliding_sync_version": ssName
-                ]
-                sharedDefaults.set(sessions, forKey: "shadow_sessions")
-                
+                let res = try self.invokeWorkerFunction(
+                    userId: userId,
+                    scriptName: cleanName,
+                    functionName: "createShadowSession",
+                    arguments: [workerArgs]
+                )
+
+                guard (res["ok"] as? Bool) == true,
+                      let rawSession = res["session"] as? [String: Any] else {
+                    let errMsg = (res["error"] as? String) ?? "Unknown error in createShadowSession"
+                    return call.reject(errMsg)
+                }
+
+                var stringSession: [String: String] = [:]
+                for (k, v) in rawSession {
+                    stringSession[k] = "\(v)"
+                }
+                stringSession["notification_script"] = cleanName
+                if !engine.isEmpty {
+                    stringSession["engine"] = engine
+                }
+
+                let resolvedUserId = (res["userId"] as? String) ?? userId
+                self.saveShadowSession(userId: resolvedUserId, sessionData: stringSession)
                 call.resolve(["status": "sleepy_shadow_created"])
             } catch {
                 call.reject("Failed to create Sleepy Shadow", nil, error)
@@ -113,129 +331,104 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-
     @objc func activateShadow(_ call: CAPPluginCall) {
-
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-
-        guard let pushToken = call.getString("pushToken"),
-              let pushUrl = call.getString("pushUrl"),
-              let userId = call.getString("userId") else {
-            return call.reject("Missing arguments")
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String) else {
+            return call.reject("Missing userId")
         }
-        
+
         guard let sessionData = getShadowSession(userId: userId) else {
             return call.reject("No shadow session found for user: \(userId)")
         }
-        
-        let homeserver = sessionData["homeserver_url"]!
-        let ssStr = sessionData["sliding_sync_version"] ?? "NONE"
 
+        guard let scriptName = resolveScriptName(options: options, sessionData: sessionData) else {
+            return call.reject("No notification_script configured for user: \(userId)")
+        }
 
-        Task {
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let client = try await buildMatrixClient(homeserverUrl: homeserver, ssStr: ssStr, userId: userId)
-                try await restoreShadowSession(client: client, sessionData: sessionData)
-                
-                let payloadDict: [String: Any] = [
-                    "aps": [
-                        "mutable-content": 1,
-                        "alert": [
-                            "loc-key": "Notification",
-                            "loc-args": []
-                        ]
-                    ]
-                ]
-                
-                let payloadData = try JSONSerialization.data(withJSONObject: payloadDict)
-                guard let payloadString = String(data: payloadData, encoding: .utf8) else {
-                    return call.reject("Failed to encode payload string")
-                }
-                
-                let identifiers = PusherIdentifiers(pushkey: pushToken, appId: "moi.paradise.ios")
-                let httpData = HttpPusherData(url: pushUrl, format: .eventIdOnly, defaultPayload: payloadString)
-
-                try await client.setPusher(
-                    identifiers: identifiers,
-                    kind: PusherKind.http(data: httpData),
-                    appDisplayName: "Paradise",
-                    deviceDisplayName: "iOS Device",
-                    profileTag: "primary",
-                    lang: "en"
+                let res = try self.invokeWorkerFunction(
+                    userId: userId,
+                    scriptName: scriptName,
+                    functionName: "activatePushSession",
+                    arguments: [options, sessionData]
                 )
 
-                sharedDefaults.set(userId, forKey: "active_push_user")
+                guard (res["ok"] as? Bool) == true else {
+                    let errMsg = (res["error"] as? String) ?? "Failed to activate push session"
+                    return call.reject(errMsg)
+                }
 
+                self.setActiveUser(userId)
                 call.resolve(["status": "shadow_activated"])
             } catch {
                 call.reject("Failed to activate Shadow Device", nil, error)
             }
         }
     }
-    
+
     @objc func deactivateShadow(_ call: CAPPluginCall) {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-
-
-        guard let pushToken = call.getString("pushToken"),
-              let userId = call.getString("userId") else {
-            return call.reject("Missing arguments")
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String) else {
+            return call.reject("Missing userId")
         }
-        
+
         guard let sessionData = getShadowSession(userId: userId) else {
-            return call.reject("No shadow session found for user: \(userId)")
+            setActiveUser(nil)
+            return call.resolve(["status": "shadow_deactivated"])
         }
 
-        let homeserver = sessionData["homeserver_url"]!
-        let ssStr = sessionData["sliding_sync_version"] ?? "NONE"
-        
-        Task {
+        guard let scriptName = resolveScriptName(options: options, sessionData: sessionData) else {
+            setActiveUser(nil)
+            return call.resolve(["status": "shadow_deactivated"])
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let client = try await buildMatrixClient(homeserverUrl: homeserver, ssStr: ssStr, userId: userId)
-                try await restoreShadowSession(client: client, sessionData: sessionData)
-                
-                let identifiers = PusherIdentifiers(pushkey: pushToken, appId: "moi.paradise.ios")
-                try await client.deletePusher(identifiers: identifiers)
-
-                sharedDefaults.removeObject(forKey: "active_push_user")
-
+                _ = try self.invokeWorkerFunction(
+                    userId: userId,
+                    scriptName: scriptName,
+                    functionName: "deactivatePushSession",
+                    arguments: [options, sessionData]
+                )
+                self.setActiveUser(nil)
                 call.resolve(["status": "shadow_deactivated"])
             } catch {
                 call.reject("Failed to deactivate Shadow Device", nil, error)
             }
-         }
-        
         }
+    }
 
-
-        @objc func verifyShadow(_ call: CAPPluginCall) {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-
-        guard let userId = call.getString("userId"),
-              let recoveryKey = call.getString("recoveryKey") else {
-            return call.reject("Missing arguments")
+    @objc func verifyShadow(_ call: CAPPluginCall) {
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String) else {
+            return call.reject("Missing userId")
         }
 
         guard var sessionData = getShadowSession(userId: userId) else {
             return call.reject("No shadow session found for user: \(userId)")
         }
 
-        let homeserver = sessionData["homeserver_url"]!
-        let ssStr = sessionData["sliding_sync_version"] ?? "NONE"
+        guard let scriptName = resolveScriptName(options: options, sessionData: sessionData) else {
+            return call.reject("No notification_script configured for user: \(userId)")
+        }
 
-        Task {
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let client = try await buildMatrixClient(homeserverUrl: homeserver, ssStr: ssStr, userId: userId)
-                try await restoreShadowSession(client: client, sessionData: sessionData)
-                
-                let encryption = client.encryption()
-                try await encryption.recover(recoveryKey: recoveryKey) 
+                let res = try self.invokeWorkerFunction(
+                    userId: userId,
+                    scriptName: scriptName,
+                    functionName: "verifyPushSession",
+                    arguments: [options, sessionData]
+                )
+
+                guard (res["ok"] as? Bool) == true else {
+                    let errMsg = (res["error"] as? String) ?? "Failed to verify shadow session"
+                    return call.reject(errMsg)
+                }
 
                 sessionData["is_verified"] = "true"
-                var sessions = sharedDefaults.dictionary(forKey: "shadow_sessions") as? [String: [String: String]] ?? [:]
-                sessions[userId] = sessionData
-                sharedDefaults.set(sessions, forKey: "shadow_sessions")
-
+                self.saveShadowSession(userId: userId, sessionData: sessionData)
                 call.resolve(["status": "shadow_verified"])
             } catch {
                 call.reject("Failed to verify Shadow Device", nil, error)
@@ -243,34 +436,61 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    @objc func getShadowStatus(_ call: CAPPluginCall) {
-        guard let userId = call.getString("userId") else {
-            return call.reject("Missing arguments")
+    @objc func importRoomKeys(_ call: CAPPluginCall) {
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String),
+              let exportedKeysJson = options["exportedRoomKeysJson"] as? String else {
+            return call.reject("Missing userId or exportedRoomKeysJson")
         }
-        
+
+        let sessionData = getShadowSession(userId: userId)
+        guard let scriptName = resolveScriptName(options: options, sessionData: sessionData) else {
+            return call.reject("No notification_script configured for user: \(userId)")
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try self.invokeWorkerFunction(
+                    userId: userId,
+                    scriptName: scriptName,
+                    functionName: "importRoomKeys",
+                    arguments: [exportedKeysJson]
+                )
+                call.resolve(["status": "keys_imported"])
+            } catch {
+                call.reject("Failed to import room keys", nil, error)
+            }
+        }
+    }
+
+    @objc func getShadowStatus(_ call: CAPPluginCall) {
+        let options = extractOptions(call)
+        guard let userId = (options["userId"] as? String) ?? (options["user-id"] as? String) else {
+            return call.reject("Missing userId")
+        }
+
         if let sessionData = getShadowSession(userId: userId),
-           let isVerified = sessionData["is_verified"], isVerified == "true" {
+           sessionData["is_verified"] == "true" {
             call.resolve(["isVerified": true])
         } else {
             call.resolve(["isVerified": false])
         }
     }
 
-  @objc func getActivePushUser(_ call: CAPPluginCall) {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
-
-        if let activePushUser = sharedDefaults.string(forKey: "active_push_user") {
+    @objc func getActivePushUser(_ call: CAPPluginCall) {
+        let state = readSharedState()
+        if let activePushUser = state["active_push_user"] as? String {
             call.resolve(["activeUser": activePushUser])
         } else {
             call.resolve([:])
         }
     }
 
-
-  @objc func setPreviewPreferences(_ call: CAPPluginCall) {
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
+    @objc func setPreviewPreferences(_ call: CAPPluginCall) {
         let isEnabled = call.getBool("enabled", true)
-        sharedDefaults.set(isEnabled, forKey: "show_previews")
+        var state = readSharedState()
+        state["show_previews"] = isEnabled
+        writeSharedState(state)
         call.resolve()
     }
 }
