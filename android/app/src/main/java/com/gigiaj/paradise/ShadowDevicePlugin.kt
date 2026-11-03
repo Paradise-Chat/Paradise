@@ -14,91 +14,97 @@ import org.json.JSONObject
 @CapacitorPlugin(name = "ShadowDevice")
 class ShadowDevicePlugin : Plugin() {
 
-    private suspend fun buildMatrixClient(homeserverUrl: String, ssStr: String?, userId: String): Client {
-        val safeUserId = userId.replace(Regex("[^a-zA-Z0-9]"), "_")
-        val dataPath = context.filesDir.absolutePath + "/matrix-shadow/$safeUserId/data"
-        val cachePath = context.filesDir.absolutePath + "/matrix-shadow/$safeUserId/cache"
+    private fun extractOptionsJson(call: PluginCall): JSONObject {
+        val data = call.data ?: return JSONObject()
+        return JSONObject(data.toString())
+    }
 
-        val ssBuilder = when (ssStr) {
-            "NATIVE" -> SlidingSyncVersionBuilder.NATIVE
-            "NONE" -> SlidingSyncVersionBuilder.NONE
-            else -> SlidingSyncVersionBuilder.DISCOVER_NATIVE
+    private fun resolveUserId(options: JSONObject): String? {
+        val uid = options.optString("userId", options.optString("user-id", ""))
+        return if (uid.isBlank()) null else uid
+    }
+
+    private fun resolveScriptName(options: JSONObject, sessionData: JSONObject? = null): String? {
+        val fromOptions = options.optString("notificationScript", options.optString("scriptName", ""))
+        ShadowPushRuntime.sanitizeScriptName(fromOptions)?.let { return it }
+        val fromSession = sessionData?.optString("notification_script", "")
+        return ShadowPushRuntime.sanitizeScriptName(fromSession)
+    }
+
+    @PluginMethod
+    fun syncPushScript(call: PluginCall) {
+        val scriptName = call.getString("scriptName")
+        val scriptSource = call.getString("scriptSource")
+        val cleanName = ShadowPushRuntime.sanitizeScriptName(scriptName)
+        if (cleanName == null || scriptSource.isNullOrBlank()) {
+            return call.reject("Missing or invalid scriptName or scriptSource")
         }
 
-        return ClientBuilder()
-            .homeserverUrl(homeserverUrl)
-            .sessionPaths(dataPath, cachePath)
-            .systemIsMemoryConstrained()
-            .slidingSyncVersionBuilder(ssBuilder)
-            .build()
-    }
-
-    private fun getShadowSession(sharedPrefs: SharedPreferences, userId: String): JSONObject? {
-        val sessionsStr = sharedPrefs.getString("shadow_sessions", "{}")
-        val sessions = JSONObject(sessionsStr)
-        return if (sessions.has(userId)) sessions.getJSONObject(userId) else null
-    }
-
-    private suspend fun restoreShadowSession(client: Client, sessionData: JSONObject) {
-        val accessToken = sessionData.optString("access_token", null)
-        val userId = sessionData.optString("user_id", null)
-        val deviceId = sessionData.optString("device_id", null)
-        val homeserverUrl = sessionData.optString("homeserver_url", null)
-        val slidingSyncStr = sessionData.optString("sliding_sync_version", "NONE")
-
-        if (!accessToken.isNullOrEmpty() && !userId.isNullOrEmpty() && !deviceId.isNullOrEmpty() && !homeserverUrl.isNullOrEmpty()) {
-            val ssVersion = when (slidingSyncStr) {
-                "NATIVE" -> SlidingSyncVersion.NATIVE
-                else -> SlidingSyncVersion.NONE
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                ShadowPushRuntime.syncScript(context, cleanName, scriptSource)
+                val ret = JSObject().apply {
+                    put("status", "script_synced")
+                    put("scriptName", cleanName)
+                }
+                call.resolve(ret)
+            } catch (e: Exception) {
+                call.reject("Failed to sync push script", e)
             }
-
-            val session = Session(
-                accessToken = accessToken,
-                refreshToken = null,
-                userId = userId,
-                deviceId = deviceId,
-                homeserverUrl = homeserverUrl,
-                oidcData = null,
-                slidingSyncVersion = ssVersion
-            )
-            client.restoreSession(session)
-        } else {
-            throw Exception("Missing session credentials in JSON object.")
         }
     }
 
     @PluginMethod
     fun createSleepyShadow(call: PluginCall) {
-        val homeserver = call.getString("homeserverUrl") ?: return call.reject("Missing homeserverUrl")
-        val username = call.getString("username") ?: return call.reject("Missing username")
-        val password = call.getString("password") ?: return call.reject("Missing password")
-        val userId = call.getString("userId") ?: return call.reject("Missing userId")
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val cleanName = resolveScriptName(options)
+            ?: return call.reject("Missing notificationScript")
+        val providedSource = options.optString("scriptSource", "")
+        val engine = options.optString("engine", "").trim()
 
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
+        options.remove("scriptSource")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = buildMatrixClient(homeserver, "DISCOVER", userId)
-                client.login(username, password, "Paradise Background Sync", null)
-                val session = client.session()
-                if (session != null) {
-                    val ssName = if (session.slidingSyncVersion == SlidingSyncVersion.NATIVE) "NATIVE" else "NONE"
-                    val sessionData = JSONObject().apply {
-                        put("access_token", session.accessToken)
-                        put("user_id", session.userId)
-                        put("device_id", session.deviceId)
-                        put("homeserver_url", homeserver)
-                        put("sliding_sync_version", ssName)
-                    }
-
-                    val sessionsStr = sharedPrefs.getString("shadow_sessions", "{}")
-                    val sessions = JSONObject(sessionsStr)
-                    sessions.put(session.userId, sessionData)
-
-                    sharedPrefs.edit().putString("shadow_sessions", sessions.toString()).apply()
+                if (providedSource.isNotBlank()) {
+                    ShadowPushRuntime.syncScript(context, cleanName, providedSource)
                 }
-                val ret = JSObject()
-                ret.put("status", "sleepy_shadow_created")
+
+                val args = JSONArray().apply { put(options) }
+                val res = ShadowPushRuntime.invokeWorkerFunction(
+                    context = context,
+                    userId = userId,
+                    scriptName = cleanName,
+                    functionName = "createShadowSession",
+                    argsJsonArray = args
+                )
+
+                if (!res.optBoolean("ok", false)) {
+                    val err = res.optString("error", "Unknown error in createShadowSession")
+                    return@launch call.reject(err)
+                }
+
+                val rawSession = res.optJSONObject("session")
+                    ?: return@launch call.reject("Missing session object from worker")
+
+                val sessionData = JSONObject()
+                val keys = rawSession.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    sessionData.put(k, rawSession.opt(k).toString())
+                }
+                sessionData.put("notification_script", cleanName)
+                if (engine.isNotEmpty()) {
+                    sessionData.put("engine", engine)
+                }
+
+                val resolvedUserId = res.optString("userId", userId).ifBlank { userId }
+                ShadowPushRuntime.saveShadowSession(context, resolvedUserId, sessionData)
+
+                val ret = JSObject().apply {
+                    put("status", "sleepy_shadow_created")
+                }
                 call.resolve(ret)
             } catch (e: Exception) {
                 call.reject("Failed to create Sleepy Shadow", e)
@@ -108,43 +114,42 @@ class ShadowDevicePlugin : Plugin() {
 
     @PluginMethod
     fun activateShadow(call: PluginCall) {
-        val fcmToken = call.getString("pushToken") ?: return call.reject("Missing pushToken")
-        val pushUrl = call.getString("pushUrl") ?: return call.reject("Missing pushUrl")
-        val userId = call.getString("userId") ?: return call.reject("Missing userId")
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val sessionData = getShadowSession(sharedPrefs, userId) ?: return call.reject("No shadow session found for user: $userId")
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val sessionData = ShadowPushRuntime.getShadowSession(context, userId)
+            ?: return call.reject("No shadow session found for user: $userId")
 
-        val homeserver = sessionData.getString("homeserver_url")
-        val ssStr = sessionData.optString("sliding_sync_version", "NONE")
+        val passedAppId = options.optString("appId", "")
+        if (passedAppId.isBlank() || passedAppId == "moi.paradise.ios") {
+            options.put("appId", "moi.paradise.android")
+        }
+
+        val scriptName = resolveScriptName(options, sessionData)
+            ?: return call.reject("No notification_script configured for session: $userId")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = buildMatrixClient(homeserver, ssStr, userId)
-                restoreShadowSession(client, sessionData)
-                val identifiers = PusherIdentifiers(
-                    pushkey = fcmToken,
-                    appId = "moi.paradise.android"
+                val args = JSONArray().apply {
+                    put(options)
+                    put(sessionData)
+                }
+                val res = ShadowPushRuntime.invokeWorkerFunction(
+                    context = context,
+                    userId = userId,
+                    scriptName = scriptName,
+                    functionName = "activatePushSession",
+                    argsJsonArray = args
                 )
 
-                val httpData = HttpPusherData(
-                    url = pushUrl,
-                    format = PushFormat.EVENT_ID_ONLY,
-                    defaultPayload = null
-                )
+                if (!res.optBoolean("ok", false)) {
+                    val err = res.optString("error", "Failed to activate push session")
+                    return@launch call.reject(err)
+                }
 
-                client.setPusher(
-                    identifiers = identifiers,
-                    kind = PusherKind.Http(httpData),
-                    appDisplayName = "Paradise",
-                    deviceDisplayName = "Android Device",
-                    profileTag = "primary",
-                    lang = "en"
-                )
-
-                sharedPrefs.edit().putString("active_push_user", userId).apply()
-
-                val ret = JSObject()
-                ret.put("status", "shadow_activated")
+                ShadowPushRuntime.setActiveUser(context, userId)
+                val ret = JSObject().apply {
+                    put("status", "shadow_activated")
+                }
                 call.resolve(ret)
             } catch (e: Exception) {
                 call.reject("Failed to activate Shadow Device", e)
@@ -154,27 +159,39 @@ class ShadowDevicePlugin : Plugin() {
 
     @PluginMethod
     fun deactivateShadow(call: PluginCall) {
-        val fcmToken = call.getString("pushToken") ?: return call.reject("Missing pushToken")
-        val userId = call.getString("userId") ?: return call.reject("Missing userId")
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val sessionData = getShadowSession(sharedPrefs, userId) ?: return call.reject("No shadow session found for user: $userId")
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val sessionData = ShadowPushRuntime.getShadowSession(context, userId)
 
-        val homeserver = sessionData.getString("homeserver_url")
-        val ssStr = sessionData.optString("sliding_sync_version", "NONE")
+        if (sessionData == null) {
+            ShadowPushRuntime.setActiveUser(context, null)
+            val ret = JSObject().apply { put("status", "shadow_deactivated") }
+            return call.resolve(ret)
+        }
+
+        val passedAppId = options.optString("appId", "")
+        if (passedAppId.isBlank() || passedAppId == "moi.paradise.ios") {
+            options.put("appId", "moi.paradise.android")
+        }
+
+        val scriptName = resolveScriptName(options, sessionData)
+            ?: return call.reject("No notification_script configured for session: $userId")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = buildMatrixClient(homeserver, ssStr, userId)
-                restoreShadowSession(client, sessionData)
-                val identifiers = PusherIdentifiers(
-                    pushkey = fcmToken,
-                    appId = "moi.paradise.android"
+                val args = JSONArray().apply {
+                    put(options)
+                    put(sessionData)
+                }
+                ShadowPushRuntime.invokeWorkerFunction(
+                    context = context,
+                    userId = userId,
+                    scriptName = scriptName,
+                    functionName = "deactivatePushSession",
+                    argsJsonArray = args
                 )
-                client.deletePusher(identifiers)
-                sharedPrefs.edit().remove("active_push_user").apply()
-
-                val ret = JSObject()
-                ret.put("status", "shadow_deactivated")
+                ShadowPushRuntime.setActiveUser(context, null)
+                val ret = JSObject().apply { put("status", "shadow_deactivated") }
                 call.resolve(ret)
             } catch (e: Exception) {
                 call.reject("Failed to deactivate Shadow Device", e)
@@ -184,30 +201,37 @@ class ShadowDevicePlugin : Plugin() {
 
     @PluginMethod
     fun verifyShadow(call: PluginCall) {
-        val userId = call.getString("userId") ?: return call.reject("Missing userId")
-        val recoveryKey = call.getString("recoveryKey") ?: return call.reject("Missing recoveryKey")
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val sessionData = ShadowPushRuntime.getShadowSession(context, userId)
+            ?: return call.reject("No shadow session found for user: $userId")
 
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val sessionData = getShadowSession(sharedPrefs, userId) ?: return call.reject("No shadow session found for user: $userId")
-
-        val homeserver = sessionData.getString("homeserver_url")
-        val ssStr = sessionData.optString("sliding_sync_version", "NONE")
+        val scriptName = resolveScriptName(options, sessionData)
+            ?: return call.reject("No notification_script configured for session: $userId")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = buildMatrixClient(homeserver, ssStr, userId)
-                restoreShadowSession(client, sessionData)
-                val encryption = client.encryption()
-                encryption.recover(recoveryKey)
+                val args = JSONArray().apply {
+                    put(options)
+                    put(sessionData)
+                }
+                val res = ShadowPushRuntime.invokeWorkerFunction(
+                    context = context,
+                    userId = userId,
+                    scriptName = scriptName,
+                    functionName = "verifyPushSession",
+                    argsJsonArray = args
+                )
+
+                if (!res.optBoolean("ok", false)) {
+                    val err = res.optString("error", "Failed to verify shadow session")
+                    return@launch call.reject(err)
+                }
 
                 sessionData.put("is_verified", "true")
-                val sessionsStr = sharedPrefs.getString("shadow_sessions", "{}")
-                val sessions = JSONObject(sessionsStr)
-                sessions.put(userId, sessionData)
-                sharedPrefs.edit().putString("shadow_sessions", sessions.toString()).apply()
+                ShadowPushRuntime.saveShadowSession(context, userId, sessionData)
 
-                val ret = JSObject()
-                ret.put("status", "shadow_verified")
+                val ret = JSObject().apply { put("status", "shadow_verified") }
                 call.resolve(ret)
             } catch (e: Exception) {
                 call.reject("Failed to verify Shadow Device", e)
@@ -216,23 +240,49 @@ class ShadowDevicePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun getShadowStatus(call: PluginCall) {
-        val userId = call.getString("userId") ?: return call.reject("Missing userId")
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val sessionData = getShadowSession(sharedPrefs, userId)
-        val ret = JSObject()
-        if (sessionData != null && sessionData.optString("is_verified") == "true") {
-            ret.put("isVerified", true)
-        } else {
-            ret.put("isVerified", false)
+    fun importRoomKeys(call: PluginCall) {
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val exportedKeysJson = options.optString("exportedRoomKeysJson", "")
+        if (exportedKeysJson.isBlank()) {
+            return call.reject("Missing exportedRoomKeysJson")
         }
+
+        val sessionData = ShadowPushRuntime.getShadowSession(context, userId)
+        val scriptName = resolveScriptName(options, sessionData)
+            ?: return call.reject("No notification_script configured for session: $userId")
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val args = JSONArray().apply { put(exportedKeysJson) }
+                ShadowPushRuntime.invokeWorkerFunction(
+                    context = context,
+                    userId = userId,
+                    scriptName = scriptName,
+                    functionName = "importRoomKeys",
+                    argsJsonArray = args
+                )
+                val ret = JSObject().apply { put("status", "keys_imported") }
+                call.resolve(ret)
+            } catch (e: Exception) {
+                call.reject("Failed to import room keys", e)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun getShadowStatus(call: PluginCall) {
+        val options = extractOptionsJson(call)
+        val userId = resolveUserId(options) ?: return call.reject("Missing userId")
+        val sessionData = ShadowPushRuntime.getShadowSession(context, userId)
+        val isVerified = sessionData?.optString("is_verified") == "true"
+        val ret = JSObject().apply { put("isVerified", isVerified) }
         call.resolve(ret)
     }
 
     @PluginMethod
     fun getActivePushUser(call: PluginCall) {
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        val activeUser = sharedPrefs.getString("active_push_user", null)
+        val activeUser = ShadowPushRuntime.getActiveUser(context)
         val ret = JSObject()
         if (activeUser != null) {
             ret.put("activeUser", activeUser)
@@ -242,9 +292,9 @@ class ShadowDevicePlugin : Plugin() {
 
     @PluginMethod
     fun setPreviewPreferences(call: PluginCall) {
-        val isEnabled = call.getBoolean("enabled", true)
-        val sharedPrefs = context.getSharedPreferences("ParadiseShadow", Context.MODE_PRIVATE)
-        sharedPrefs.edit().putBoolean("show_previews", isEnabled ?: true).apply()
+        val isEnabled = call.getBoolean("enabled", true) ?: true
+        ShadowPushRuntime.setShowPreviews(context, isEnabled)
         call.resolve()
     }
 }
+
