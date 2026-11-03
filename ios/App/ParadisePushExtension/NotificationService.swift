@@ -8,156 +8,287 @@ class NotificationService: UNNotificationServiceExtension {
     var bestAttemptContent: UNMutableNotificationContent?
     let appGroupId = "group.com.gigiaj.paradise"
 
+    private func sanitizeScriptName(_ rawPath: String?) -> String? {
+        guard let raw = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        let lastComponent = (raw as NSString).lastPathComponent
+        return (lastComponent.isEmpty || !lastComponent.hasSuffix(".js")) ? nil : lastComponent
+    }
+
+    private func resolveSessionForPush(
+        state: [String: Any],
+        payload: [String: Any]
+    ) -> (String, [String: String])? {
+        guard let rawSessions = state["shadow_sessions"] as? [String: Any] else {
+            return nil
+        }
+
+        func toStringMap(_ dict: [String: Any]) -> [String: String] {
+            var out: [String: String] = [:]
+            for (k, v) in dict {
+                out[k] = "\(v)"
+            }
+            return out
+        }
+
+        let accountHint = (payload["account_id"] as? String) ?? (payload["user_id"] as? String)
+        let cleanScript = sanitizeScriptName(payload["script"] as? String)
+        let cleanEngine = (payload["engine"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let acc = accountHint?.trimmingCharacters(in: .whitespacesAndNewlines), !acc.isEmpty {
+            if let exact = rawSessions[acc] as? [String: Any] {
+                return (acc, toStringMap(exact))
+            }
+            for (k, v) in rawSessions {
+                if k.hasPrefix("@\(acc):") || acc.hasPrefix("@\(k):"),
+                   let sess = v as? [String: Any] {
+                    return (k, toStringMap(sess))
+                }
+            }
+        }
+
+        let activeUserId = state["active_push_user"] as? String
+        if let active = activeUserId, !active.isEmpty,
+           let activeRaw = rawSessions[active] as? [String: Any] {
+            let sessMap = toStringMap(activeRaw)
+            let sessScript = sanitizeScriptName(sessMap["notification_script"])
+            let sessEngine = sessMap["engine"] ?? ""
+            let scriptMatches = (cleanScript == nil || cleanScript == sessScript)
+            let engineMatches = (cleanEngine == nil || cleanEngine!.isEmpty || sessEngine.isEmpty || cleanEngine == sessEngine)
+            if scriptMatches && engineMatches {
+                return (active, sessMap)
+            }
+        }
+
+        if cleanScript != nil || (cleanEngine != nil && !cleanEngine!.isEmpty) {
+            for (k, v) in rawSessions {
+                guard let rawSess = v as? [String: Any] else { continue }
+                let sessMap = toStringMap(rawSess)
+                let sessScript = sanitizeScriptName(sessMap["notification_script"])
+                let sessEngine = sessMap["engine"] ?? ""
+                if (cleanScript != nil && cleanScript == sessScript) ||
+                   (cleanEngine != nil && !cleanEngine!.isEmpty && cleanEngine == sessEngine) {
+                    return (k, sessMap)
+                }
+            }
+        }
+
+        if let active = activeUserId, !active.isEmpty,
+           let activeRaw = rawSessions[active] as? [String: Any] {
+            return (active, toStringMap(activeRaw))
+        }
+
+        for (k, v) in rawSessions {
+            if let rawSess = v as? [String: Any] {
+                return (k, toStringMap(rawSess))
+            }
+        }
+
+        return nil
+    }
+
     override func didReceive(_ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {
         self.contentHandler = contentHandler
         bestAttemptContent = (request.content.mutableCopy() as? UNMutableNotificationContent)
 
         guard let bestAttemptContent = bestAttemptContent else { return }
 
-        let sharedDefaults = UserDefaults(suiteName: appGroupId)!
+        guard let containerUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
+            contentHandler(bestAttemptContent)
+            return
+        }
 
-        let showPreviews = sharedDefaults.object(forKey: "show_previews") as? Bool ?? true
+        let payloadDict = request.content.userInfo as? [String: Any] ?? [:]
+        let stateUrl = containerUrl.appendingPathComponent("shadow_state.json")
 
-        if !showPreviews {
+        guard let stateData = try? Data(contentsOf: stateUrl),
+              let state = try? JSONSerialization.jsonObject(with: stateData) as? [String: Any],
+              let (resolvedUserId, sessionData) = resolveSessionForPush(state: state, payload: payloadDict) else {
+            contentHandler(bestAttemptContent)
+            return
+        }
+
+        if (state["show_previews"] as? Bool) == false {
             bestAttemptContent.title = "New Message"
-            bestAttemptContent.body = "Open the app to view."
+            bestAttemptContent.body = "Open Paradise to view."
             contentHandler(bestAttemptContent)
             return
         }
 
-
-        let userInfo = request.content.userInfo
-        guard let roomId = userInfo["room_id"] as? String,
-              let eventId = userInfo["event_id"] as? String else {
+        guard let configuredScript = sanitizeScriptName(payloadDict["script"] as? String)
+                ?? sanitizeScriptName(sessionData["notification_script"]) else {
             contentHandler(bestAttemptContent)
             return
         }
 
+        let scriptsDir = containerUrl.appendingPathComponent("scripts")
+        let scriptUrl = scriptsDir.appendingPathComponent(configuredScript)
 
-        guard let activeUserId = sharedDefaults.string(forKey: "active_push_user"),
-              let sessions = sharedDefaults.dictionary(forKey: "shadow_sessions") as? [String: [String: String]],
-              let sessionData = sessions[activeUserId],
-              let homeserverUrl = sessionData["homeserver_url"] else {
+        guard FileManager.default.fileExists(atPath: scriptUrl.path) else {
             contentHandler(bestAttemptContent)
             return
         }
 
-        let ssStr = sessionData["sliding_sync_version"] ?? "NONE"
+        let safeUserId = resolvedUserId.replacingOccurrences(of: "[^a-zA-Z0-9]", with: "_", options: .regularExpression)
+        let storeDir = containerUrl.appendingPathComponent("push-store/\(safeUserId)")
 
-        Task {
-            do {
-                guard let containerUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else { throw NSError() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (result, debugErr) = self.runPushWorker(
+                scriptUrl: scriptUrl,
+                payload: payloadDict,
+                session: sessionData,
+                storeDir: storeDir
+            )
 
-                let safeUserId = activeUserId.replacingOccurrences(of: "[^a-zA-Z0-9]", with: "_", options: .regularExpression)
-                let dataPath = containerUrl.appendingPathComponent("matrix-shadow/\(safeUserId)/data").path
-                let cachePath = containerUrl.appendingPathComponent("matrix-shadow/\(safeUserId)/cache").path
-
-                let ssBuilder: SlidingSyncVersionBuilder = (ssStr == "NATIVE") ? .native : .none
-
-                let client = try await ClientBuilder()
-                    .homeserverUrl(url: homeserverUrl)
-                    .sessionPaths(dataPath: dataPath, cachePath: cachePath)
-                    .systemIsMemoryConstrained()
-                    .slidingSyncVersionBuilder(versionBuilder: ssBuilder)
-                    .build()
-
-                try await restoreShadowSession(client: client, sessionData: sessionData)
-
-                let pushClient = try await client.notificationClient(processSetup: .multipleProcesses)
-                let status = try await pushClient.getNotification(roomId: roomId, eventId: eventId)
-
-                switch status {
-                case .event(let item):
-
-                    let senderName = item.senderInfo.displayName ?? "Unknown Sender"
-
-                    let rawRoom = item.roomInfo.displayName
-                    let roomName = rawRoom.isEmpty ? "Unknown Room" : rawRoom
-
-                    var messageBody = "New activity in \(roomName)"
-
-                    switch item.event {
-                    case .timeline(let timelineEvent):
-                        do {
-                            let content = try timelineEvent.content()
-                            switch content {
-                            case .messageLike(let messageLike):
-                                switch messageLike {
-                                case .roomMessage(let messageType, _):
-                                    switch messageType {
-                                    case .text(let textMsg): messageBody = textMsg.body
-                                    case .image: messageBody = "Sent an image"
-                                    case .video: messageBody = "Sent a video"
-                                    case .audio: messageBody = "Sent an audio clip"
-                                    case .file: messageBody = "Sent a file"
-                                    case .emote(let emoteMsg): messageBody = "* \(senderName) \(emoteMsg.body)"
-                                    case .notice(let noticeMsg): messageBody = noticeMsg.body
-                                    default: messageBody = "Sent a message"
-                                    }
-                                case .reactionContent: messageBody = "Reacted to a message"
-                                case .sticker: messageBody = "Sent a sticker"
-                                case .callInvite: messageBody = "Incoming call"
-                                default: messageBody = "Unhandled messageLike: \(String(describing: messageLike))"
-                                }
-                            case .state:
-                                messageBody = "Room settings changed"
-                            @unknown default:
-                                messageBody = "Unknown content: \(String(describing: content))"
-                            }
-                        } catch {
-                            messageBody = "Decryption error: \(error.localizedDescription)"
-                        }
-                    case .invite:
-                        messageBody = "Invited you to the room"
-                    @unknown default:
-                        messageBody = "Unknown event type: \(String(describing: item.event))"
-                    }
-
-                    bestAttemptContent.title = senderName
-                    bestAttemptContent.subtitle = roomName
-                    bestAttemptContent.body = messageBody
-
-                case .eventNotFound:
-                    bestAttemptContent.body = "Open Paradise to view."
-                case .eventFilteredOut, .eventRedacted:
-                    break
-                @unknown default:
-                    break
-                }
-
+            if debugErr != nil {
                 contentHandler(bestAttemptContent)
-
-                } catch {
-                print("Paradise iOS Decryption Failed: \(error)")
-                bestAttemptContent.body = "Open Paradise to view."
-                contentHandler(bestAttemptContent)
+                return
             }
+
+            if let tag = result?["tag"] as? String, !tag.isEmpty {
+                bestAttemptContent.threadIdentifier = tag
+            }
+
+            if let title = result?["title"] as? String, !title.isEmpty {
+                bestAttemptContent.title = title
+            }
+            if let subtitle = result?["subtitle"] as? String, !subtitle.isEmpty {
+                bestAttemptContent.subtitle = subtitle
+            }
+            if let bodyText = result?["body"] as? String, !bodyText.isEmpty {
+                bestAttemptContent.body = bodyText
+            }
+
+            if let badge = result?["unread"] as? NSNumber {
+                bestAttemptContent.badge = badge
+            }
+
+            contentHandler(bestAttemptContent)
         }
     }
 
-    private func restoreShadowSession(client: Client, sessionData: [String: String]) async throws {
-        guard let accessToken = sessionData["access_token"],
-              let userId = sessionData["user_id"],
-              let deviceId = sessionData["device_id"],
-              let homeserverUrl = sessionData["homeserver_url"] else {
-            throw NSError(domain: "ShadowDevice", code: 2, userInfo: nil)
+    private func runPushWorker(
+        scriptUrl: URL,
+        payload: [String: Any],
+        session: [String: String],
+        storeDir: URL
+    ) -> ([String: Any]?, String?) {
+        guard let vm = JSVirtualMachine(),
+              let ctx = JSContext(virtualMachine: vm) else {
+            return (nil, "JSContext init failed")
         }
 
-        let slidingSyncStr = sessionData["sliding_sync_version"] ?? "NONE"
-        let ssVersion: SlidingSyncVersion = (slidingSyncStr == "NATIVE") ? .native : .none
+        let getRandomBytes: @convention(block) (Int) -> [UInt8] = { count in
+            guard count > 0 else { return [] }
+            var bytes = [UInt8](repeating: 0, count: count)
+            _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+            return bytes
+        }
 
-        let session = Session(
-            accessToken: accessToken, refreshToken: nil, userId: userId,
-            deviceId: deviceId, homeserverUrl: homeserverUrl, oidcData: nil,
-            slidingSyncVersion: ssVersion
-        )
-        try await client.restoreSession(session: session)
+        let httpSync: @convention(block) (String, String, [String: String], String?) -> [String: Any] = { method, urlStr, headers, body in
+            guard let url = URL(string: urlStr) else {
+                return ["ok": false, "status": 0, "body": "Invalid URL: \(urlStr)"]
+            }
+            var req = URLRequest(url: url, timeoutInterval: 10.0)
+            req.httpMethod = method
+            for (k, v) in headers {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
+            if method != "GET" && method != "HEAD",
+               let b = body, !b.isEmpty, b != "null", b != "undefined" {
+                req.httpBody = b.data(using: .utf8)
+            }
+
+            let sem = DispatchSemaphore(value: 0)
+            var responseDict: [String: Any] = ["ok": false, "status": 0, "body": "Timeout"]
+
+            URLSession.shared.dataTask(with: req) { data, response, error in
+                if let httpResp = response as? HTTPURLResponse {
+                    let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                    responseDict = [
+                        "ok": (200...299).contains(httpResp.statusCode),
+                        "status": httpResp.statusCode,
+                        "body": text
+                    ]
+                } else if let error = error {
+                    responseDict = [
+                        "ok": false,
+                        "status": 0,
+                        "body": error.localizedDescription
+                    ]
+                }
+                sem.signal()
+            }.resume()
+
+            _ = sem.wait(timeout: .now() + 12.0)
+            return responseDict
+        }
+
+        let storageGet: @convention(block) (String) -> String? = { relPath in
+            let clean = relPath.replacingOccurrences(of: "..", with: "_")
+            let url = storeDir.appendingPathComponent(clean)
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+
+        let storageSet: @convention(block) (String, String) -> Bool = { relPath, content in
+            let clean = relPath.replacingOccurrences(of: "..", with: "_")
+            let url = storeDir.appendingPathComponent(clean)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        ctx.setObject(getRandomBytes, forKeyedSubscript: "__nativeGetRandomBytes" as NSString)
+        ctx.setObject(httpSync, forKeyedSubscript: "__hostHttpSync" as NSString)
+        ctx.setObject(storageGet, forKeyedSubscript: "__hostStorageGet" as NSString)
+        ctx.setObject(storageSet, forKeyedSubscript: "__hostStorageSet" as NSString)
+
+        var evalError: String? = nil
+        autoreleasepool {
+            guard let scriptSource = try? String(contentsOf: scriptUrl, encoding: .utf8) else {
+                evalError = "Failed to read script string"
+                return
+            }
+            ctx.evaluateScript(scriptSource, withSourceURL: scriptUrl)
+            if let exc = ctx.exception {
+                evalError = "JS eval error: \(exc)"
+            }
+        }
+
+        if let evalError = evalError {
+            return (nil, evalError)
+        }
+
+        guard let resolveFn = ctx.objectForKeyedSubscript("resolvePushNotification"),
+              !resolveFn.isUndefined else {
+            return (nil, "resolvePushNotification is undefined")
+        }
+
+        guard let resultVal = resolveFn.call(withArguments: [payload, session]) else {
+            return (nil, "resolvePushNotification returned nil")
+        }
+
+        if let exc = ctx.exception {
+            return (nil, "JS call error: \(exc)")
+        }
+
+        guard resultVal.isObject,
+              let dict = resultVal.toDictionary() as? [String: Any] else {
+            return (nil, "Result not an object")
+        }
+
+        return (dict, nil)
     }
 
     override func serviceExtensionTimeWillExpire() {
         if let contentHandler = contentHandler, let bestAttemptContent = bestAttemptContent {
-            bestAttemptContent.body = "Open Paradise to view (Encrypted)"
             contentHandler(bestAttemptContent)
         }
     }
 }
+
