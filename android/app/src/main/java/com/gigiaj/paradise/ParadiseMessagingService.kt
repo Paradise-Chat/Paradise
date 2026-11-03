@@ -66,9 +66,10 @@ class ParadiseMessagingService : FirebaseMessagingService() {
             return
         }
 
+        val dedupKey = "$engine:$roomId:$eventId"
         synchronized(seenEventIds) {
-            if (!seenEventIds.add(eventId)) {
-                Log.d("ParadisePush", "Duplicate event_id=$eventId ignored")
+            if (!seenEventIds.add(dedupKey)) {
+                Log.d("ParadisePush", "Duplicate event ignored key=$dedupKey")
                 return
             }
         }
@@ -77,7 +78,7 @@ class ParadiseMessagingService : FirebaseMessagingService() {
         for ((k, v) in data) {
             payloadJson.put(k, v)
         }
-        val defaultTag = roomId
+        val defaultTag = if (engine.isNotEmpty()) "$engine:$roomId" else roomId
 
         if (!ShadowPushRuntime.getShowPreviews(applicationContext)) {
             Log.d("ParadisePush", "Previews disabled, showing generic banner")
@@ -85,24 +86,34 @@ class ParadiseMessagingService : FirebaseMessagingService() {
             return
         }
 
-        val activeUserId = ShadowPushRuntime.getActiveUser(applicationContext)
-        if (activeUserId == null) {
-            Log.e("ParadisePush", "No active_push_user in shadow_state.json")
+        val accountHint = data["account_id"]?.trim() ?: data["user_id"]?.trim()
+        val resolved = ShadowPushRuntime.resolveSessionForPush(
+            context = applicationContext,
+            accountId = accountHint,
+            incomingScript = data["script"],
+            incomingEngine = engine
+        )
+
+        if (resolved == null) {
+            Log.e("ParadisePush", "No matching shadow session found in shadow_state.json")
+            showNotification(defaultTag, "New Message", null, "Open Paradise to view.", data)
             return
         }
 
-        val sessionData = ShadowPushRuntime.getShadowSession(applicationContext, activeUserId)
-        if (sessionData == null) {
-            Log.e("ParadisePush", "No shadow_session found for $activeUserId")
+        val (resolvedUserId, sessionData) = resolved
+        val scriptName = ShadowPushRuntime.sanitizeScriptName(data["script"])
+            ?: ShadowPushRuntime.sanitizeScriptName(sessionData.optString("notification_script", ""))
+
+        if (scriptName == null) {
+            Log.e("ParadisePush", "No notification_script specified in payload or session for $resolvedUserId")
+            showNotification(defaultTag, "New Message", null, "Open Paradise to view.", data)
             return
         }
-
-        val scriptName = sessionData.optString("notification_script", "push-matrix.js")
 
         serviceScope.launch {
             workerMutex.withLock {
                 try {
-                    Log.d("ParadisePush", "Invoking QuickJS ($scriptName) for event=$eventId")
+                    Log.d("ParadisePush", "Invoking QuickJS ($scriptName) for user=$resolvedUserId event=$eventId")
                     val args = JSONArray().apply {
                         put(payloadJson)
                         put(sessionData)
@@ -110,7 +121,7 @@ class ParadiseMessagingService : FirebaseMessagingService() {
 
                     val res = ShadowPushRuntime.invokeWorkerFunction(
                         context = applicationContext,
-                        userId = activeUserId,
+                        userId = resolvedUserId,
                         scriptName = scriptName,
                         functionName = "resolvePushNotification",
                         argsJsonArray = args
@@ -193,4 +204,5 @@ class ParadiseMessagingService : FirebaseMessagingService() {
         notificationManager.notify(tag, 0, builder.build())
     }
 }
+
 
