@@ -59,6 +59,7 @@ class ParadiseMessagingService : FirebaseMessagingService() {
 
         val roomId = data["room_id"]?.trim()
         val eventId = data["event_id"]?.trim()
+        val engine = data["engine"]?.trim().orEmpty()
 
         if (roomId.isNullOrEmpty() || eventId.isNullOrEmpty()) {
             Log.d("ParadisePush", "Ignoring non-event push payload keys=${data.keys}")
