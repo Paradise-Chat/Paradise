@@ -1,7 +1,5 @@
 package com.gigiaj.paradise
 
-import android.content.Context
-import android.content.SharedPreferences
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -10,16 +8,8 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
-import org.matrix.rustcomponents.sdk.ClientBuilder
-import org.matrix.rustcomponents.sdk.PusherIdentifiers
-import org.matrix.rustcomponents.sdk.PusherKind
-import org.matrix.rustcomponents.sdk.HttpPusherData
-import org.matrix.rustcomponents.sdk.PushFormat
-import org.matrix.rustcomponents.sdk.Session
-import org.matrix.rustcomponents.sdk.SlidingSyncVersion
-import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
-import org.matrix.rustcomponents.sdk.Client
 
 @CapacitorPlugin(name = "ShadowDevice")
 class ShadowDevicePlugin : Plugin() {
