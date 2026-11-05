@@ -14,10 +14,10 @@ const copyFiles = {
             ),
             dest: ".",
         },
-        {
-            src: path.resolve(__dirname, "build/*.wasm"),
-            dest: ".",
-        },
+        //        {
+        //            src: path.resolve(__dirname, "build/*.wasm"),
+        //            dest: ".",
+        //        },
         {
             src: path.resolve(__dirname, "build/config.edn"),
             dest: ".",
@@ -30,10 +30,10 @@ const copyFiles = {
             src: path.resolve(__dirname, "build/css/*"),
             dest: "css",
         },
-        {
-            src: "themes/*",
-            dest: "themes",
-        },
+        //        {
+        //            src: "themes/*",
+        //            dest: "themes",
+        //        },
     ],
 };
 
