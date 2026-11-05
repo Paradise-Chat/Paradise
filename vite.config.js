@@ -23,6 +23,10 @@ const copyFiles = {
             dest: ".",
         },
         {
+            src: path.resolve(__dirname, "build/rnnoise/*"),
+            dest: "rnnoise",
+        },
+        {
             src: path.resolve(__dirname, "build/i18n.edn"),
             dest: ".",
         },
