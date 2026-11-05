@@ -77,6 +77,7 @@ this will be where that lives.
 .call-view-host {
     width: 100%;
     height: 100%;
+    max-height: 100dvh;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -85,6 +86,7 @@ this will be where that lives.
     font-family: "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial,
         sans-serif;
     overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .call-video-area {
@@ -127,14 +129,12 @@ this will be where that lives.
     color: #ffffff;
     font-size: 0.9rem;
     font-weight: 600;
+    min-height: 44px;
     padding: 10px 20px;
     border-radius: 4px;
     cursor: pointer;
+    touch-action: manipulation;
     transition: background-color 0.15s ease;
-}
-
-.call-start-button:hover {
-    background-color: #1a6334;
 }
 
 .call-start-button:active {
@@ -153,34 +153,38 @@ this will be where that lives.
 }
 
 .call-grid-layout-wrapper {
-    flex: 1;
+    flex: 1 1 0%;
     min-height: 0;
     width: 100%;
-    padding: 16px 16px 88px 16px;
+    padding: max(12px, env(safe-area-inset-top, 12px))
+        max(12px, env(safe-area-inset-right, 12px)) 12px
+        max(12px, env(safe-area-inset-left, 12px));
     box-sizing: border-box;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     display: flex;
-    align-items: center;
+    align-items: stretch;
     justify-content: center;
+    cursor: pointer;
 }
 
 .call-grid-layout {
     width: 100%;
-    height: 100%;
+    min-height: 100%;
     max-width: 1600px;
-    margin: 0 auto;
+    margin: auto;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-    grid-auto-rows: minmax(200px, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    grid-auto-rows: minmax(180px, 1fr);
     gap: 8px;
-    align-content: center;
 }
 
 .call-participant-tile {
     position: relative;
     width: 100%;
     height: 100%;
-    min-height: 200px;
+    min-height: 180px;
     background-color: #1e1f22;
     border-radius: 8px;
     overflow: hidden;
@@ -191,17 +195,13 @@ this will be where that lives.
     transition: box-shadow 0.12s ease, background-color 0.12s ease;
 }
 
-.call-participant-tile:hover {
-    background-color: #232428;
-}
-
 .call-participant-tile.is-speaking {
     box-shadow: inset 0 0 0 2px #23a55a;
 }
 
 .call-participant-tile.is-screen-share {
     grid-column: 1 / -1;
-    min-height: min(62vh, 680px);
+    min-height: min(60dvh, 680px);
     background-color: #000000;
 }
 
@@ -261,6 +261,14 @@ this will be where that lives.
     border-radius: 4px;
     background-color: rgba(17, 18, 20, 0.85);
     pointer-events: none;
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.call-grid-container.is-immersive .call-tile-overlay {
+    opacity: 0;
+    transform: translateY(4px);
 }
 
 .call-tile-name {
@@ -284,19 +292,38 @@ this will be where that lives.
 }
 
 .call-control-bar-wrapper {
-    position: absolute;
-    left: 50%;
-    bottom: 16px;
-    transform: translateX(-50%);
+    flex: 0 0 auto;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    padding: 4px 12px max(12px, env(safe-area-inset-bottom, 12px)) 12px;
+    box-sizing: border-box;
+    background-color: #000000;
     z-index: 20;
-    max-width: calc(100% - 24px);
+    max-height: 200px;
+    opacity: 1;
+    overflow: hidden;
+    transition: max-height 0.2s ease, opacity 0.18s ease, padding 0.2s ease;
+}
+
+.call-grid-container.is-immersive .call-control-bar-wrapper {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    pointer-events: none;
 }
 
 .call-control-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 8px;
+    width: auto;
+    max-width: 100%;
     padding: 8px;
+    box-sizing: border-box;
     border-radius: 12px;
     background-color: #111214;
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -310,16 +337,17 @@ this will be where that lives.
     color: #dbdee1;
     font-size: 0.85rem;
     font-weight: 600;
-    padding: 10px 16px;
+    min-height: 40px;
+    padding: 8px 14px;
     border-radius: 8px;
     cursor: pointer;
     white-space: nowrap;
+    flex: 0 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    touch-action: manipulation;
+    user-select: none;
     transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.call-control-btn:hover {
-    background-color: #35373c;
-    color: #f2f3f5;
 }
 
 .call-control-btn:active {
@@ -331,17 +359,9 @@ this will be where that lives.
     color: #111214;
 }
 
-.call-control-btn.is-active:hover {
-    background-color: #dbdee1;
-}
-
 .call-control-btn.is-muted {
     background-color: rgba(218, 55, 60, 0.2);
     color: #f23f43;
-}
-
-.call-control-btn.is-muted:hover {
-    background-color: rgba(218, 55, 60, 0.3);
 }
 
 .call-control-btn.is-danger {
@@ -349,31 +369,160 @@ this will be where that lives.
     color: #ffffff;
 }
 
-.call-control-btn.is-danger:hover {
-    background-color: #a12828;
+@media (hover: hover) and (pointer: fine) {
+    .call-start-button:hover {
+        background-color: #1a6334;
+    }
+
+    .call-participant-tile:hover {
+        background-color: #232428;
+    }
+
+    .call-control-btn:hover {
+        background-color: #35373c;
+        color: #f2f3f5;
+    }
+
+    .call-control-btn.is-active:hover {
+        background-color: #dbdee1;
+    }
+
+    .call-control-btn.is-muted:hover {
+        background-color: rgba(218, 55, 60, 0.3);
+    }
+
+    .call-control-btn.is-danger:hover {
+        background-color: #a12828;
+    }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
+    .call-view-host:has(.call-grid-container.is-immersive) > :first-child {
+        display: none;
+    }
+
     .call-grid-layout-wrapper {
-        padding: 8px 8px 80px 8px;
+        padding: max(8px, env(safe-area-inset-top, 8px)) 8px 8px 8px;
+    }
+
+    .call-grid-container.is-immersive .call-grid-layout-wrapper {
+        padding: max(4px, env(safe-area-inset-top, 4px)) 4px
+            max(4px, env(safe-area-inset-bottom, 4px)) 4px;
     }
 
     .call-grid-layout {
         grid-template-columns: 1fr;
-        gap: 8px;
+        grid-auto-rows: minmax(140px, 1fr);
+        gap: 6px;
+    }
+
+    .call-grid-layout:has(> :nth-child(3)) {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .call-grid-layout:has(> :nth-child(3))
+        > .call-participant-tile:last-child:nth-child(odd) {
+        grid-column: 1 / -1;
+    }
+
+    .call-participant-tile {
+        min-height: 140px;
+        border-radius: 6px;
+    }
+
+    .call-participant-tile.is-screen-share {
+        grid-column: 1 / -1;
+        min-height: min(45dvh, 380px);
+    }
+
+    .call-tile-avatar {
+        width: 56px;
+        height: 56px;
+    }
+
+    .call-tile-overlay {
+        left: 6px;
+        bottom: 6px;
+        padding: 3px 6px;
+        max-width: calc(100% - 12px);
+    }
+
+    .call-tile-name {
+        font-size: 0.78rem;
+    }
+
+    .call-control-bar-wrapper {
+        padding: 4px 8px max(8px, env(safe-area-inset-bottom, 8px)) 8px;
     }
 
     .call-control-bar {
-        gap: 6px;
+        width: 100%;
+        max-width: 460px;
+        flex-wrap: nowrap;
+        gap: 4px;
         padding: 6px;
+        border-radius: 10px;
     }
 
     .call-control-btn {
-        padding: 8px 12px;
-        font-size: 0.78rem;
+        flex: 1 1 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        min-height: 38px;
+        padding: 6px 6px;
+        font-size: 0.72rem;
     }
 }
 
+@media (max-height: 500px) and (orientation: landscape) {
+    .call-view-host:has(.call-grid-container.is-immersive) > :first-child {
+        display: none;
+    }
+
+    .call-grid-layout-wrapper {
+        padding: 6px max(12px, env(safe-area-inset-right, 12px)) 6px
+            max(12px, env(safe-area-inset-left, 12px));
+    }
+
+    .call-grid-layout {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-auto-rows: minmax(100px, 1fr);
+        gap: 6px;
+    }
+
+    .call-participant-tile {
+        min-height: 100px;
+    }
+
+    .call-participant-tile.is-screen-share {
+        grid-column: span 2;
+        min-height: 100%;
+    }
+
+    .call-tile-avatar {
+        width: 44px;
+        height: 44px;
+    }
+
+    .call-control-bar-wrapper {
+        padding: 2px 12px max(6px, env(safe-area-inset-bottom, 6px)) 12px;
+    }
+
+    .call-control-bar {
+        width: auto;
+        padding: 4px 6px;
+        gap: 6px;
+    }
+
+    .call-control-btn {
+        flex: 0 0 auto;
+        min-height: 34px;
+        padding: 5px 10px;
+        font-size: 0.74rem;
+    }
+}
 #+end_src
 
 
