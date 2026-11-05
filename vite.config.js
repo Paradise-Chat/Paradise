@@ -109,12 +109,14 @@ export default defineConfig({
                 main: path.resolve(__dirname, "build/index.html"),
                 engine: path.resolve(__dirname, "build/engine.js"),
                 virtualizer: path.resolve(__dirname, "build/virtualizer.js"),
+                media: path.resolve(__dirname, "build/media.js"),
             },
             output: {
                 entryFileNames: (chunkInfo) => {
                     if (
                         chunkInfo.name === "engine" ||
-                        chunkInfo.name === "virtualizer"
+                        chunkInfo.name === "virtualizer" ||
+                        chunkInfo.name === "media"
                     ) {
                         return "[name].js";
                     }
