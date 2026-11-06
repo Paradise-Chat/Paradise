@@ -19,71 +19,47 @@ method more or less the same without consideration with how it might behave.
 #+end_src
 
 
-**** Mxc->Url/Url->Mxc
+**** General Functions
 
-This just provides a mechanism to convert mxc urls to usable urls
-according to the Matrix spec. Now it is convenient to be able
-to force it to use a home-server, but we should likely swap to retrieval
-from re-frame for the client to determine the home-server dynamically.
-This works for now though.
+Below are functions we use to normalize into an expected form.
+
+
+The spinner being hide-able is just useful for deferred media
+components.
+
+Finally, the notify error enables media to error in a reasonable
+manner.
 
 #+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
-(defn mxc->url
-  ([mxc-url] (mxc->url mxc-url {}))
-  ([mxc-url {:keys [homeserver type width height method] :or {type :download}}]
-   (when (and (string? mxc-url) (str/starts-with? mxc-url "mxc://"))
-     (let [db       (try @re-frame.db/app-db (catch :default _ {}))
-           base-url (or homeserver (:homeserver-url db))]
-       (when base-url
-         (let [server-base (str/replace base-url #"/+$" "")
-               resource    (str/replace mxc-url #"^mxc://" "")
-               base-path   (str "/_matrix/client/v1/media/" (name type) "/" resource)]
-           (if (= type :thumbnail)
-             (str server-base base-path
-                  "?width="  (or width 48)
-                  "&height=" (or height 48)
-                  "&method=" (or method "crop"))
-             (str server-base base-path))))))))
+(defn- extract-cache-key [uri source-map width height]
+  (let [base-key (or (:uri source-map)
+                     (get-in source-map [:file :url])
+                     (when (and source-map (not (map? source-map)))
+                       (or (.-uri source-map)
+                           (some-> (.-file source-map) .-url)
+                           (some-> (.-plain source-map) .-url)))
+                     uri)]
+    (if (and base-key width height)
+      (str base-key "?w=" width "&h=" height)
+      base-key)))
 
 
-(defn url->mxc [url]
-  (if (and (string? url) (str/includes? url "/_matrix/"))
-    (let [parts (str/split url #"/media/(?:download|thumbnail)/")]
-      (if (= (count parts) 2)
-        (str "mxc://" (second parts))
-        url))
-    url))
+(defn- hide-spinner! [node]
+  (when node
+    (when-let [prev (.-previousElementSibling node)]
+      (when (and (.-classList prev)
+                 (.contains (.-classList prev) "message-image-placeholder")
+                 (.-style prev))
+        (set! (.-display (.-style prev)) "none")))))
+
+
+(defn- notify-error! [node]
+  (when node
+    (when-let [err-fn (.-__paradiseOnError node)]
+      (err-fn))))
 #+end_src
 
 
-#+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
-(defonce !ui-blob-cache (r/atom {}))
-(defonce !in-flight (atom #{}))
-
-(defn request-mxc! [mxc]
-  (when (and mxc
-             (not (get @!ui-blob-cache mxc))
-             (not (contains? @!in-flight mxc)))
-    (swap! !in-flight conj mxc)
-    (let [url (if (str/starts-with? mxc "mxc://")
-                (mxc->url mxc)
-                mxc)]
-      (if-not url
-        (do
-          (swap! !ui-blob-cache assoc mxc :error)
-          (swap! !in-flight disj mxc))
-        (-> (p/let [resp (net/fetch url)
-                    buf  (.arrayBuffer resp)]
-              (let [blob    (js/Blob. #js [buf])
-                    obj-url (js/URL.createObjectURL blob)]
-                (swap! !ui-blob-cache assoc mxc obj-url)))
-            (p/catch (fn [e]
-                       (js/console.error "MXC Fetch Error:" e)
-                       (swap! !ui-blob-cache assoc mxc :error)))
-            (p/finally (fn []
-                         (swap! !in-flight disj mxc))))))))
-
-#+end_src
 
 While building out the virtualizer I began to realize the lack of uniformity in how we rendered
 components still.
