@@ -169,15 +169,10 @@ We standardize on the name prefix closura-store-.
          (log/error "Fatal crash attempting to delete IDB:" db-name "Error:" e)
          (resolve-fn false))))))
 
-(defn- delete-store-impl! [store-id]
-  (let [base-name (str "paradise-store-" store-id)]
-    (.allSettled js/Promise
-     #js [(delete-db! base-name)
-          (delete-db! (str base-name "::matrix-sdk-state"))
-          (delete-db! (str base-name "::matrix-sdk-crypto"))
-          (delete-db! (str base-name "::event_cache"))
-          (delete-db! (str base-name "::media"))])))
-
+(defn- delete-dbs! [db-names]
+  (if (seq db-names)
+    (.allSettled js/Promise (into-array (map delete-db! db-names)))
+    (p/resolved true)))
 #+end_src
 
 
