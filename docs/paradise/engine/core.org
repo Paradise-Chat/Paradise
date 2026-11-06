@@ -107,16 +107,17 @@ This lets the engine be informed of what engine is being registered
                      (try
                        (let [protocol-str (if (map? payload) (:engine-id payload) payload)]
                          (if protocol-str
-                           (let [protocol-name (name protocol-str)]
-                             (<! (load-protocol-engine! protocol-name))
-                             (let [engine-map (get @!registry (keyword protocol-name))
-                                   preload-fn (:preload engine-map)]
-                               (when preload-fn
-                                 (preload-fn))
-                               {:status "success" :msg (str "Registered engine " protocol-name)}))
+                           (let [protocol-name (name protocol-str)
+                                 load-res      (<! (load-protocol-engine! protocol-name))]
+                             (if (= "error" (:status load-res))
+                               load-res
+                               (let [engine-map (get @!loaded-engines (keyword protocol-name))
+                                     preload-fn (:preload engine-map)]
+                                 (when preload-fn
+                                   (preload-fn))
+                                 {:status "success" :msg (str "Registered engine " protocol-name)})))
                            {:status "error" :msg "No engine provided."}))
                        (catch :default e
-                         (js/console.error "Engine Registration Crash:" e)
                          {:status "error" :msg (.-message e)})))))
 #+end_src
 
