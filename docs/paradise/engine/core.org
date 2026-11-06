@@ -125,6 +125,18 @@ This lets the engine be informed of what engine is being registered
 
 **** Thread Initialization
 
+
+For associating with SCI for plugin support
+
+
+
+#+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
+(worker/register :evaluate-worker-form
+                (fn [{:keys [plugin-id code]}]
+                  (sci/evaluate-worker-form plugin-id code)))
+#+end_src
+
+
 This just kicks off the thread with the registered methods being processed
 
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
