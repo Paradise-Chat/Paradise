@@ -299,6 +299,7 @@ Next we need to supply the prep stage for the engine
       (println "Running prep in engine:" engine-path)
       (b/process {:dir          engine-path
                   :command-args ["clojure" "-T:build" "prep"]}))))
+#+end_src
 
 
 ****** Mounting
@@ -332,7 +333,7 @@ So it needs to know that Matrix should use the 'dev' dependency and Nostr
 (or any other protocol engine) should use their own.
 
 #+begin_src clojurescript :tangle ../../build.clj
-(defn mount [{:keys [engine-path]}]
+(defn mount [{:keys [engine-path prep]}]
   (when-not engine-path
     (println "FATAL ERROR: :engine-path is required!")
     (System/exit 1))
@@ -342,12 +343,13 @@ So it needs to know that Matrix should use the 'dev' dependency and Nostr
       (println "FATAL ERROR: Could not find manifest.edn in" engine-path)
       (System/exit 1))
     (let [manifest (edn/read-string (slurp manifest-file))
-          {:keys [deps-sym module-id config-key path shadow-module]} manifest
+          {:keys [deps-sym module-id config-key path shadow-module copy-files]} manifest
           config-kw (keyword config-key)
           dev-path (str "/" (last (str/split path #"/")))
           deps (get-unique-deps engine-path)
           current-state (read-state)
-          new-state (assoc current-state module-id {:manifest manifest :deps deps})]
+          new-state (assoc current-state module-id {:manifest manifest :deps deps})
+          dev-manifest (assoc manifest :path dev-path)]
       (edit-edn "deps.edn"
                 (fn [zloc]
                   (-> zloc
@@ -364,12 +366,15 @@ So it needs to know that Matrix should use the 'dev' dependency and Nostr
       (edit-edn "config.edn"
                 (fn [zloc]
                   (if-let [engines-loc (z/find-value zloc z/next :engines)]
-                    (-> engines-loc z/right (z-assoc config-kw {:path dev-path}))
-                    (z-assoc zloc :engines {config-kw {:path dev-path}}))))
+                    (-> engines-loc z/right (z-assoc config-kw dev-manifest))
+                    (z-assoc zloc :engines {config-kw dev-manifest}))))
       (io/make-parents state-file)
       (spit state-file (pr-str new-state))
       (when (seq deps)
         (b/process {:command-args (into ["pnpm" "add" "--ignore-scripts" "--prefer-offline"] deps)}))
+      (when (seq copy-files)
+        (prep-engine! engine-path copy-files prep)
+        (copy-manifest-files! engine-path copy-files))
       (println "Successfully mounted:" module-id))))
 #+end_src
 
@@ -402,7 +407,7 @@ clojure -T:prep dismount
           (let [remaining-state
                 (reduce (fn [state target-id]
                           (if-let [engine-state (get state target-id)]
-                            (let [{:keys [deps-sym module-id config-key]} (:manifest engine-state)
+                            (let [{:keys [deps-sym module-id config-key copy-files]} (:manifest engine-state)
                                   deps (:deps engine-state)
                                   config-kw (keyword config-key)]
                               (edit-edn "deps.edn"
@@ -423,8 +428,10 @@ clojure -T:prep dismount
                                           (if-let [engines-loc (z/find-value zloc z/next :engines)]
                                             (-> engines-loc z/right (z-dissoc config-kw))
                                             zloc)))
+                              (when (seq copy-files)
+                                (delete-manifest-files! copy-files))
                               (when (seq deps)
-                                (let [pkg-names (map #(first (str/split % #"@")) deps)]
+                                (let [pkg-names (map #(str/replace % #"@[^@]+$" "") deps)]
                                   (b/process {:command-args (into ["pnpm" "remove"] pkg-names)})))
                               (println "Successfully dismounted engine:" target-id)
                               (dissoc state target-id))
