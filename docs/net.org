@@ -15,8 +15,7 @@ namespace exist at the top-level.
 #+begin_src clojurescript :tangle ../src/net.cljs
 (ns net
   (:require [promesa.core :as p]
-            [clojure.string :as str]
-            ))
+            [clojure.string :as str]))
 #+end_src
 
 **** Auth Context
