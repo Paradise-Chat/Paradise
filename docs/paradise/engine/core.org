@@ -32,12 +32,12 @@ and enables us to support multiple protocols and not just Matrix.
 #+end_src
 
 
-**** Registry
+**** Loaded Engines
 
-We need to keep a registry of the engines, so we do so here
+We need to keep a collection of the engines we've loaded, so we do so here
 
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
-(defonce !registry (atom {}))
+(defonce !loaded-engines (atom {}))
 #+end_src
 
 
