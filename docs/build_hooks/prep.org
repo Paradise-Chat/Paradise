@@ -52,6 +52,12 @@ However, it keeps it neatly out of sight of the developer.
 #+end_src
 
 
+Here we specify where the engine will 'exist' for dev mode.
+#+begin_src clojurescript :tangle ../../build.clj
+(def web-root "build")
+#+end_src
+
+
 ****** Engine Manifest
 
 We need to consistently define the location of where the engine's
@@ -67,7 +73,6 @@ scheme we used in the client.
 (defn find-manifest [engine-path]
   (let [f1 (io/file engine-path "config.edn")
         f2 (io/file engine-path "dist" "manifest.edn")]
-
     (cond
       (.exists f1) f1
       (.exists f2) f2
@@ -102,7 +107,6 @@ at runtime.
           (do
             (println "FATAL ERROR: Failed to fetch registry and no cached registry.edn exists!")
             (System/exit 1)))))))
-
 #+end_src
 
 
