@@ -84,4 +84,4 @@
 
 
 (defmacro load-static-config [path]
-  (edn/read-string (slurp path)))
+  (list 'quote (clojure.edn/read-string (slurp path))))
