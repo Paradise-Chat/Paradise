@@ -9,14 +9,6 @@ making wrapper functions to catch the specific calls needed.
 Now, because we want this to more or less be as easy to use as js/fetch we are going to make the
 namespace exist at the top-level.
 
-***** TODO Remove Matrix specific logic
-
-The rationale for removing the Matrix specific logic is that we should instead make this generic
-and allow for the functions needed to be used for validation and such be set by an initialization
-function instead.
-It also may be practical for it to exist in cljs-workers and expand that library even further.
-
-
 
 **** Imports
 
