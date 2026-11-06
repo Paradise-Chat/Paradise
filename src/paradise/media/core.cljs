@@ -1,85 +1,36 @@
+
 (ns paradise.media.core
-  (:require  [clojure.string :as str]
-             [cljs-workers.worker :as worker]
-             [net :as net]
-             [taoensso.timbre :as log]
-             [cljs.core.async.interop :refer-macros [<p!]]
-             [cljs.core.async :refer [go <!]]))
+  (:require [cljs.core.async :refer [go <!]]
+            [cljs-workers.worker :as worker]
+            [cljs.core.async.interop :refer-macros [<p!]]
+            [shadow.esm :refer [dynamic-import]]
+            [paradise.shared.registry :as registry]))
 
-(defn b64->uint8 [b64]
-  (let [b1     (str/replace b64 "-" "+")
-        b2     (str/replace b1 "_" "/")
-        pad    (mod (- 4 (mod (count b2) 4)) 4)
-        padded (str b2 (apply str (repeat pad "=")))
-        raw    (js/atob padded)
-        len    (.-length raw)
-        arr    (js/Uint8Array. len)]
-    (dotimes [i len]
-      (aset arr i (.charCodeAt raw i)))
-    arr))
+(defonce !loaded-media-engines (atom #{}))
 
-
-
-(defn process-media-fetch [{:keys [source-map source hs-url token]}]
+(defn load-protocol-media! [protocol]
   (go
-    (if-not (or source-map source)
-      {:status "ignored" :msg "No source provided"}
-      (try
-        (let [server     (str/replace (str hs-url) #"/+$" "")
-              fetch-opts #js {:headers #js {"Authorization" (str "Bearer " token)}}]
-          (cond
-              source-map
-              (let [sm-clj    (js->clj source-map :keywordize-keys true)
-                    file-info (:file sm-clj)]
-                (if-not file-info
-                  (let [mxc       (or source (:url sm-clj) (get-in sm-clj [:plain :url]) "")
-                        resource  (str/replace (str mxc) #"^mxc://" "")
-                        fetch-url (str server "/_matrix/client/v1/media/download/" resource)
-                        resp      (<p! (net/fetch fetch-url fetch-opts))]
-                    (if-not (.-ok resp)
-                      (throw (ex-info "Fetch failed" {:status (.-status resp)}))
-                      (let [buf (<p! (.arrayBuffer resp))]
-                        {:status "success" :bytes buf :transfer [:bytes]})))
-                  (let [jwk        (clj->js (:key file-info))
-                        iv-b64     (:iv file-info)
-                        mxc-url    (:url file-info)
-                        resource   (str/replace (str mxc-url) #"^mxc://" "")
-                        fetch-url  (str server "/_matrix/client/v1/media/download/" resource)
-                        resp       (<p! (net/fetch fetch-url fetch-opts))]
-                    (if-not (.-ok resp)
-                      (throw (ex-info "Fetch failed" {:status (.-status resp)}))
-                      (let [enc-buf    (<p! (.arrayBuffer resp))
-                            iv-arr     (b64->uint8 iv-b64)
-                            algo       #js {:name "AES-CTR"}
-                            crypto-key (<p! (js/crypto.subtle.importKey "jwk" jwk algo false #js ["decrypt"]))
-                            dec-buf    (<p! (js/crypto.subtle.decrypt
-                                             #js {:name "AES-CTR" :counter iv-arr :length 64}
-                                             crypto-key
-                                             enc-buf))]
-                        {:status "success" :bytes dec-buf :transfer [:bytes]})))))
-             source
-              (let [is-http?  (or (str/starts-with? source "http://")
-                                  (str/starts-with? source "https://"))
-                    fetch-url (if is-http?
-                                source
-                                (let [resource (str/replace (str source) #"^mxc://" "")]
-                                  (str server "/_matrix/client/v1/media/download/" resource)))
-                    resp      (<p! (net/fetch fetch-url fetch-opts))]
-                (if-not (.-ok resp)
-                  (throw (ex-info "Fetch failed" {:status (.-status resp)}))
-                  (let [buf (<p! (.arrayBuffer resp))]
-                    {:status "success" :bytes buf :transfer [:bytes]})))
+    (<! (registry/ensure-environment!))
+    (let [proto-kw (keyword protocol)]
+      (when-not (contains? @!loaded-media-engines proto-kw)
+        (if-let [url (registry/get-engine-url protocol)]
+          (do
+            (<p! (dynamic-import url))
+            (swap! !loaded-media-engines conj proto-kw))
+          (throw (js/Error. (str "Unknown protocol or missing registry URL: " protocol))))))))
 
-              :else
-              {:status "error" :msg "Neither source-map nor source MXC provided."})
-
-          )
-        (catch :default e
-          (js/console.warn "Media worker trapped fetch error:" e)
-          {:status "error" :msg (str e)})))))
-
-(worker/register :get-media
-                 (fn [args]
-                   (process-media-fetch args)))
+(worker/register
+ :register-engine
+ (fn [payload]
+   (go
+     (try
+       (let [protocol-str (if (map? payload) (:engine-id payload) payload)]
+         (if protocol-str
+           (let [protocol-name (name protocol-str)]
+             (<! (load-protocol-media! protocol-name))
+             {:status "success" :msg (str "Registered media handlers for " protocol-name)})
+           {:status "error" :msg "No engine provided."}))
+       (catch :default e
+         {:status "error" :msg (.-message e)})))))
 
 (worker/bootstrap)
