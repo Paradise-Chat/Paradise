@@ -224,16 +224,20 @@ Removes the specific user's database and metadata.
 **** The SessionStore Class
 
 Finally, we wrap everything in a deftype. This compiles to a JavaScript class,
-making it compatible with the patterns expected by the Matrix SDK and UI layers.
+initially this was to be simply compatible with the patterns expected by
+the Matrix SDK and UI layers.
+However, it is still useful to keep this pattern going forward for
+our generic session storing.
+
 We use Object to implement the methods directly on the prototype.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(deftype SessionStore []
+(deftype SessionStore [engine-id]
   Object
   (loadSessions [this]
-    (load-sessions-impl))
+    (load-raw-sessions-opfs engine-id))
 
-  (save [this session passphrase store-id]
-    (save-session-impl! session passphrase store-id))
+  (save [this account-id payload owned-dbs]
+    (save-session-impl! engine-id account-id payload owned-dbs))
 
   (generatePassphrase [this]
     (generate-passphrase))
@@ -242,9 +246,8 @@ We use Object to implement the methods directly on the prototype.
     (generate-uuid))
 
   (getStoreName [this store-id]
-    (str "paradise-store-" store-id))
+    (str "paradise-store-" (name engine-id) "-" store-id))
 
-  (clear [this user-id]
-    (clear-session-impl! user-id)))
-
+  (clear [this account-id]
+    (clear-session-impl! engine-id account-id)))
 #+end_src
