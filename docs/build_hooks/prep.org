@@ -234,6 +234,29 @@ them in our state file, and place them in the client package.json
 #+end_src
 
 
+****** Copying Manifest Files
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn copy-manifest-files! [engine-path copy-files]
+  (doseq [{:keys [from to]} copy-files]
+    (let [engine-src (io/file engine-path from)
+          client-src (io/file from)
+          src        (if (.exists engine-src) engine-src client-src)
+          clean-to   (str/replace to #"^/" "")
+          dest       (io/file web-root clean-to)]
+      (if (.exists src)
+        (b/copy-file {:src (.getPath src) :target (.getPath dest)})
+        (println "WARNING: Could not find file to copy:" from)))))
+
+(defn delete-manifest-files! [copy-files]
+  (doseq [{:keys [to]} copy-files]
+    (let [clean-to (str/replace to #"^/" "")
+          dest     (io/file web-root clean-to)]
+      (b/delete {:path (.getPath dest)}))))
+#+end_src
+
+
 ****** Reading State
 
 Just a simple function to consume the contents of an EDN file
