@@ -1,176 +1,226 @@
 (ns paradise.media.component
-  (:require [reagent.core :as r]
-            ["react" :as react]
-            [re-frame.db :as db]
+  (:require ["react" :as react]
+            [re-frame.core :as re-frame]
             [cljs.core.async :refer [go <!]]
-            [paradise.shared.client.state :as state]
-            [cljs-workers.core :as main]
             [cljs-workers.mesh :as mesh]
-            [taoensso.timbre :as log]
-            [goog.object]
-            [clojure.string :as str]
-            [promesa.core :as p]
-            [net :refer [!auth-context] :as net]))
+            [clojure.string :as str]))
 
-(defn mxc->url
-  ([mxc-url] (mxc->url mxc-url {}))
-  ([mxc-url {:keys [homeserver type width height method] :or {type :download}}]
-   (when (and (string? mxc-url) (str/starts-with? mxc-url "mxc://"))
-     (let [db       (try @re-frame.db/app-db (catch :default _ {}))
-           base-url (or homeserver (:homeserver-url db))]
-       (when base-url
-         (let [server-base (str/replace base-url #"/+$" "")
-               resource    (str/replace mxc-url #"^mxc://" "")
-               base-path   (str "/_matrix/client/v1/media/" (name type) "/" resource)]
-           (if (= type :thumbnail)
-             (str server-base base-path
-                  "?width="  (or width 48)
-                  "&height=" (or height 48)
-                  "&method=" (or method "crop"))
-             (str server-base base-path))))))))
+(defn- extract-cache-key [uri source-map width height]
+  (let [base-key (or (:uri source-map)
+                     (get-in source-map [:file :url])
+                     (when (and source-map (not (map? source-map)))
+                       (or (.-uri source-map)
+                           (some-> (.-file source-map) .-url)
+                           (some-> (.-plain source-map) .-url)))
+                     uri)]
+    (if (and base-key width height)
+      (str base-key "?w=" width "&h=" height)
+      base-key)))
 
 
-(defn url->mxc [url]
-  (if (and (string? url) (str/includes? url "/_matrix/"))
-    (let [parts (str/split url #"/media/(?:download|thumbnail)/")]
-      (if (= (count parts) 2)
-        (str "mxc://" (second parts))
-        url))
-    url))
+(defn- hide-spinner! [node]
+  (when node
+    (when-let [prev (.-previousElementSibling node)]
+      (when (and (.-classList prev)
+                 (.contains (.-classList prev) "message-image-placeholder")
+                 (.-style prev))
+        (set! (.-display (.-style prev)) "none")))))
 
-(defonce !ui-blob-cache (r/atom {}))
-(defonce !in-flight (atom #{}))
 
-(defn request-mxc! [mxc]
-  (when (and mxc
-             (not (get @!ui-blob-cache mxc))
-             (not (contains? @!in-flight mxc)))
-    (swap! !in-flight conj mxc)
-    (let [url (if (str/starts-with? mxc "mxc://")
-                (mxc->url mxc)
-                mxc)]
-      (if-not url
-        (do
-          (swap! !ui-blob-cache assoc mxc :error)
-          (swap! !in-flight disj mxc))
-        (-> (p/let [resp (net/fetch url)
-                    buf  (.arrayBuffer resp)]
-              (let [blob    (js/Blob. #js [buf])
-                    obj-url (js/URL.createObjectURL blob)]
-                (swap! !ui-blob-cache assoc mxc obj-url)))
-            (p/catch (fn [e]
-                       (js/console.error "MXC Fetch Error:" e)
-                       (swap! !ui-blob-cache assoc mxc :error)))
-            (p/finally (fn []
-                         (swap! !in-flight disj mxc))))))))
-
+(defn- notify-error! [node]
+  (when node
+    (when-let [err-fn (.-__paradiseOnError node)]
+      (err-fn))))
 
 (defonce !native-media-cache (js/Map.))
 
-(defn execute-media-fetch! [node spinner-node cache-key mxc source-map mime-type fallback-url room-id event-id]
+(defn- resolve-pending-entry! [cache-key status url fallback-url]
+  (when-let [entry (.get !native-media-cache cache-key)]
+    (let [nodes (.-nodes entry)]
+      (set! (.-status entry) status)
+      (set! (.-url entry) url)
+      (when nodes
+        (.forEach nodes
+                  (fn [node]
+                    (if url
+                      (set! (.-src node) url)
+                      (when (= status "error")
+                        (notify-error! node)))
+                    (when (= status "ready")
+                      (hide-spinner! node))))
+        (.clear nodes))
+      (when (<= (.-refs entry) 0)
+        (when (and url (str/starts-with? (str url) "blob:"))
+          (js/URL.revokeObjectURL url))
+        (.delete !native-media-cache cache-key))
+      (when (and (= status "error") (not url))
+        (.delete !native-media-cache cache-key)))))
+
+(defn- schedule-cache-cleanup! [cache-key]
+  (js/setTimeout
+   (fn []
+     (when-let [entry (.get !native-media-cache cache-key)]
+       (when (and (<= (.-refs entry) 0)
+                  (not= (.-status entry) "pending"))
+         (when-let [url (.-url entry)]
+           (when (str/starts-with? (str url) "blob:")
+             (js/URL.revokeObjectURL url)))
+         (.delete !native-media-cache cache-key))))
+   100))
+
+
+
+(defn execute-media-fetch! [cache-key uri source-map mime-type fallback-url room-id event-id width height method]
   (go
     (try
-      (let [db   @re-frame.db/app-db
-            res  (<! (mesh/do-with-thread! :media-pool
-                                           {:handler :get-media
-                                            :arguments {:room-id room-id
-                                                        :event-id event-id
-                                                        :source mxc
-                                                        :source-map source-map
-                                                        :hs-url (:auth/hs-url db)
-                                                        :token (:auth/token db)}}))]
+      (let [res (<! (mesh/do-with-thread! :media-pool
+                                          {:handler   :get-media
+                                           :arguments {:room-id    room-id
+                                                       :event-id   event-id
+                                                       :uri        uri
+                                                       :source     uri
+                                                       :source-map source-map
+                                                       :width      width
+                                                       :height     height
+                                                       :method     method}}))]
         (case (:status res)
-          "unencrypted"
-          (let [url (:url res)]
-            (if-let [existing (.get !native-media-cache cache-key)]
-              (do
-                (set! (.-refs existing) (+ (.-refs existing) 1))
-                (set! (.-src node) (.-url existing)))
-              (do
-                (.set !native-media-cache cache-key #js {:url url :refs 1})
-                (set! (.-src node) url)))
-            (when (and spinner-node (.-style spinner-node))
-              (set! (.-display (.-style spinner-node)) "none")))
+          ("unencrypted" "direct")
+          (resolve-pending-entry! cache-key "ready" (:url res) fallback-url)
 
           "success"
-          (let [buffer (:bytes res)
-                blob   (js/Blob. #js [buffer] #js {:type mime-type})
-                url    (js/URL.createObjectURL blob)]
-            (if-let [existing (.get !native-media-cache cache-key)]
-              (do
-                (js/URL.revokeObjectURL url)
-                (set! (.-refs existing) (+ (.-refs existing) 1))
-                (set! (.-src node) (.-url existing)))
-              (do
-                (.set !native-media-cache cache-key #js {:url url :refs 1})
-                (set! (.-src node) url)))
-            (when (and spinner-node (.-style spinner-node))
-              (set! (.-display (.-style spinner-node)) "none")))
+          (if-let [entry (.get !native-media-cache cache-key)]
+            (if (<= (.-refs entry) 0)
+              (.delete !native-media-cache cache-key)
+              (let [buffer (:bytes res)
+                    blob   (js/Blob. #js [buffer] #js {:type mime-type})
+                    url    (js/URL.createObjectURL blob)]
+                (resolve-pending-entry! cache-key "ready" url fallback-url)))
+            nil)
 
           "error"
           (do
             (js/console.error "Media load failed:" (:msg res))
-            (when fallback-url
-              (set! (.-src node) fallback-url)))
+            (resolve-pending-entry! cache-key "error" fallback-url fallback-url))
 
-          (js/console.error "Unknown status from worker:" res)))
-      (catch :default e
-        (js/console.error "GO BLOCK CRASH:" e)))))
-
-(defn media-ref [node props]
-  (let
-      [mxc          (:mxc props)
-        source-map   (or (:source-map props) (:sourceMap props))
-        mime-type    (or (:mime-type props) (:mimeType props) "image/png")
-        fallback-url (or (:fallback-url props) (:fallbackUrl props))
-        room-id      (or (:room-id props) (:roomId props))
-        event-id     (or (:event-id props) (:eventId props))
-        cache-key    (or (get-in source-map [:file :url]) mxc)
-        mounted?     (atom false)]
-      (if node
-    (when-not @mounted?
-      (reset! mounted? true)
-      (let [spinner-node (.-previousElementSibling node)]
-        (if-let [cached (.get !native-media-cache cache-key)]
           (do
-            (set! (.-refs cached) (+ (.-refs cached) 1))
-            (set! (.-src node) (.-url cached))
-            (when (and spinner-node (.-style spinner-node))
-              (set! (.-display (.-style spinner-node)) "none")))
-          (execute-media-fetch! node spinner-node cache-key mxc source-map mime-type fallback-url room-id event-id))))
-    (when @mounted?
-      (reset! mounted? false)
-      (when-let [cached (.get !native-media-cache cache-key)]
-        (set! (.-refs cached) (- (.-refs cached) 1))
-        (when (<= (.-refs cached) 0)
-          (js/setTimeout
-           (fn []
-             (let [latest-cached (.get !native-media-cache cache-key)]
-               (when (and latest-cached (<= (.-refs latest-cached) 0))
-                 (when (clojure.string/starts-with? (str (.-url latest-cached)) "blob:")
-                   (js/URL.revokeObjectURL (.-url latest-cached)))
-                 (.delete !native-media-cache cache-key))))
-           10)))))))
+            (js/console.error "Unknown status from media worker:" res)
+            (resolve-pending-entry! cache-key "error" fallback-url fallback-url))))
+      (catch :default e
+        (js/console.error "Media fetch go-block error:" e)
+        (resolve-pending-entry! cache-key "error" fallback-url fallback-url)))))
+
+(defn- retain-media! [node cache-key uri source-map mime-type fallback-url room-id event-id width height method]
+  (if-let [entry (.get !native-media-cache cache-key)]
+    (do
+      (set! (.-refs entry) (+ (.-refs entry) 1))
+      (case (.-status entry)
+        "ready"
+        (do
+          (set! (.-src node) (.-url entry))
+          (hide-spinner! node))
+
+        "pending"
+        (.add (.-nodes entry) node)
+
+        "error"
+        (if fallback-url
+          (set! (.-src node) fallback-url)
+          (notify-error! node))
+
+        nil))
+    (let [nodes (js/Set.)]
+      (.add nodes node)
+      (.set !native-media-cache
+            cache-key
+            #js {:url    nil
+                 :status "pending"
+                 :refs   1
+                 :nodes  nodes})
+      (execute-media-fetch! cache-key uri source-map mime-type fallback-url room-id event-id width height method))))
+
+(defn- release-media! [node cache-key]
+  (when-let [entry (.get !native-media-cache cache-key)]
+    (when-let [nodes (.-nodes entry)]
+      (.delete nodes node))
+    (set! (.-refs entry) (- (.-refs entry) 1))
+    (when (<= (.-refs entry) 0)
+      (schedule-cache-cleanup! cache-key))))
+
+(defn create-media-ref [props]
+  (let [uri           (:uri props)
+        source-map    (or (:source-map props) (:sourceMap props))
+        mime-type     (or (:mime-type props) (:mimeType props) "image/png")
+        fallback-url  (or (:fallback-url props) (:fallbackUrl props))
+        on-error      (or (:on-error props) (:onError props))
+        room-id       (or (:room-id props) (:roomId props))
+        event-id      (or (:event-id props) (:eventId props))
+        width         (:width props)
+        height        (:height props)
+        method        (:method props)
+        cache-key     (extract-cache-key uri source-map width height)
+        !mounted-node (atom nil)]
+    (fn [node]
+      (if node
+        (do
+          (set! (.-__paradiseOnError node) on-error)
+          (when (and cache-key (not= @!mounted-node node))
+            (when-let [prev @!mounted-node]
+              (release-media! prev cache-key))
+            (reset! !mounted-node node)
+            (retain-media! node cache-key uri source-map mime-type fallback-url room-id event-id width height method)))
+        (when-let [prev @!mounted-node]
+          (set! (.-__paradiseOnError prev) nil)
+          (reset! !mounted-node nil)
+          (when cache-key
+            (release-media! prev cache-key)))))))
+
+(re-frame/reg-event-fx
+ :media/download
+ (fn [_ [_ {:keys [uri source-map filename mime-type room-id event-id]}]]
+   (go
+     (try
+       (let [res (<! (mesh/do-with-thread! :media-pool
+                                           {:handler   :get-media
+                                            :arguments {:room-id    room-id
+                                                        :event-id   event-id
+                                                        :uri        uri
+                                                        :source     uri
+                                                        :source-map source-map}}))]
+         (if (= (:status res) "success")
+           (let [blob (js/Blob. #js [(:bytes res)] #js {:type (or mime-type "application/octet-stream")})
+                 url  (js/URL.createObjectURL blob)
+                 link (js/document.createElement "a")]
+             (set! (.-href link) url)
+             (set! (.-download link) (or filename "download"))
+             (set! (.-display (.-style link)) "none")
+             (js/document.body.appendChild link)
+             (.click link)
+             (js/document.body.removeChild link)
+             (js/setTimeout #(js/URL.revokeObjectURL url) 10000))
+           (js/console.error "File download failed:" (:msg res))))
+       (catch :default e
+         (js/console.error "File download error:" e))))
+   {}))
 
 
 (defn ^:react media-native [props]
-  (let [tag-type     (or (:tag-type props) (:tagType props) "img")
-        class        (or (:class props) (:className props) (:class-name props))
-        style        (:style props)
-        alt          (:alt props)
-        on-error     (or (:on-error props) (:onError props))
-        on-click     (or (:on-click props) (:onClick props))
-        controls     (:controls props)]
+  (let [tag-type (or (:tag-type props) (:tagType props) "img")
+        class    (or (:class props) (:className props) (:class-name props))
+        style    (:style props)
+        alt      (:alt props)
+        on-error (or (:on-error props) (:onError props))
+        on-click (or (:on-click props) (:onClick props))
+        controls (:controls props)]
     (react/createElement tag-type
                          #js {:className class
-                              :style (clj->js style)
-                              :alt alt
-                              :controls controls
-                              :onClick on-click
-                              :loading (when (= tag-type "img") "lazy")
-                              :decoding (when (= tag-type "img") "async")
-                              :onError on-error
-                              :ref #(media-ref % props)})))
+                              :style     (clj->js style)
+                              :alt       alt
+                              :controls  controls
+                              :onClick   on-click
+                              :loading   (when (= tag-type "img") "lazy")
+                              :decoding  (when (= tag-type "img") "async")
+                              :onError   on-error
+                              :ref       (create-media-ref props)})))
 
 #_(swap! paradise.shared.client.registry/!components assoc
        "comp:paradise.media.component/media-native" media-native)
@@ -179,5 +229,4 @@
 
 
 (defn ^:ui media [props]
-  [media-native
-   props])
+  [media-native props])
