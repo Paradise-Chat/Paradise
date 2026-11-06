@@ -185,6 +185,13 @@ in the local storage. Any cross site scripting attack will impact either,
 so the choice to do this isn't inherently worse.
 
 
+It actually turned out multi-account notification support was limited
+by Sygnal and the way Matrix sends out push notifs. In a goal to limit
+the amount of identifiable information passed through.
+
+Still, multi-protocol notification support is still quite feasible.
+
+
 **** Implementation Logic
 
 These functions form the "brain" of the store.
