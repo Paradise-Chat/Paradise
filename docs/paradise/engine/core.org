@@ -78,8 +78,9 @@ actual protocol.
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
 (defn load-protocol-engine! [protocol]
   (go
+    (<! (registry/ensure-environment!))
     (try
-      (let [url (get-engine-url protocol)]
+      (let [url (registry/get-engine-url protocol)]
         (if-not url
           (throw (js/Error. (str "Unknown protocol: " protocol)))
           (let [module (<p! (dynamic-import url))
