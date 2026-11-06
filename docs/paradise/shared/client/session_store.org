@@ -32,9 +32,9 @@ We need standard low-level helpers to read and write raw JSON to the OPFS.
 We keep these as simple JavaScript object operations to avoid unnecessary overhead from
 converting back and forth to Clojure maps constantly.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- load-raw-sessions-opfs []
+(defn- load-raw-sessions-opfs [engine-id]
   (p/let [dir (.. js/navigator -storage getDirectory)
-          file-handle (.getFileHandle dir file-name #js {:create true})
+          file-handle (.getFileHandle dir (engine-file-name engine-id) #js {:create true})
           sync-handle (.createSyncAccessHandle file-handle)]
     (try
       (let [size (.getSize sync-handle)]
@@ -48,9 +48,9 @@ converting back and forth to Clojure maps constantly.
       (finally
         (.close sync-handle)))))
 
-(defn- save-raw-sessions-opfs! [sessions-obj]
+(defn- save-raw-sessions-opfs! [engine-id sessions-obj]
   (p/let [dir (.. js/navigator -storage getDirectory)
-          file-handle (.getFileHandle dir file-name #js {:create true})
+          file-handle (.getFileHandle dir (engine-file-name engine-id) #js {:create true})
           sync-handle (.createSyncAccessHandle file-handle)]
     (try
       (let [encoder (js/TextEncoder.)
