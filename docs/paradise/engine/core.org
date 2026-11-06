@@ -57,23 +57,8 @@ This is enables us to take a compiled JS bundle and ingest it to use the engine
 it is associated with.
 
 
-***** Fetch
-
-This ensures that we provide the proper behavior depending on environment.
-The shadow-cljs docs clarify that goog.DEBUG is eliminate the goog.DEBUG
-entirely in release mode.
-
-#+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
-(defn get-engine-url [protocol]
-  (when-let [paths (get config protocol)]
-    (if ^boolean goog.DEBUG
-      (:dev paths)
-      (:prod paths))))
-#+end_src
-
-
-For dev we need to use the fallback trigger for the bootstrap since seem to be
-ignored for dev web worker modules. Not entirely sure why.
+What was initially the fallback trigger, is now the main mechanism used
+for bootstrapping. It is easy then to neatly load the engine in.
 
 We do ensure to keep it in a form so that it can remain ignorant of the
 actual protocol.
