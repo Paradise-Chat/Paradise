@@ -30,7 +30,10 @@ app.commandLine.appendSwitch(
     "enable-features",
     "WaylandWindowDecorations,WebRTCPipeWireCapturer,WebRtcAllowInputVolumeAdjustment"
 );
-
+app.commandLine.appendSwitch(
+    'enable-features',
+    'PulseaudioLoopbackForScreenShare,MacLoopbackAudioForScreenShare,MacCatapSystemAudioLoopbackCapture'
+);
 unhandled();
 
 // Define our menu templates (these are optional)
