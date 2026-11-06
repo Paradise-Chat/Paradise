@@ -5,10 +5,14 @@ import {
     setupCapacitorElectronPlugins,
 } from "@capacitor-community/electron";
 import chokidar from "chokidar";
+import { execFile, execFileSync } from "child_process";
 import type { MenuItemConstructorOptions } from "electron";
 import {
     app,
     BrowserWindow,
+    desktopCapturer,
+    dialog,
+    ipcMain,
     Menu,
     MenuItem,
     nativeImage,
@@ -18,7 +22,9 @@ import {
 import electronIsDev from "electron-is-dev";
 import electronServe from "electron-serve";
 import windowStateKeeper from "electron-window-state";
+import { readFileSync } from "fs";
 import { join } from "path";
+import { promisify } from "util";
 
 // Define components for a watcher to detect when the webapp is changed so we can reload in Dev mode.
 const reloadWatcher = {
