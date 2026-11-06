@@ -38,4 +38,12 @@
   (run-tangle-all)
   (js/setInterval run-tangle-all 1000))
 
-(watch)
+(let [args (not-empty (js->clj (.slice js/process.argv 2)))]
+  (if args
+    (doseq [file args]
+      (if (fs/existsSync file)
+        (do
+          (println "Tangling single file:" file)
+          (tangle-file file))
+        (println "File not found:" file)))
+    (watch)))
