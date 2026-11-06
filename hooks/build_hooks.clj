@@ -9,12 +9,6 @@
 
   (let [assets
         [
-;;         ["node_modules/ffi-bindings/src/generated-compat/wasm-bindgen/index_bg.wasm"
-;;          "build/ffi-bindings/wasm-bindgen/index_bg.wasm"]
-
-         ["node_modules/livekit-client/dist/livekit-client.e2ee.worker.js"
-          "build/livekit-e2ee-worker.js"]
-
          ["node_modules/simple-rnnoise-wasm/dist/rnnoise.mjs"
           "build/rnnoise/rnnoise.mjs"]
 
@@ -50,6 +44,7 @@
              source-path))))))
 
   build-state)
+
 
 (defn include-themes
   {:shadow.build/stage :flush}
