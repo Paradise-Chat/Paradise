@@ -86,10 +86,12 @@ actual protocol.
           (let [_            (<p! (dynamic-import url))
                 bootstrap-fn (get-fallback-bootstrap protocol)]
             (if bootstrap-fn
-              (<! (bootstrap-fn register-engine!))
-              (js/console.error "Engine module did not export a bootstrap function:" protocol)))))
-      (catch js/Error e
-        (js/console.error "External import failed:" e)))))
+              (do
+                (<! (bootstrap-fn register-engine! url))
+                {:status "success"})
+              {:status "error" :msg (str "Engine module did not export a bootstrap function: " protocol)}))))
+      (catch :default e
+        {:status "error" :msg (or (.-message e) (str e))}))))
 #+end_src
 
 
