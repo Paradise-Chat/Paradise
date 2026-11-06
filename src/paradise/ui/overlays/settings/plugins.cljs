@@ -5,34 +5,6 @@
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 
-(defn ^:ui security-warning-modal []
-  (let [pending-plugin @(re-frame/subscribe [:plugins/pending-security-approval])
-        tr             @(re-frame/subscribe [:i18n/tr])]
-    (when pending-plugin
-      [:div.security-modal-card
-       [:h2.security-modal-title
-        (tr [:settings.plugins/security-title])]
-       [:p.security-modal-text
-        (tr [:settings.plugins/plugin-request
-             [:strong (:name (:plugin-map pending-plugin))]])]
-
-       [:div.security-script-list
-        (for [script (:external-scripts (:plugin-map pending-plugin))]
-          ^{:key script} [:div script])]
-
-       [:p.security-modal-warning
-        (tr [:settings.plugins/warning-message])]
-       [:div.settings-actions
-        [:button.settings-button
-         {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
-         (tr [:settings.plugins/cancel])]
-        [:button.settings-button.destructive
-         {:on-click #(re-frame/dispatch [:plugins/execute-boot-sequence
-                                         (:url pending-plugin)
-                                         (:plugin-map pending-plugin)])}
-         (tr [:settings.plugins/warning-confirmation])]]])))
-
-
 (defn ^:ui plugins-installer []
   (r/with-let [plugin-url-input (r/atom "")
                theme-url-input  (r/atom "")]
@@ -148,3 +120,31 @@
                  (if installed?
                    (tr [:settings.plugins/installed])
                    (tr [:settings.plugins/install]))]]]))])])))
+
+
+(defn ^:ui security-warning-modal []
+  (let [pending-plugin @(re-frame/subscribe [:plugins/pending-security-approval])
+        tr             @(re-frame/subscribe [:i18n/tr])]
+    (when pending-plugin
+      [:div.security-modal-card
+       [:h2.security-modal-title
+        (tr [:settings.plugins/security-title])]
+       [:p.security-modal-text
+        (tr [:settings.plugins/plugin-request
+             [:strong (:name (:plugin-map pending-plugin))]])]
+
+       [:div.security-script-list
+        (for [script (:external-scripts (:plugin-map pending-plugin))]
+          ^{:key script} [:div script])]
+
+       [:p.security-modal-warning
+        (tr [:settings.plugins/warning-message])]
+       [:div.settings-actions
+        [:button.settings-button
+         {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
+         (tr [:settings.plugins/cancel])]
+        [:button.settings-button.destructive
+         {:on-click #(re-frame/dispatch [:plugins/execute-boot-sequence
+                                         (:url pending-plugin)
+                                         (:plugin-map pending-plugin)])}
+         (tr [:settings.plugins/warning-confirmation])]]])))
