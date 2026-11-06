@@ -24,9 +24,11 @@ and enables us to support multiple protocols and not just Matrix.
    [cljs.core.async :refer [go <!]]
    [cljs-workers.worker :as worker]
    [goog.object :as gobj]
-   [paradise.shared.utils.macros :refer [config]]
    [cljs.core.async.interop :refer-macros [<p!]]
-   [shadow.esm :refer [dynamic-import]]))
+   [shadow.esm :refer [dynamic-import]]
+   [paradise.shared.registry :as registry]
+   [paradise.shared.sci-runner.engine :as sci]
+   ))
 #+end_src
 
 
