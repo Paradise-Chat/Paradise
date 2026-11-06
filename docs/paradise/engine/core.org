@@ -47,7 +47,7 @@ Now to register and engine to the registry
 
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
 (defn register-engine! [id handler-map]
-  (swap! !registry assoc (keyword id) (js->clj handler-map :keywordize-keys true)))
+  (swap! !loaded-engines assoc (keyword id) (js->clj handler-map :keywordize-keys true)))
 #+end_src
 
 
