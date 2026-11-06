@@ -82,13 +82,9 @@ actual protocol.
     (try
       (let [url (registry/get-engine-url protocol)]
         (if-not url
-          (throw (js/Error. (str "Unknown protocol: " protocol)))
-          (let [module (<p! (dynamic-import url))
-                bootstrap-fn (or (.-bootstrap module)
-                                 (.-init module)
-                                 (some-> module .-default .-bootstrap)
-                                 (some-> module .-default .-init)
-                                 (get-fallback-bootstrap protocol))]
+          {:status "error" :msg (str "Unknown protocol or missing registry URL: " protocol)}
+          (let [_            (<p! (dynamic-import url))
+                bootstrap-fn (get-fallback-bootstrap protocol)]
             (if bootstrap-fn
               (<! (bootstrap-fn register-engine!))
               (js/console.error "Engine module did not export a bootstrap function:" protocol)))))
