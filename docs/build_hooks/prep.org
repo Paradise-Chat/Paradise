@@ -288,6 +288,17 @@ dependencies and make the engine able to build proper.
   (b/process {:command-args ["npx" "shadow-cljs" "release" "app"]}))
 #+end_src
 
+Next we need to supply the prep stage for the engine
+
+
+#+begin_src clojurescript :tangle ../../build.clj
+(defn prep-engine! [engine-path copy-files force-prep?]
+  (let [build-file (io/file engine-path "build.clj")
+        missing?   (some #(not (.exists (io/file engine-path (:from %)))) copy-files)]
+    (when (and (.exists build-file) (or force-prep? missing?))
+      (println "Running prep in engine:" engine-path)
+      (b/process {:dir          engine-path
+                  :command-args ["clojure" "-T:build" "prep"]}))))
 
 
 ****** Mounting
