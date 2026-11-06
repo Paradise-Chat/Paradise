@@ -11,10 +11,10 @@
    [paradise.binding.core :as binding]
    [paradise.binding.streams :as streams]
    [paradise.shared.client.state :as state]
-   [paradise.shared.client.config :refer [eve-enabled?]]
    [paradise.shared.client.session-store :as store]
    [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
+   [paradise.shared.registry :as registry]
    [cljs.core.async.interop :refer-macros [<p!]]
    [cljs.core.async :refer [go <!]]
    [taoensso.timbre :as log]))
@@ -138,12 +138,20 @@
 
 (defn register-engine [protocol-str]
   (go
-    (let [res (<! (mesh/do-with-thread! :engine-pool
-                                        {:handler :register-engine
-                                         :arguments {:engine-id protocol-str}}))]
-      (if (= "success" (:status res))
-        (js/console.log "Engine loaded successfully:" protocol-str)
-        (js/console.error "Failed to load engine:" (:msg res))))))
+    (let [media-ch  (mesh/do-with-thread! :media-pool
+                                          {:handler   :register-engine
+                                           :arguments {:engine-id protocol-str}})
+          engine-ch (mesh/do-with-thread! :engine-pool
+                                          {:handler   :register-engine
+                                           :arguments {:engine-id protocol-str}})
+          media-res (<! media-ch)
+          eng-res   (<! engine-ch)]
+      (if (and (= "success" (:status eng-res))
+               (= "success" (:status media-res)))
+        (js/console.log "Engine and media worker loaded successfully:" protocol-str)
+        (js/console.error "Failed to load engine:"
+                          {:engine (:msg eng-res)
+                           :media  (:msg media-res)})))))
 
 (re-frame/reg-event-fx
  :engine/load-protocol
@@ -162,6 +170,7 @@
          (log/error "Failed to start sync:" (:msg res)))))
    {}))
 
+
 (re-frame/reg-event-fx
  :app/cold-boot
  (fn [_ [_ target-user-id requested-engine]]
@@ -177,7 +186,7 @@
 
        (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
 
-       (if (and target-user-id engine-id)
+       (if engine-id
          (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
          (re-frame/dispatch [:auth/set-status :logged-out]))))
    {}))
@@ -189,11 +198,15 @@
          [:dispatch [:sdk/fetch-own-profile]]
          [:dispatch [:sdk/fetch-all-emotes]]]}))
 
+
 (defn ^:export init []
   (go
+
+    (<! (registry/ensure-environment!))
+    (re-frame/dispatch [:registry/sync-manifests])
     (binding/init-middleware!)
-#_  (init-worker!)
-  (<! (boot-threads))
-  (app/init)
-  (logger/init!)
-  (log/debug  "Entering Paradise!")))
+    (re-frame/dispatch [:registry/load-success (registry/resolve-engines)])
+
+    (<! (boot-threads))
+    (app/init)
+    (logger/init!)))
