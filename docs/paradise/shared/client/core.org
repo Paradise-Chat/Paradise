@@ -252,7 +252,6 @@ user, rooms, etc and get all of that ready. Then pass off to
 the standard boot strap.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
-
 (re-frame/reg-event-fx
  :app/cold-boot
  (fn [_ [_ target-user-id requested-engine]]
@@ -268,7 +267,7 @@ the standard boot strap.
 
        (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
 
-       (if (and target-user-id engine-id)
+       (if engine-id
          (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
          (re-frame/dispatch [:auth/set-status :logged-out]))))
    {}))
@@ -298,11 +297,14 @@ Provides the entry-point for the application that Vite and the index.html enter 
 #+begin_src clojurescript  :tangle ../../../../src/paradise/shared/client/core.cljs
 (defn ^:export init []
   (go
+
+    (<! (registry/ensure-environment!))
+    (re-frame/dispatch [:registry/sync-manifests])
     (binding/init-middleware!)
-#_  (init-worker!)
-  (<! (boot-threads))
-  (app/init)
-  (logger/init!)
-  (log/debug  "Entering Paradise!")))
+    (re-frame/dispatch [:registry/load-success (registry/resolve-engines)])
+
+    (<! (boot-threads))
+    (app/init)
+    (logger/init!)))
 #+end_src
 
