@@ -86,23 +86,29 @@ I can later revise the SW to use this mechanism instead to remove the duplicatio
 
 
 #+begin_src clojurescript :tangle ../src/net.cljs
-(defn- wait-for-auth []
-  (p/create
-   (fn [resolve]
-     (let [{:keys [token hs-url]} @!auth-context]
-       (if (and token hs-url)
-         (resolve true)
-         (let [watch-key (keyword (gensym "auth-watch"))
-               timer     (js/setTimeout #(do
-                                           (remove-watch !auth-context watch-key)
-                                           (resolve false))
-                                        2000)]
-           (add-watch !auth-context watch-key
-                      (fn [_ _ _ new-state]
-                        (when (and (:token new-state) (:hs-url new-state))
-                          (js/clearTimeout timer)
-                          (remove-watch !auth-context watch-key)
-                          (resolve true))))))))))
+(defn await-auth
+  ([] (await-auth 3000))
+  ([timeout-ms]
+   (p/create
+    (fn [resolve]
+      (let [{:keys [token base-url headers auth-fn] :as ctx} @!auth-context]
+        (if (or (and token base-url) headers auth-fn)
+          (resolve ctx)
+          (let [watch-key (keyword (gensym "auth-watch"))
+                timer     (js/setTimeout
+                           (fn []
+                             (remove-watch !auth-context watch-key)
+                             (resolve @!auth-context))
+                           timeout-ms)]
+            (add-watch !auth-context watch-key
+                       (fn [_ _ _ new-state]
+                         (when (or (and (:token new-state) (:base-url new-state))
+                                   (:headers new-state)
+                                   (:auth-fn new-state))
+                           (js/clearTimeout timer)
+                           (remove-watch !auth-context watch-key)
+                           (resolve new-state)))))))))))
+
 
 (defn fetch
   ([url] (fetch url nil))
