@@ -47,11 +47,21 @@ that we can easily update the fetches to use the correct client.
 
 We may need to check to ensure we're disposing of the previous
 client when the account is swapped (among other reset operations).
-#+begin_src clojurescript :tangle ../src/net.cljs
-(defonce !auth-context (atom {:token nil :hs-url nil}))
 
-(defn set-auth-context! [token hs-url]
-  (reset! !auth-context {:token token :hs-url hs-url}))
+It needs to support multiple protocols now, so being able to supply
+an auth function as well as headers.
+#+begin_src clojurescript :tangle ../src/net.cljs
+(defonce !auth-context (atom {:token nil :base-url nil :headers nil :auth-fn nil}))
+
+(defn set-auth-context!
+  ([context-map]
+   (if (nil? context-map)
+     (reset! !auth-context {:token nil :base-url nil :headers nil :auth-fn nil})
+     (let [base-url (when-let [u (:base-url context-map)]
+                      (str/replace (ensure-protocol u) #"/+$" ""))]
+       (reset! !auth-context (assoc context-map :base-url base-url)))))
+  ([token base-url]
+   (set-auth-context! {:token token :base-url base-url})))
 #+end_src
 
 
