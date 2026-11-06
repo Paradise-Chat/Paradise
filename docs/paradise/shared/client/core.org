@@ -22,10 +22,10 @@ pieces.
    [paradise.binding.core :as binding]
    [paradise.binding.streams :as streams]
    [paradise.shared.client.state :as state]
-   [paradise.shared.client.config :refer [eve-enabled?]]
    [paradise.shared.client.session-store :as store]
    [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
+   [paradise.shared.registry :as registry]
    [cljs.core.async.interop :refer-macros [<p!]]
    [cljs.core.async :refer [go <!]]
    [taoensso.timbre :as log]))
@@ -241,6 +241,7 @@ user, rooms, etc and get all of that ready. Then pass off to
 the standard boot strap.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
+
 (re-frame/reg-event-fx
  :app/cold-boot
  (fn [_ [_ target-user-id requested-engine]]
