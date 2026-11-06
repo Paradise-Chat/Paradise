@@ -211,14 +211,13 @@ Updates a specific user's session while preserving others.
 
 Removes the specific user's database and metadata.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- clear-session-impl! [user-id]
-  (p/let [sessions (load-raw-sessions-opfs)
-          data     (aget sessions user-id)
-          sid      (if data (aget data "storeId") nil)
-          _        (if sid (delete-store-impl! sid) (p/resolved true))]
-    (js-delete sessions user-id)
-    (save-raw-sessions-opfs! sessions)))
-
+(defn- clear-session-impl! [engine-id account-id]
+  (p/let [sessions  (load-raw-sessions-opfs engine-id)
+          data      (aget sessions account-id)
+          owned-dbs (when data (js->clj (aget data "ownedDbs")))
+          _         (delete-dbs! owned-dbs)]
+    (js-delete sessions account-id)
+    (save-raw-sessions-opfs! engine-id sessions)))
 #+end_src
 
 
