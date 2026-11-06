@@ -226,7 +226,10 @@ then a quick reframe event for the login to also register them on protocol selec
    {}))
 #+end_src
 
-***** SDK Sync Kick Off
+***** Sync Kick Off
+
+This is more of an engine initialization and no longer the just the sync
+initialization for Matrix
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (re-frame/reg-event-fx
