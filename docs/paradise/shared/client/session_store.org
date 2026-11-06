@@ -199,17 +199,14 @@ They are defined outside the deftype for easier testing and cleaner syntax.
 
 Updates a specific user's session while preserving others.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- save-session-impl! [session passphrase store-id]
-  (p/let [user-id (.-userId session)
-          sessions (load-raw-sessions-opfs)
-          existing (aget sessions user-id)
-          final-pass (or passphrase (when existing (aget existing "passphrase")))
-          final-id   (or store-id   (when existing (aget existing "storeId")))]
-    (when (and final-pass final-id)
-      (aset sessions user-id #js {:session session
-                                  :passphrase final-pass
-                                  :storeId final-id})
-      (save-raw-sessions-opfs! sessions))))
+(defn- save-session-impl! [engine-id account-id payload owned-dbs]
+  (p/let [sessions (load-raw-sessions-opfs engine-id)
+          existing (aget sessions account-id)
+          merged   (js/Object.assign #js {} existing payload)]
+    (when (seq owned-dbs)
+      (aset merged "ownedDbs" (clj->js owned-dbs)))
+    (aset sessions account-id merged)
+    (save-raw-sessions-opfs! engine-id sessions)))
 #+end_src
 
 Removes the specific user's database and metadata.
