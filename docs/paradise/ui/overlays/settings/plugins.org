@@ -7,7 +7,7 @@ This is the interface that handles plugin installations.
 **** Imports
 
 
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugins.cljs
 (ns paradise.ui.overlays.settings.plugins
   (:require
    [clojure.string :as str]
@@ -19,7 +19,7 @@ This is the interface that handles plugin installations.
 **** Installer
 
 
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugins.cljs
 (defn ^:ui plugins-installer []
   (r/with-let [plugin-url-input (r/atom "")
                theme-url-input  (r/atom "")]
@@ -311,7 +311,7 @@ sources isn't a bad idea.
 We'll likely repurpose this at some point.
 
 
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugins.cljs
 (defn ^:ui security-warning-modal []
   (let [pending-plugin @(re-frame/subscribe [:plugins/pending-security-approval])
         tr             @(re-frame/subscribe [:i18n/tr])]
