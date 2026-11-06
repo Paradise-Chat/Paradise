@@ -197,23 +197,6 @@ Still, multi-protocol notification support is still quite feasible.
 These functions form the "brain" of the store.
 They are defined outside the deftype for easier testing and cleaner syntax.
 
-
-This re-hydrates the Rust Session objects. The data in localStorage is just JSON;
-we must pass it into Session.new() so the SDK can use it.
-#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- load-sessions-impl []
-  (p/let [sessions (load-raw-sessions-opfs)
-          Session (get-session-class)]
-    (when Session
-      (doseq [user-id (js/Object.keys sessions)]
-        (let [data (aget sessions user-id)]
-          (aset sessions user-id
-                #js {:session (.new Session (aget data "session"))
-                     :passphrase (aget data "passphrase")
-                     :storeId (aget data "storeId")}))))
-    sessions))
-#+end_src
-
 Updates a specific user's session while preserving others.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
 (defn- save-session-impl! [session passphrase store-id]
