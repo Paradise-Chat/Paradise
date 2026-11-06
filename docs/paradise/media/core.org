@@ -45,12 +45,26 @@ As of now, the core can be truly ignorant.
           (throw (js/Error. (str "Unknown protocol or missing registry URL: " protocol))))))))
 #+end_src
 
-**** Get Media
+**** Register Engine
+
+The media handler is defined by the engine.
+It may be wise later to shrink the bundle size
+by creating a smaller compiled bundle or so.
 
 #+begin_src clojurescript :tangle ../../../src/paradise/media/core.cljs
-(worker/register :get-media
-                 (fn [args]
-                   (process-media-fetch args)))
+(worker/register
+ :register-engine
+ (fn [payload]
+   (go
+     (try
+       (let [protocol-str (if (map? payload) (:engine-id payload) payload)]
+         (if protocol-str
+           (let [protocol-name (name protocol-str)]
+             (<! (load-protocol-media! protocol-name))
+             {:status "success" :msg (str "Registered media handlers for " protocol-name)})
+           {:status "error" :msg "No engine provided."}))
+       (catch :default e
+         {:status "error" :msg (.-message e)})))))
 #+end_src
 
 
