@@ -74,7 +74,7 @@ The Rust SDK uses this passphrase to encrypt the IndexedDB where the actual keys
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- generate-uuid []
+(defn generate-uuid []
   (if (and (exists? js/crypto) (exists? (.-randomUUID js/crypto)))
     (.randomUUID js/crypto)
     (let [template "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"]
@@ -108,7 +108,8 @@ OPFS is unideal for the main thread to use and we don't really
 
 (defn get-setting [key]
   (p/let [db (open-settings-db)]
-    (if-not db (p/resolved nil)
+    (if-not db
+      (p/resolved nil)
       (p/create
        (fn [resolve-fn _]
          (let [tx    (.transaction db #js ["settings"] "readonly")
@@ -134,7 +135,8 @@ OPFS is unideal for the main thread to use and we don't really
 
 (defn set-setting! [key value]
   (p/let [db (open-settings-db)]
-    (if-not db false
+    (if-not db
+      false
       (p/create
        (fn [resolve-fn _]
          (let [tx      (.transaction db #js ["settings"] "readwrite")
