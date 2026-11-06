@@ -65,28 +65,6 @@ an auth function as well as headers.
 #+end_src
 
 
-Similar to how we do in the service worker, we want to be certain we never send
-the token to an endpoint that doesn't need it.
-
-#+begin_src clojurescript :tangle ../src/net.cljs
-(defn- safe-auth-path? [request-url hs-url]
-  (try
-    (let [req-obj  (js/URL. request-url)
-          hs-obj   (js/URL. hs-url)
-          req-host (.-hostname req-obj)
-          hs-host  (.-hostname hs-obj)
-          path     (.-pathname req-obj)]
-      (and (or (= req-host hs-host)
-               (str/ends-with? req-host (str "." hs-host)))
-           (str/starts-with? path "/_matrix/")))
-    (catch :default _ false)))
-
-(defn ensure-protocol [hs-url]
-  (if (or (str/starts-with? hs-url "http://")
-          (str/starts-with? hs-url "https://"))
-    hs-url
-    (str "https://" hs-url)))
-#+end_src
 
 
 We need a clean method to swap between using the generic fetch and the Capacitor.
