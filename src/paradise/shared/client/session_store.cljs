@@ -1,20 +1,14 @@
 (ns paradise.shared.client.session-store
   (:require [promesa.core :as p]
             [cljs.reader :as reader]
-            [taoensso.timbre :as log]
-            ["ffi-bindings" :as sdk]))
+            [taoensso.timbre :as log]))
 
-(def ^:private file-name "mx_session_v3.json")
+(defn- engine-file-name [engine-id]
+  (str "sessions_" (name (or engine-id :default)) ".json"))
 
-(defn- get-session-class []
-  (let [sdk-root (if (.-Session sdk) sdk (.-default sdk))]
-    (if sdk-root
-      (.-Session sdk-root)
-      (log/error "FATAL: Could not find Session class on root SDK object."))))
-
-(defn- load-raw-sessions-opfs []
+(defn- load-raw-sessions-opfs [engine-id]
   (p/let [dir (.. js/navigator -storage getDirectory)
-          file-handle (.getFileHandle dir file-name #js {:create true})
+          file-handle (.getFileHandle dir (engine-file-name engine-id) #js {:create true})
           sync-handle (.createSyncAccessHandle file-handle)]
     (try
       (let [size (.getSize sync-handle)]
@@ -28,9 +22,9 @@
       (finally
         (.close sync-handle)))))
 
-(defn- save-raw-sessions-opfs! [sessions-obj]
+(defn- save-raw-sessions-opfs! [engine-id sessions-obj]
   (p/let [dir (.. js/navigator -storage getDirectory)
-          file-handle (.getFileHandle dir file-name #js {:create true})
+          file-handle (.getFileHandle dir (engine-file-name engine-id) #js {:create true})
           sync-handle (.createSyncAccessHandle file-handle)]
     (try
       (let [encoder (js/TextEncoder.)
@@ -47,7 +41,7 @@
     (.getRandomValues js/crypto array)
     (js/btoa (.apply js/String.fromCharCode nil array))))
 
-(defn- generate-uuid []
+(defn generate-uuid []
   (if (and (exists? js/crypto) (exists? (.-randomUUID js/crypto)))
     (.randomUUID js/crypto)
     (let [template "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"]
@@ -71,7 +65,8 @@
 
 (defn get-setting [key]
   (p/let [db (open-settings-db)]
-    (if-not db (p/resolved nil)
+    (if-not db
+      (p/resolved nil)
       (p/create
        (fn [resolve-fn _]
          (let [tx    (.transaction db #js ["settings"] "readonly")
@@ -97,7 +92,8 @@
 
 (defn set-setting! [key value]
   (p/let [db (open-settings-db)]
-    (if-not db false
+    (if-not db
+      false
       (p/create
        (fn [resolve-fn _]
          (let [tx      (.transaction db #js ["settings"] "readwrite")
@@ -120,56 +116,35 @@
          (log/error "Fatal crash attempting to delete IDB:" db-name "Error:" e)
          (resolve-fn false))))))
 
-(defn- delete-store-impl! [store-id]
-  (let [base-name (str "paradise-store-" store-id)]
-    (.allSettled js/Promise
-     #js [(delete-db! base-name)
-          (delete-db! (str base-name "::matrix-sdk-state"))
-          (delete-db! (str base-name "::matrix-sdk-crypto"))
-          (delete-db! (str base-name "::event_cache"))
-          (delete-db! (str base-name "::media"))])))
+(defn- delete-dbs! [db-names]
+  (if (seq db-names)
+    (.allSettled js/Promise (into-array (map delete-db! db-names)))
+    (p/resolved true)))
 
+(defn- save-session-impl! [engine-id account-id payload owned-dbs]
+  (p/let [sessions (load-raw-sessions-opfs engine-id)
+          existing (aget sessions account-id)
+          merged   (js/Object.assign #js {} existing payload)]
+    (when (seq owned-dbs)
+      (aset merged "ownedDbs" (clj->js owned-dbs)))
+    (aset sessions account-id merged)
+    (save-raw-sessions-opfs! engine-id sessions)))
 
-(defn- load-sessions-impl []
-  (p/let [sessions (load-raw-sessions-opfs)
-          Session (get-session-class)]
-    (when Session
-      (doseq [user-id (js/Object.keys sessions)]
-        (let [data (aget sessions user-id)]
-          (aset sessions user-id
-                #js {:session (.new Session (aget data "session"))
-                     :passphrase (aget data "passphrase")
-                     :storeId (aget data "storeId")}))))
-    sessions))
+(defn- clear-session-impl! [engine-id account-id]
+  (p/let [sessions  (load-raw-sessions-opfs engine-id)
+          data      (aget sessions account-id)
+          owned-dbs (when data (js->clj (aget data "ownedDbs")))
+          _         (delete-dbs! owned-dbs)]
+    (js-delete sessions account-id)
+    (save-raw-sessions-opfs! engine-id sessions)))
 
-(defn- save-session-impl! [session passphrase store-id]
-  (p/let [user-id (.-userId session)
-          sessions (load-raw-sessions-opfs)
-          existing (aget sessions user-id)
-          final-pass (or passphrase (when existing (aget existing "passphrase")))
-          final-id   (or store-id   (when existing (aget existing "storeId")))]
-    (when (and final-pass final-id)
-      (aset sessions user-id #js {:session session
-                                  :passphrase final-pass
-                                  :storeId final-id})
-      (save-raw-sessions-opfs! sessions))))
-
-(defn- clear-session-impl! [user-id]
-  (p/let [sessions (load-raw-sessions-opfs)
-          data     (aget sessions user-id)
-          sid      (if data (aget data "storeId") nil)
-          _        (if sid (delete-store-impl! sid) (p/resolved true))]
-    (js-delete sessions user-id)
-    (save-raw-sessions-opfs! sessions)))
-
-
-(deftype SessionStore []
+(deftype SessionStore [engine-id]
   Object
   (loadSessions [this]
-    (load-sessions-impl))
+    (load-raw-sessions-opfs engine-id))
 
-  (save [this session passphrase store-id]
-    (save-session-impl! session passphrase store-id))
+  (save [this account-id payload owned-dbs]
+    (save-session-impl! engine-id account-id payload owned-dbs))
 
   (generatePassphrase [this]
     (generate-passphrase))
@@ -178,7 +153,7 @@
     (generate-uuid))
 
   (getStoreName [this store-id]
-    (str "paradise-store-" store-id))
+    (str "paradise-store-" (name engine-id) "-" store-id))
 
-  (clear [this user-id]
-    (clear-session-impl! user-id)))
+  (clear [this account-id]
+    (clear-session-impl! engine-id account-id)))
