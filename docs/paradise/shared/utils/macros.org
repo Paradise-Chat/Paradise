@@ -138,5 +138,5 @@ usable configs across the application.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/macros.cljc
 (defmacro load-static-config [path]
-  (edn/read-string (slurp path)))
+  (list 'quote (clojure.edn/read-string (slurp path))))
 #+end_src
