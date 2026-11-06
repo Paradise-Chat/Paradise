@@ -21,18 +21,8 @@ File with methods to help us store our client configurations and such.
 First, we define the file used in OPFS.
 This is the "root" file under which all user sessions will be serialized.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(def ^:private file-name "mx_session_v3.json")
-#+end_src
-
-
-We need a helper to verify we can actually find the Rust classes.
-This grabs the Session constructor from the matrix_sdk namespace within our bundle.
-#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- get-session-class []
-  (let [sdk-root (if (.-Session sdk) sdk (.-default sdk))]
-    (if sdk-root
-      (.-Session sdk-root)
-      (log/error "FATAL: Could not find Session class on root SDK object."))))
+(defn- engine-file-name [engine-id]
+  (str "sessions_" (name (or engine-id :default)) ".json"))
 #+end_src
 
 
