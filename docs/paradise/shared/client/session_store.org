@@ -13,8 +13,7 @@ File with methods to help us store our client configurations and such.
 (ns paradise.shared.client.session-store
   (:require [promesa.core :as p]
             [cljs.reader :as reader]
-            [taoensso.timbre :as log]
-            ["ffi-bindings" :as sdk]))
+            [taoensso.timbre :as log]))
 #+end_src
 
 **** Constants and Utilities
