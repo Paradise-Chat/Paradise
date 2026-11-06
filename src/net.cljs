@@ -1,94 +1,111 @@
 (ns net
   (:require [promesa.core :as p]
-            [clojure.string :as str]
-            ))
+            [clojure.string :as str]))
 
-(defonce !auth-context (atom {:token nil :hs-url nil}))
-
-(defn set-auth-context! [token hs-url]
-  (reset! !auth-context {:token token :hs-url hs-url}))
-
-(defn- safe-auth-path? [request-url hs-url]
+(defn- same-host? [request-url base-url]
   (try
     (let [req-obj  (js/URL. request-url)
-          hs-obj   (js/URL. hs-url)
-          req-host (.-hostname req-obj)
-          hs-host  (.-hostname hs-obj)
-          path     (.-pathname req-obj)]
-      (and (or (= req-host hs-host)
-               (str/ends-with? req-host (str "." hs-host)))
-           (str/starts-with? path "/_matrix/")))
+          base-obj (js/URL. base-url)]
+      (= (.-hostname req-obj) (.-hostname base-obj)))
     (catch :default _ false)))
 
-(defn ensure-protocol [hs-url]
-  (if (or (str/starts-with? hs-url "http://")
-          (str/starts-with? hs-url "https://"))
-    hs-url
-    (str "https://" hs-url)))
+(defn ensure-protocol [url]
+  (when (and (string? url) (not (str/blank? url)))
+    (if (or (str/starts-with? url "http://")
+            (str/starts-with? url "https://"))
+      url
+      (str "https://" url))))
 
-(defn- wait-for-auth []
-  (p/create
-   (fn [resolve]
-     (let [{:keys [token hs-url]} @!auth-context]
-       (if (and token hs-url)
-         (resolve true)
-         (let [watch-key (keyword (gensym "auth-watch"))
-               timer     (js/setTimeout #(do
-                                           (remove-watch !auth-context watch-key)
-                                           (resolve false))
-                                        2000)]
-           (add-watch !auth-context watch-key
-                      (fn [_ _ _ new-state]
-                        (when (and (:token new-state) (:hs-url new-state))
-                          (js/clearTimeout timer)
-                          (remove-watch !auth-context watch-key)
-                          (resolve true))))))))))
+(defonce !auth-context (atom {:token nil :base-url nil :headers nil :auth-fn nil}))
+
+(defn set-auth-context!
+  ([context-map]
+   (if (nil? context-map)
+     (reset! !auth-context {:token nil :base-url nil :headers nil :auth-fn nil})
+     (let [base-url (when-let [u (:base-url context-map)]
+                      (str/replace (ensure-protocol u) #"/+$" ""))]
+       (reset! !auth-context (assoc context-map :base-url base-url)))))
+  ([token base-url]
+   (set-auth-context! {:token token :base-url base-url})))
+
+(defn await-auth
+  ([] (await-auth 3000))
+  ([timeout-ms]
+   (p/create
+    (fn [resolve]
+      (let [{:keys [token base-url headers auth-fn] :as ctx} @!auth-context]
+        (if (or (and token base-url) headers auth-fn)
+          (resolve ctx)
+          (let [watch-key (keyword (gensym "auth-watch"))
+                timer     (js/setTimeout
+                           (fn []
+                             (remove-watch !auth-context watch-key)
+                             (resolve @!auth-context))
+                           timeout-ms)]
+            (add-watch !auth-context watch-key
+                       (fn [_ _ _ new-state]
+                         (when (or (and (:token new-state) (:base-url new-state))
+                                   (:headers new-state)
+                                   (:auth-fn new-state))
+                           (js/clearTimeout timer)
+                           (remove-watch !auth-context watch-key)
+                           (resolve new-state)))))))))))
+
 
 (defn fetch
   ([url] (fetch url nil))
   ([raw-url options]
-   (p/let [opts         (cond
-                          (nil? options) #js {}
-                          (map? options) (reduce-kv (fn [acc k v]
-                                                      (aset acc (name k) v) acc)
-                                                    #js {} options)
-                          :else (js/Object.assign #js {} options))
-           headers      (or (.-headers opts) #js {})
-           has-token?   (if (map? headers)
-                          (or (get headers "Authorization") (get headers :Authorization))
-                          (some? (aget headers "Authorization")))
+   (p/let [opts           (cond
+                            (nil? options) #js {}
+                            (map? options) (reduce-kv (fn [acc k v]
+                                                        (aset acc (name k) v)
+                                                        acc)
+                                                      #js {} options)
+                            :else (js/Object.assign #js {} options))
+           headers        (or (.-headers opts) #js {})
+           has-auth-hdr?  (if (map? headers)
+                            (or (get headers "Authorization") (get headers :Authorization))
+                            (some? (aget headers "Authorization")))
+           explicit-auth? (boolean (.-auth opts))
+           _              (when (and explicit-auth? (not has-auth-hdr?))
+                            (await-auth))
+           {:keys [token base-url auth-fn] :as ctx} @!auth-context
+           final-url      (cond
+                            (or (str/starts-with? raw-url "http://")
+                                (str/starts-with? raw-url "https://"))
+                            raw-url
 
-           is-media?    (str/includes? raw-url "/_matrix/client/v1/media/")
-           needs-wait?  (and (not has-token?) (or (.-auth opts) is-media?))
+                            (and explicit-auth? base-url (str/starts-with? raw-url "/"))
+                            (str base-url raw-url)
 
-           _            (when needs-wait?
-                          (wait-for-auth))
-           {:keys [token hs-url]} @!auth-context
-           final-url    (cond
-                          (or (str/starts-with? raw-url "http://")
-                              (str/starts-with? raw-url "https://"))
-                          raw-url
-                          (or (str/starts-with? raw-url "/")
-                              (str/starts-with? raw-url "./")
-                              (str/starts-with? raw-url "../")
-                              (not (str/includes? raw-url "/")))
-                          raw-url
-                          :else
-                          (ensure-protocol raw-url))
-           is-absolute? (or (str/starts-with? final-url "http://")
-                            (str/starts-with? final-url "https://"))
-           safe-hs-url  (when hs-url (ensure-protocol hs-url))
-           method       (or (.-method opts) "GET")
-           headers      (or (.-headers opts) #js {})
-           safe-headers (js/Object.assign #js {} headers)
-           auth-path?   (if (and is-absolute? safe-hs-url)
-                          (safe-auth-path? final-url safe-hs-url)
-                          false)
-           wants-auth?  (or (.-auth opts)
-                            is-media?
-                            auth-path?)]
-     (when (and token wants-auth?)
-       (aset safe-headers "Authorization" (str "Bearer " token)))
+                            (or (str/starts-with? raw-url "/")
+                                (str/starts-with? raw-url "./")
+                                (str/starts-with? raw-url "../")
+                                (not (str/includes? raw-url "/")))
+                            raw-url
+
+                            :else
+                            (ensure-protocol raw-url))
+           is-absolute?   (or (str/starts-with? final-url "http://")
+                              (str/starts-with? final-url "https://"))
+           safe-headers   (js/Object.assign #js {} headers)
+           wants-auth?    (and (not has-auth-hdr?)
+                               (or explicit-auth?
+                                   (and is-absolute? base-url (same-host? final-url base-url))))
+           dyn-headers    (when (and wants-auth? auth-fn)
+                            (auth-fn final-url opts))]
+     (when wants-auth?
+       (cond
+         dyn-headers
+         (doseq [[k v] (if (map? dyn-headers) dyn-headers (js->clj dyn-headers))]
+           (aset safe-headers (name k) v))
+
+         (:headers ctx)
+         (doseq [[k v] (:headers ctx)]
+           (aset safe-headers (name k) v))
+
+         token
+         (aset safe-headers "Authorization" (str "Bearer " token))))
      (js-delete opts "auth")
      (aset opts "headers" safe-headers)
      (-> (js/fetch final-url opts)
