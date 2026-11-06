@@ -1,0 +1,409 @@
+
+** Plugins Interface
+
+This is the interface that handles plugin installations.
+
+
+**** Imports
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+(ns paradise.ui.overlays.settings.plugins
+  (:require
+   [clojure.string :as str]
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]))
+#+end_src
+
+**** Installer
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+(defn ^:ui plugins-installer []
+  (r/with-let [plugin-url-input (r/atom "")
+               theme-url-input  (r/atom "")]
+    (let [tr               @(re-frame/subscribe [:i18n/tr])
+          installed-urls   (set @(re-frame/subscribe [:plugins/installed-urls]))
+          active-plugins   @(re-frame/subscribe [:plugins/active-list])
+          active-ids       (set (map :id active-plugins))
+          registry-plugins @(re-frame/subscribe [:plugins/registry-plugins])
+          disabled-urls    @(re-frame/subscribe [:plugins/disabled-urls])
+          current-theme    @(re-frame/subscribe [:ui/current-theme])
+          custom-theme?    (and (string? current-theme)
+                                (str/starts-with? current-theme "http"))]
+      [:<>
+       [:div.settings-section
+        [:h3.settings-subheading
+         (tr [:settings.plugins/themes-title])]
+        [:div.settings-row
+         [:input.form-input.plugin-input
+          {:type "text"
+           :placeholder (tr [:settings.plugins/placeholder-theme-url])
+           :value @theme-url-input
+           :on-change #(reset! theme-url-input (.. % -target -value))}]
+         [:div.settings-actions
+          [:button.settings-button
+           {:disabled (empty? @theme-url-input)
+            :on-click #(do
+                         (re-frame/dispatch [:ui/switch-theme @theme-url-input])
+                         (reset! theme-url-input ""))}
+           (tr [:settings.plugins/apply])]]]
+
+        (when custom-theme?
+          [:div.settings-row
+           [:div.settings-row-text
+            [:div.settings-row-title
+             (tr [:settings.plugins/active-custom-theme])]
+            [:div.settings-row-description
+             current-theme]]
+           [:div.settings-actions
+            [:button.settings-button.destructive
+             {:on-click #(re-frame/dispatch [:ui/reset-theme])}
+             (tr [:settings.plugins/reset-default])]]])]
+
+       [:div.settings-section
+        [:h3.settings-subheading
+         (tr [:settings.plugins/plugins-title])]
+        [:div.settings-row
+         [:input.form-input.plugin-input
+          {:type "text"
+           :placeholder (tr [:settings.plugins/placeholder-plugin-url])
+           :value @plugin-url-input
+           :on-change #(reset! plugin-url-input (.. % -target -value))}]
+         [:div.settings-actions
+          [:button.settings-button
+           {:disabled (empty? @plugin-url-input)
+            :on-click #(do
+                         (re-frame/dispatch [:plugins/install-from-url @plugin-url-input])
+                         (reset! plugin-url-input ""))}
+           (tr [:settings.plugins/install])]]]
+
+        (when (seq active-plugins)
+          [:<>
+           [:h3.settings-subheading
+            (tr [:settings.plugins/active-plugins])]
+           (for [plugin active-plugins]
+             (let [url         (:source-url plugin)
+                   provided-by (:provided-by plugin)
+                   enabled?    (not (contains? disabled-urls url))]
+               ^{:key (:id plugin)}
+               [:div.settings-row.is-toggle
+                [:div.settings-row-text
+                 [:div.settings-row-title
+                  (:name plugin (tr [:settings.plugins/unknown-plugin]))
+                  (str " v" (:version plugin "1.0.0"))
+                  (when provided-by
+                    (str " (" (name provided-by) ")"))]
+                 [:div.settings-row-description
+                  (:description plugin (tr [:settings.plugins/no-description]))]]
+                [:div.settings-actions
+                 [:label.settings-toggle
+                  [:input
+                   {:type "checkbox"
+                    :checked enabled?
+                    :on-change #(re-frame/dispatch
+                                 [:plugins/toggle-plugin url (.. % -target -checked)])}]
+                  [:div.settings-toggle-track
+                   [:div.settings-toggle-knob]]]
+                 (when-not provided-by
+                   [:button.settings-button.destructive
+                    {:title (tr [:settings.plugins/uninstall-plugin])
+                     :on-click #(re-frame/dispatch [:plugins/uninstall-url url])}
+                    [icons/trash]])]]))])]
+
+       (when (seq registry-plugins)
+         [:div.settings-section
+          [:h3.settings-subheading
+           (tr [:settings.plugins/available-in-registry])]
+          (for [reg-plugin registry-plugins]
+            (let [m-url      (:manifest-url reg-plugin)
+                  installed? (or (contains? installed-urls m-url)
+                                 (contains? active-ids (:id reg-plugin)))]
+              ^{:key (:id reg-plugin)}
+              [:div.settings-row
+               [:div.settings-row-text
+                [:div.settings-row-title
+                 (:name reg-plugin (name (:id reg-plugin)))
+                 (str " v" (:version reg-plugin "1.0.0"))]
+                [:div.settings-row-description
+                 (:description reg-plugin "")]]
+               [:div.settings-actions
+                [:button.settings-button
+                 {:disabled installed?
+                  :on-click #(re-frame/dispatch [:plugins/install-from-url m-url])}
+                 (if installed?
+                   (tr [:settings.plugins/installed])
+                   (tr [:settings.plugins/install]))]]]))])])))
+
+#+end_src
+
+
+
+***** CSS
+
+
+
+#+begin_src css :tangle ../../../../../css/plugin.css
+.plugin-installer-panel {
+  border: 1px solid #36393f;
+  padding: 20px;
+  border-radius: 8px;
+  background: #2f3136;
+}
+
+.plugins-container-card {
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.05));
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.split-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.install-column {
+  flex: 1 1 240px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.list-column {
+  flex: 2 1 300px;
+  display: flex;
+  flex-direction: column;
+  padding-left: 24px;
+  border-left: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+}
+
+@media (max-width: 700px) {
+  .list-column {
+    padding-left: 0;
+    border-left: none;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+  }
+  .install-column {
+    max-width: 100%;
+  }
+}
+
+.theme-section {
+  margin-bottom: 32px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #404249;
+}
+
+.plugin-installer-panel h3 {
+  color: white;
+  margin-bottom: 12px;
+}
+
+.plugin-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.theme-section .plugin-input-row {
+  margin-bottom: 16px;
+}
+
+.plugin-input {
+  flex: 1;
+}
+
+.plugin-action-btn {
+  background: #5865F2;
+  min-width: 80px;
+}
+
+.active-theme-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #202225;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #5865F2;
+}
+
+.active-theme-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.active-theme-label {
+  color: #43b581;
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.active-theme-value {
+  color: #dcddde;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.reset-theme-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  margin: 0;
+}
+
+.active-plugins-header {
+  color: #b5bac1;
+  margin-bottom: 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.active-plugins-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.active-plugin-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #202225;
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
+.active-plugin-url {
+  color: #dcddde;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 80%;
+}
+
+.uninstall-plugin-btn {
+  background: transparent;
+  border: none;
+  color: #ed4245;
+  cursor: pointer;
+  padding: 4px;
+}
+
+#+end_src
+
+
+**** Security Model
+
+This is somewhat old, but the concept of an interface
+that reminds users that plugins may be from untrusted
+sources isn't a bad idea.
+We'll likely repurpose this at some point.
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/plugin.cljs
+(defn ^:ui security-warning-modal []
+  (let [pending-plugin @(re-frame/subscribe [:plugins/pending-security-approval])
+        tr             @(re-frame/subscribe [:i18n/tr])]
+    (when pending-plugin
+      [:div.security-modal-card
+       [:h2.security-modal-title
+        (tr [:settings.plugins/security-title])]
+       [:p.security-modal-text
+        (tr [:settings.plugins/plugin-request
+             [:strong (:name (:plugin-map pending-plugin))]])]
+
+       [:div.security-script-list
+        (for [script (:external-scripts (:plugin-map pending-plugin))]
+          ^{:key script} [:div script])]
+
+       [:p.security-modal-warning
+        (tr [:settings.plugins/warning-message])]
+       [:div.settings-actions
+        [:button.settings-button
+         {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
+         (tr [:settings.plugins/cancel])]
+        [:button.settings-button.destructive
+         {:on-click #(re-frame/dispatch [:plugins/execute-boot-sequence
+                                         (:url pending-plugin)
+                                         (:plugin-map pending-plugin)])}
+         (tr [:settings.plugins/warning-confirmation])]]])))
+#+end_src
+
+
+***** CSS
+
+
+
+#+begin_src css :tangle ../../../../../css/plugin.css
+
+
+  .security-modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+  }
+
+  .security-modal-card {
+      background: #2f3136;
+      padding: 24px;
+      border-radius: 8px;
+      max-width: 500px;
+      border: 1px solid #ed4245;
+  }
+
+  .security-modal-title {
+      color: #ed4245;
+      margin-top: 0;
+  }
+
+  .security-modal-text {
+      color: #dcddde;
+  }
+
+  .security-script-list {
+      background: #202225;
+      padding: 12px;
+      border-radius: 4px;
+      margin: 16px 0;
+      font-family: monospace;
+      color: #b5bac1;
+  }
+
+  .security-modal-warning {
+      color: #dcddde;
+      font-size: 14px;
+  }
+
+  .security-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      margin-top: 24px;
+  }
+
+  .security-confirm-btn {
+      background: #ed4245;
+      color: white;
+      border: none;
+}
+#+end_src
+
+
