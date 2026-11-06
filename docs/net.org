@@ -113,55 +113,63 @@ I can later revise the SW to use this mechanism instead to remove the duplicatio
 (defn fetch
   ([url] (fetch url nil))
   ([raw-url options]
-   (p/let [opts         (cond
-                          (nil? options) #js {}
-                          (map? options) (reduce-kv (fn [acc k v]
-                                                      (aset acc (name k) v) acc)
-                                                    #js {} options)
-                          :else (js/Object.assign #js {} options))
-           headers      (or (.-headers opts) #js {})
-           has-token?   (if (map? headers)
-                          (or (get headers "Authorization") (get headers :Authorization))
-                          (some? (aget headers "Authorization")))
+   (p/let [opts           (cond
+                            (nil? options) #js {}
+                            (map? options) (reduce-kv (fn [acc k v]
+                                                        (aset acc (name k) v)
+                                                        acc)
+                                                      #js {} options)
+                            :else (js/Object.assign #js {} options))
+           headers        (or (.-headers opts) #js {})
+           has-auth-hdr?  (if (map? headers)
+                            (or (get headers "Authorization") (get headers :Authorization))
+                            (some? (aget headers "Authorization")))
+           explicit-auth? (boolean (.-auth opts))
+           _              (when (and explicit-auth? (not has-auth-hdr?))
+                            (await-auth))
+           {:keys [token base-url auth-fn] :as ctx} @!auth-context
+           final-url      (cond
+                            (or (str/starts-with? raw-url "http://")
+                                (str/starts-with? raw-url "https://"))
+                            raw-url
 
-           is-media?    (str/includes? raw-url "/_matrix/client/v1/media/")
-           needs-wait?  (and (not has-token?) (or (.-auth opts) is-media?))
+                            (and explicit-auth? base-url (str/starts-with? raw-url "/"))
+                            (str base-url raw-url)
 
-           _            (when needs-wait?
-                          (wait-for-auth))
-           {:keys [token hs-url]} @!auth-context
-           final-url    (cond
-                          (or (str/starts-with? raw-url "http://")
-                              (str/starts-with? raw-url "https://"))
-                          raw-url
-                          (or (str/starts-with? raw-url "/")
-                              (str/starts-with? raw-url "./")
-                              (str/starts-with? raw-url "../")
-                              (not (str/includes? raw-url "/")))
-                          raw-url
-                          :else
-                          (ensure-protocol raw-url))
-           is-absolute? (or (str/starts-with? final-url "http://")
-                            (str/starts-with? final-url "https://"))
-           safe-hs-url  (when hs-url (ensure-protocol hs-url))
-           method       (or (.-method opts) "GET")
-           headers      (or (.-headers opts) #js {})
-           safe-headers (js/Object.assign #js {} headers)
-           auth-path?   (if (and is-absolute? safe-hs-url)
-                          (safe-auth-path? final-url safe-hs-url)
-                          false)
-           wants-auth?  (or (.-auth opts)
-                            is-media?
-                            auth-path?)]
-     (when (and token wants-auth?)
-       (aset safe-headers "Authorization" (str "Bearer " token)))
+                            (or (str/starts-with? raw-url "/")
+                                (str/starts-with? raw-url "./")
+                                (str/starts-with? raw-url "../")
+                                (not (str/includes? raw-url "/")))
+                            raw-url
+
+                            :else
+                            (ensure-protocol raw-url))
+           is-absolute?   (or (str/starts-with? final-url "http://")
+                              (str/starts-with? final-url "https://"))
+           safe-headers   (js/Object.assign #js {} headers)
+           wants-auth?    (and (not has-auth-hdr?)
+                               (or explicit-auth?
+                                   (and is-absolute? base-url (same-host? final-url base-url))))
+           dyn-headers    (when (and wants-auth? auth-fn)
+                            (auth-fn final-url opts))]
+     (when wants-auth?
+       (cond
+         dyn-headers
+         (doseq [[k v] (if (map? dyn-headers) dyn-headers (js->clj dyn-headers))]
+           (aset safe-headers (name k) v))
+
+         (:headers ctx)
+         (doseq [[k v] (:headers ctx)]
+           (aset safe-headers (name k) v))
+
+         token
+         (aset safe-headers "Authorization" (str "Bearer " token))))
      (js-delete opts "auth")
      (aset opts "headers" safe-headers)
      (-> (js/fetch final-url opts)
          (p/catch (fn [err]
                     (js/console.error "Fetch failed on URL:" final-url)
                     (throw err)))))))
-
 #+end_src
 
 
