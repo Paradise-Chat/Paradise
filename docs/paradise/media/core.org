@@ -7,11 +7,13 @@ This allows us to create a wrapper for Hiccup components that intend to use medi
 It will handle making them deferred as well as handle the MXC processing
 So elsewhere in the library the developer need not do anything extra to handle
 media.
-By doing this we also ensure that the code inside the client UI can try to stay
-as ignorant as possible to the concept of Matrix. Instead ideally we want to
-move it towards existing as a more pure UI and the Matrix implications are
-merely 'transposed' into it.
-Admittedly, we've not been doing a good job at this.
+This was some of the initial attempts to keep the core clean from the concept of
+Matrix. Instead ideally we want to move it towards existing as a more pure UI
+and the Matrix implications are merely 'transposed' into it.
+
+
+As of now, the core can be truly ignorant.
+
 
 **** Imports
 
