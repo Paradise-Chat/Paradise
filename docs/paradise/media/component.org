@@ -11,18 +11,11 @@ method more or less the same without consideration with how it might behave.
 
 #+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
 (ns paradise.media.component
-  (:require [reagent.core :as r]
-            ["react" :as react]
-            [re-frame.db :as db]
+  (:require ["react" :as react]
+            [re-frame.core :as re-frame]
             [cljs.core.async :refer [go <!]]
-            [paradise.shared.client.state :as state]
-            [cljs-workers.core :as main]
             [cljs-workers.mesh :as mesh]
-            [taoensso.timbre :as log]
-            [goog.object]
-            [clojure.string :as str]
-            [promesa.core :as p]
-            [net :refer [!auth-context] :as net]))
+            [clojure.string :as str]))
 #+end_src
 
 
