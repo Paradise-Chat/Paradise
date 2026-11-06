@@ -21,6 +21,26 @@ namespace exist at the top-level.
 **** Auth Context
 
 
+Similar to how we do in the service worker, we want to be certain we never send
+any auth related details to an endpoint that doesn't need it.
+
+#+begin_src clojurescript :tangle ../src/net.cljs
+(defn- same-host? [request-url base-url]
+  (try
+    (let [req-obj  (js/URL. request-url)
+          base-obj (js/URL. base-url)]
+      (= (.-hostname req-obj) (.-hostname base-obj)))
+    (catch :default _ false)))
+
+(defn ensure-protocol [url]
+  (when (and (string? url) (not (str/blank? url)))
+    (if (or (str/starts-with? url "http://")
+            (str/starts-with? url "https://"))
+      url
+      (str "https://" url))))
+#+end_src
+
+
 This is a mechanism we can use to set in both the web worker thread and the
 main thread. It isn't entirely optimal, but it does ensure
 that we can easily update the fetches to use the correct client.
