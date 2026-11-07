@@ -268,11 +268,11 @@ environment."}
              :no-description "No description provided"
              :uninstall-plugin "Uninstall Plugin"}
    :registry {:section-title "Registries & Engines"
-                :custom-registries "Custom Registries"
-                :placeholder-registry-url "https://example.com/registry.edn"
-                :add-registry "Add Registry"
-                :remove-registry "Remove Registry"
-                :resolved-engines "Resolved Protocol Engines"}
+              :custom-registries "Custom Registries"
+              :placeholder-registry-url "https://example.com/registry.edn"
+              :add-registry "Add Registry"
+              :remove-registry "Remove Registry"
+              :resolved-engines "Resolved Protocol Engines"}
    :voice-video
    {:title "Voice & Video"
     :description "Choose the devices Paradise uses for calls and test them before joining."
