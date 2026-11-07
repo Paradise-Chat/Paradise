@@ -1,6 +1,7 @@
 (ns paradise.shared.sci-runner.factory
   (:require [sci.core :as sci]
             [clojure.walk :as walk]
+            [clojure.string :as str]
             [paradise.shared.sci-runner.shared :as sci-shared]
             [sci.configs.reagent.reagent :as sci-reagent]
             [sci.configs.re-frame.re-frame :as sci-re-frame]))
@@ -10,14 +11,18 @@
         walked-body
         (walk/postwalk
          (fn [node]
-           (if (and (seq? node) (or (= 'fn (first node)) (= 'fn* (first node))))
+           (if (and (seq? node)
+                    (or (= 'fn (first node)) (= 'fn* (first node)))
+                    (not (:once (meta node)))
+                    (not (:once (meta (first node))))
+                    (not (and (symbol? (second node))
+                              (str/starts-with? (name (second node)) "state-machine"))))
              (let [fn-hash (keyword "fn" (str (hash (pr-str node))))]
                (swap! extracted-fns assoc fn-hash node)
                fn-hash)
              node))
          body)]
     [@extracted-fns walked-body]))
-
 
 (defn create-defoverride-macro [env-type !overrides-atom !plugin-id-atom virtualizer-walk-ast-fn]
   (sci/new-macro-var
@@ -42,7 +47,6 @@
           (defn ~comp-name ~@(when docstring [docstring]) ~args ~@final-body)
           (swap! ~!overrides-atom assoc ~fqn
                  {:plugin-id ~plugin-id :fn ~comp-name}))))))
-
 
 (defn build-context [env-type thread-state extra-namespaces]
   (let [{:keys [!overrides !components !slots !current-plugin !virtualizer-pool virtualizer-walk-ast-fn re-frame-mock]} thread-state
