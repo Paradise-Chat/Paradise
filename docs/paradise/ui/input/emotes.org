@@ -139,11 +139,11 @@ another space (unless the user has made them set as global).
 (re-frame/reg-sub
  :emoji/active-set
  (fn [db _]
-   (let [active-space (:active-space-id db)
-         active-room (:active-room-id db)
+   (let [active-space  (:active-space-id db)
+         active-room   (:active-room-id db)
          account-packs (get-in db [:emoji/packs :account] {})
-         space-packs (when active-space (get-in db [:emoji/packs :space active-space] {}))
-         room-packs (when active-room (get-in db [:emoji/packs :room active-room] {}))]
+         space-packs   (when active-space (get-in db [:emoji/packs :space active-space] {}))
+         room-packs    (when active-room (get-in db [:emoji/packs :room active-room] {}))]
      (merge account-packs space-packs room-packs))))
 
 #+end_src
