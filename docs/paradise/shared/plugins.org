@@ -139,13 +139,13 @@ on the fly.
 
 
 
-
-
-**** Examples
+**** Original slot example
 
 
 Something important to note, but as we provide CSS for a more pleasant
 base theme-ing experience. This overwrites the components class.
+This was one of the first plugin tests written for Paradise to test out
+component slots
 
 #+begin_src clojurescript
 
