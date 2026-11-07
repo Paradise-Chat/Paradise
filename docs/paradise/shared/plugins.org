@@ -187,6 +187,8 @@ component slots
 #+end_src
 
 
+***** Injects
+
 #+begin_src clojurescript :tangle ../../../src/paradise/shared/plugin_storage.cljs
 (defn inject-css! [id url]
   (when-not (.getElementById js/document id)
