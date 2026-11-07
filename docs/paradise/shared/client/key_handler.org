@@ -205,6 +205,63 @@ Interactions with storage and the IPC
     (sync-global-shortcuts! (get-in @db/app-db [:settings :keybinds] {}))))
 #+end_src
 
+
+
+***** Reframe
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
+(re-frame/reg-fx
+ :keybinds/sync-electron
+ (fn [overrides]
+   (save-stored-overrides! overrides)
+   (sync-global-shortcuts! overrides)))
+
+(re-frame/reg-event-fx
+ :settings/init-keybinds
+ (fn [{:keys [db]} _]
+   (let [stored (or (load-stored-overrides)
+                    (get-in db [:settings :keybinds])
+                    {})]
+     {:db                     (assoc-in db [:settings :keybinds] stored)
+      :keybinds/sync-electron stored})))
+
+(re-frame/reg-event-fx
+ :settings/set-keybind
+ (fn [{:keys [db]} [_ action-id {:keys [accelerator global?]}]]
+   (let [id      (normalize-id action-id)
+         base    (get (all-keybind-specs) id)
+         current (effective-keybind base (get-in db [:settings :keybinds] {}))
+         updated {"accelerator" (if (some? accelerator) accelerator (:accelerator current))
+                  "global?"     (if (some? global?) (boolean global?) (boolean (:global? current)))}
+         next-kb (assoc (get-in db [:settings :keybinds] {}) id updated)]
+     {:db                     (assoc-in db [:settings :keybinds] next-kb)
+      :keybinds/sync-electron next-kb})))
+
+(re-frame/reg-event-fx
+ :settings/reset-keybind
+ (fn [{:keys [db]} [_ action-id]]
+   (let [next-kb (dissoc (get-in db [:settings :keybinds] {}) (normalize-id action-id))]
+     {:db                     (assoc-in db [:settings :keybinds] next-kb)
+      :keybinds/sync-electron next-kb})))
+
+(re-frame/reg-event-fx
+ :settings/reset-all-keybinds
+ (fn [{:keys [db]} _]
+   {:db                     (assoc-in db [:settings :keybinds] {})
+    :keybinds/sync-electron {}}))
+
+(re-frame/reg-sub
+ :settings/keybind-overrides
+ (fn [db _]
+   (get-in db [:settings :keybinds] {})))
+
+(re-frame/reg-sub
+ :settings/resolved-keybinds
+ :<- [:settings/keybind-overrides]
+ (fn [overrides _]
+   (->> (vals (all-keybind-specs))
+        (sort-by :id)
+        (mapv #(effective-keybind % overrides)))))
     (finally
       (.removeEventListener js/window "keydown" handler))))
 #+end_src
