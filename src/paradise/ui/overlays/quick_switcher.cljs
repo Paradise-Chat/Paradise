@@ -1,14 +1,12 @@
 (ns paradise.ui.overlays.quick-switcher
-(:require
- [paradise.shared.utils.svg :as icons]
- [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
- [paradise.media.component :refer [media]]
- [paradise.shared.utils.macros :refer [defui]]
- [re-frame.core :as re-frame]
- [reagent.core :as r]
- [clojure.string :as str]
- [taoensso.timbre :as log]
- [paradise.ui.overlays.base :refer [modal-component popover-component]]))
+  (:require
+   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [clojure.string :as str]
+   [taoensso.timbre :as log]
+   [paradise.shared.client.key-handler :refer [keybind-spec]]
+   [paradise.ui.overlays.base :refer [modal-component popover-component]]))
 
 (re-frame/reg-event-db
  :quick-switcher/toggle
@@ -34,7 +32,7 @@
                           [[:space/select space-id]
                            [:rooms/select room-id]])})))
 
-(defui quick-switcher-content []
+(defn ^:ui quick-switcher-content []
   (let [tr        @(re-frame/subscribe [:i18n/tr])
         rooms-map @(re-frame/subscribe [:rooms/unfiltered-indexed-map])
         rooms     (vals rooms-map)
@@ -103,3 +101,15 @@
 
 (defmethod modal-component :quick-switcher [_]
   quick-switcher-content)
+
+
+(defmethod keybind-spec :ui/quick-switcher [_]
+  {:id              "ui/quick-switcher"
+   :label-key       :settings.keybinds/action-quick-switcher
+   :accelerator     "CommandOrControl+K"
+   :global?         false
+   :allow-in-input? true
+   :dispatch        [:ui/open-modal :quick-switcher
+                     {:backdrop-props {:class "lightbox-backdrop"}
+                      :window-props   {:style {:background "transparent"
+                                               :box-shadow "none"}}}]})
