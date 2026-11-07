@@ -12,21 +12,21 @@ just keep this to defining the look and feel itself.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (ns paradise.ui.input.composer
-    (:require
-     [clojure.string :as str]
-     [paradise.media.component :refer [mxc->url url->mxc media]]
-     [paradise.shared.utils.macros :refer [defui]]
-     [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
-     ["react" :as react]
-     [taoensso.timbre :as log]
-     [reagent.core :as r]
-     ["@tiptap/react" :refer [useEditor EditorContent ReactNodeViewRenderer NodeViewWrapper]]
-     ["@tiptap/starter-kit" :default StarterKit]
-     ["@tiptap/extension-placeholder" :default Placeholder]
-     ["@tiptap/extension-mention" :default Mention]
-     ["@tiptap/extension-link" :default Link]
-     ["@tiptap/core" :refer [Extension Node mergeAttributes]]
-      ["prosemirror-state" :refer [Plugin PluginKey]]))
+  (:require
+   [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [clean-shortcode format-shortcode]]
+   [paradise.media.component :refer [media]]
+   [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
+   ["react" :as react]
+   [taoensso.timbre :as log]
+   [reagent.core :as r]
+   ["@tiptap/react" :refer [useEditor EditorContent ReactNodeViewRenderer NodeViewWrapper]]
+   ["@tiptap/starter-kit" :default StarterKit]
+   ["@tiptap/extension-placeholder" :default Placeholder]
+   ["@tiptap/extension-mention" :default Mention]
+   ["@tiptap/extension-link" :default Link]
+   ["@tiptap/core" :refer [Extension Node mergeAttributes]]
+   ["prosemirror-state" :refer [Plugin PluginKey]]))
 #+end_src
 
 
