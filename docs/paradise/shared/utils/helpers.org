@@ -88,6 +88,7 @@ throw an error.
   (and (string? s)
        (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
 
+(defn- parse-style-str [style-str]
   (if (string? style-str)
     (->> (str/split style-str #";")
          (remove str/blank?)
@@ -98,12 +99,12 @@ throw an error.
     style-str))
 
 (defn- transform-font-span [attrs]
-  (let [bg (get attrs :data-mx-bg-color)
-        fg (get attrs :data-mx-color)
+  (let [bg             (or (get attrs :data-bg-color) (get attrs :data-mx-bg-color))
+        fg             (or (get attrs :data-color) (get attrs :data-mx-color))
         existing-style (parse-style-str (get attrs :style))
-        style-map (cond-> (or existing-style {})
-                    bg (assoc :background-color bg)
-                    fg (assoc :color fg))]
+        style-map      (cond-> (or existing-style {})
+                         bg (assoc :background-color bg)
+                         fg (assoc :color fg))]
     (if (seq style-map)
       (assoc attrs :style style-map)
       attrs)))
