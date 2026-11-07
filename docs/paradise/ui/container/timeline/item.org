@@ -887,7 +887,7 @@ library itself some context of deferred components...
             member-data      (get members-map sender-id)
             popover-member   {:user-id sender-id
                               :display-name (or (:display-name member-data) sender-name)
-                              :avatar-url (or (:avatar-url member-data) (mxc->url sender-avatar {:homeserver hs-url :type :thumbnail :width 48 :height 48}))
+                              :avatar-url (or (:avatar-url member-data) sender-avatar)
                               :power-level (or (:power-level member-data) 0)}]
         (if (= type :virtual)
           [virtual-item item]
@@ -898,8 +898,7 @@ library itself some context of deferred components...
               :on-action (fn [action]
                            (re-frame/dispatch [:input/set-context active-room action item]))
               :wrapper-props (merge (long-press-props
-                                     #(event-menu %1 %2 item active-room my-id)
-                                     )
+                                     #(event-menu %1 %2 item active-room my-id))
                                     {:class (str "timeline-message is-message"
                                                  (when merge-with-prev? " is-merged"))})}
 
@@ -909,7 +908,7 @@ library itself some context of deferred components...
               (when-not merge-with-prev?
                 [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
               [timeline-body item content active-room is-editing-this?]
-             (when (seq reactions)
+              (when (seq reactions)
                 [reaction-row {:reactions reactions
                                :my-id my-id
                                :members-map members-map
