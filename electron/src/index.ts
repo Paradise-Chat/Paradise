@@ -27,6 +27,37 @@ import {
     setupReloadWatcher,
 } from "./setup";
 
+if (process.platform === "linux") {
+    try {
+        const desktopId = "com.gigiaj.paradise.desktop";
+        const appsDir = join(homedir(), ".local", "share", "applications");
+        const desktopFile = join(appsDir, desktopId);
+        mkdirSync(appsDir, { recursive: true });
+        writeFileSync(
+            desktopFile,
+            [
+                "[Desktop Entry]",
+                "Type=Application",
+                "Name=Paradise",
+                "Comment=Paradise Voice and Chat",
+                `Exec=${process.execPath} %U`,
+                "Icon=paradise",
+                "Terminal=false",
+                "Categories=Network;InstantMessaging;",
+                "StartupWMClass=Paradise",
+                "",
+            ].join("\n"),
+            "utf8"
+        );
+        process.env.CHROME_DESKTOP = desktopId;
+        if (typeof (app as any).setDesktopName === "function") {
+            (app as any).setDesktopName(desktopId);
+        }
+    } catch {}
+}
+
+app.setName("Paradise");
+
 app.commandLine.appendSwitch("ozone-platform-hint", "auto");
 app.commandLine.appendSwitch(
     "enable-features",
