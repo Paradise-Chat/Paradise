@@ -65,16 +65,11 @@ app.commandLine.appendSwitch(
 );
 unhandled();
 
-// Define our menu templates (these are optional)
-const trayMenuTemplate: (MenuItemConstructorOptions | MenuItem)[] = [
-    new MenuItem({ label: "Quit App", role: "quit" }),
-];
 const appMenuBarMenuTemplate: (MenuItemConstructorOptions | MenuItem)[] = [
     { role: process.platform === "darwin" ? "appMenu" : "fileMenu" },
     { role: "viewMenu" },
 ];
 
-// Get Config options from capacitor.config
 const capacitorFileConfig: CapacitorElectronConfig =
     getCapacitorElectronConfig();
 
@@ -84,7 +79,32 @@ const myCapacitorApp = new ElectronCapacitorApp(
     appMenuBarMenuTemplate
 );
 
-// If deeplinking is enabled then we will set it up here.
+
+const gotTheLock = app.requestSingleInstanceLock();
+    if (!gotTheLock) {
+        app.quit();
+        process.exit(0);
+    }
+
+app.on("second-instance", (_event, commandLine) => {
+    const win = myCapacitorApp.getMainWindow();
+    const actionArg = commandLine.find((arg) => arg.startsWith("--action="));
+    if (actionArg) {
+        const actionId = actionArg.slice("--action=".length).trim();
+        if (actionId && win && !win.isDestroyed()) {
+            console.log(`[Shortcuts] Triggered via CLI flag: ${actionId}`);
+            win.webContents.send("paradise:shortcut-triggered", actionId);
+        }
+        return;
+    }
+    if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+    }
+});
+
+
 if (capacitorFileConfig.electron?.deepLinkingEnabled) {
     setupElectronDeepLinking(myCapacitorApp, {
         customProtocol:
