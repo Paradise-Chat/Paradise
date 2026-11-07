@@ -13,7 +13,7 @@ finish-args:
   - --device=dri
   - --filesystem=xdg-documents:ro
 modules:
-  - name: paradise
+  - name: org.gigiaj.paradise
     buildsystem: simple
     sources:
       - type: dir
