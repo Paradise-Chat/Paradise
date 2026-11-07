@@ -4,8 +4,6 @@
    [clojure.string :as str]
    [promesa.core :as p]
    [hickory.core :as h]
-   [hickory.render :as hr]
-   [clojure.walk :as walk]
    [taoensso.timbre :as log]))
 
 (def max-tag-nesting 100)
@@ -370,4 +368,3 @@
       2 (tr [(keyword base-path "two")] [(truncate-name (first names) 16) (truncate-name (second names) 16)])
       3 (tr [(keyword base-path "three")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (truncate-name (nth names 2) 16)])
       (tr [(keyword base-path "many")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (- cnt 2)]))))
-
