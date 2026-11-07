@@ -113,46 +113,78 @@ if (capacitorFileConfig.electron?.deepLinkingEnabled) {
     });
 }
 
-// If we are in Dev mode, use the file watcher components.
 if (electronIsDev) {
     setupReloadWatcher(myCapacitorApp);
 }
 
-(async () => {
-    await app.whenReady();
-    session.defaultSession.setDisplayMediaRequestHandler(
-        (request, callback) => {
-            desktopCapturer
-                .getSources({ types: ["screen", "window"] })
-                .then((sources) => {
-                    if (process.platform === "linux" && sources.length === 1) {
-                        callback({ video: sources[0], audio: "loopback" });
-                        return;
+let customTray: Tray | null = null;
+let currentTrayItems: DynamicTrayItem[] = [];
+let isQuitting = false;
+
+function rebuildCustomTrayMenu(
+    customItems: DynamicTrayItem[] = currentTrayItems
+): void {
+    currentTrayItems = customItems;
+    if (!customTray) return;
+
+    const win = myCapacitorApp.getMainWindow();
+    const isVisible = win && !win.isDestroyed() ? win.isVisible() : false;
+
+    const dynamicTemplate: MenuItemConstructorOptions[] = customItems.map(
+        (item) => {
+            if (item.type === "separator") {
+                return { type: "separator" };
+            }
+            return {
+                label: item.label || "",
+                type: item.type || "normal",
+                checked: item.checked,
+                enabled: item.enabled ?? true,
+                click: () => {
+                    const activeWin = myCapacitorApp.getMainWindow();
+                    if (item.id && activeWin && !activeWin.isDestroyed()) {
+                        activeWin.webContents.send(
+                            "paradise:tray-action",
+                            item.id
+                        );
                     }
-
-                    const template = sources.map((source) => ({
-                        label: source.name,
-                        click: () => {
-                            callback({ video: source, audio: "loopback" });
-                        },
-                    }));
-
-                    template.push({ type: "separator" } as any);
-                    template.push({
-                        label: "Cancel",
-                        click: () => callback(null),
-                    });
-
-                    const menu = Menu.buildFromTemplate(template);
-                    menu.popup();
-                })
-                .catch((err) => {
-                    console.error("Failed to fetch capture sources:", err);
-                    callback(null);
-                });
-        },
-        { useSystemPicker: true }
+                },
+            };
+        }
     );
+
+    const baseTemplate: MenuItemConstructorOptions[] = [
+        {
+            label: isVisible ? "Hide Paradise" : "Open Paradise",
+            click: () => {
+                const activeWin = myCapacitorApp.getMainWindow();
+                if (!activeWin || activeWin.isDestroyed()) return;
+                if (activeWin.isVisible()) {
+                    activeWin.hide();
+                } else {
+                    activeWin.show();
+                    activeWin.focus();
+                }
+                rebuildCustomTrayMenu();
+            },
+        },
+        { type: "separator" },
+        {
+            label: "Quit",
+            click: () => {
+                isQuitting = true;
+                app.quit();
+            },
+        },
+    ];
+
+    const fullTemplate: MenuItemConstructorOptions[] =
+        dynamicTemplate.length > 0
+            ? [...dynamicTemplate, { type: "separator" }, ...baseTemplate]
+            : baseTemplate;
+
+    customTray.setContextMenu(Menu.buildFromTemplate(fullTemplate));
+}
 
     setupContentSecurityPolicy(myCapacitorApp.getCustomURLScheme());
     await myCapacitorApp.init();
