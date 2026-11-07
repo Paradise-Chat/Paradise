@@ -42,31 +42,36 @@ throw an error.
     :li :b :i :u :strong :em :strike :s :code :hr :br :div :table :thead
     :tbody :tr :th :td :caption :pre :span :img :details :summary})
 
-(def url-schemes #{"https" "http" "ftp" "mailto" "magnet"})
+(def url-schemes #{"https" "http" "ftp" "mailto" "magnet" "mention"})
 
 (def permitted-attrs
-  {:font #{:style :data-mx-bg-color :data-mx-color :color}
-   :span #{:style :data-mx-bg-color :data-mx-color :data-mx-spoiler :data-mx-maths :data-mx-pill :data-mx-ping :data-md}
-   :div  #{:data-mx-maths}
+  {:font       #{:style :color :data-bg-color :data-color :data-mx-bg-color :data-mx-color}
+   :span       #{:style :data-bg-color :data-color :data-spoiler :data-maths :data-pill :data-ping
+                 :data-mention-id :data-md :data-mx-bg-color :data-mx-color :data-mx-spoiler
+                 :data-mx-maths :data-mx-pill :data-mx-ping}
+   :div        #{:data-maths :data-mx-maths}
    :blockquote #{:data-md}
-   :h1 #{:data-md} :h2 #{:data-md} :h3 #{:data-md} :h4 #{:data-md} :h5 #{:data-md} :h6 #{:data-md}
-   :pre  #{:data-md :class}
-   :ol   #{:start :type :data-md}
-   :ul   #{:data-md}
-   :a    #{:name :target :href :rel :data-md}
-   :img  #{:width :height :alt :title :src :data-mx-emoticon :class :className}
+   :h1         #{:data-md}
+   :h2         #{:data-md}
+   :h3         #{:data-md}
+   :h4         #{:data-md}
+   :h5         #{:data-md}
+   :h6         #{:data-md}
+   :pre        #{:data-md :class}
+   :ol         #{:start :type :data-md}
+   :ul         #{:data-md}
+   :a          #{:name :target :href :rel :data-md :data-mention-id :data-user-id :data-mx-user :class}
+   :img        #{:width :height :alt :title :src :shortcode :data-emote :data-emote-id
+                 :data-emote-uri :data-mx-emoticon :class :className}
+   :code       #{:class :data-md}
+   :strong     #{:data-md}
+   :i          #{:data-md}
+   :em         #{:data-md}
+   :u          #{:data-md}
+   :s          #{:data-md}
+   :del        #{:data-md}})
 
-   :code #{:class :data-md}
-   :strong #{:data-md} :i #{:data-md} :em #{:data-md} :u #{:data-md} :s #{:data-md} :del #{:data-md}
-   })
-
-
-(def non-text-tags #{:style :script :textarea :option :noscript :mx-reply})
-
-
-(defn- parse-style-str
-  "Converts 'color: red; margin-top: 10px' into {:color 'red' :margin-top '10px'}"
-  [style-str]
+(def non-text-tags #{:style :script :textarea :option :noscript :reply-quote :mx-reply})
   (if (string? style-str)
     (->> (str/split style-str #";")
          (remove str/blank?)
