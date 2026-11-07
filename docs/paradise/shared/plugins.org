@@ -212,6 +212,17 @@ component slots
   (when-let [link (.getElementById js/document id)]
     (.remove link)))
 
+(defn refresh-registry-state! [custom-urls]
+  (go
+    (reset! reg/!user-registries custom-urls)
+    (<! (reg/ensure-environment!))
+    (rf/dispatch [:plugins/sync-registry-state
+                  (reg/resolve-engines)
+                  (reg/resolve-plugins)])))
+#+end_src
+
+
+
 (rf/reg-event-fx
  :plugins/hydrate-urls
  (fn [{:keys [db]} [_ urls]]
