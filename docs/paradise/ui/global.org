@@ -587,40 +587,58 @@ provide an avatar color.
 (defn kname [arg]
   (name arg))
 
-(defn avatar [initial-props]
-  (r/with-let [!broken?  (r/atom false)
-               !last-url (r/atom (:url initial-props))]
-    (fn [{:keys [id name url size status shape] :as props :or {size 32 shape :circle}}]
-      (when (not= url @!last-url)
-        (reset! !last-url url)
-        (reset! !broken? false))
+(defonce !broken-urls (r/atom #{}))
 
-      (let [show-image? (and url (not @!broken?))
-            len         (count name)
-            target      (if (#{:space :squircle :square} shape) 2 1)
-            initials    (if (> len 0) (subs name 0 (min len target)) "?")
-            bg-color    (if (= shape :none) "transparent" (get-avatar-color id name))
-            is-mxc?     (and url (str/starts-with? url "mxc://"))
-            dom-props   (dissoc props :id :name :url :size :status :shape)]
-        (into [:div.avatar-wrapper
-               (merge dom-props
-                      {:class (kname shape)
-                       :style (merge (:style dom-props) {:width size :height size})})]
-              [(when-not show-image?
-                 [:div.avatar-placeholder-layer
-                  {:style {:background-color bg-color}}
-                  (when-not (= shape :none)
-                    [:span.avatar-text
-                     {:style {:font-size (str (/ size (if (= shape :circle) 2.2 2.5)) "px")}}
-                     initials])])
+(defn get-avatar-color
+  ([id]
+   (if-not id
+     (first avatar-colors)
+     (let [hash (reduce #(+ %1 (.charCodeAt %2 0)) 0 (str id))]
+       (nth avatar-colors (mod hash (count avatar-colors))))))
+  ([id fallback]
+   (get-avatar-color (or id fallback))))
 
-               (when show-image?
-                 (if is-mxc?
-                   [media {:mxc url :class "avatar-img-layer" :alt "" :on-error #(reset! !broken? true)}]
-                   [:img.avatar-img-layer {:src url :alt "" :on-error #(reset! !broken? true)}]))
+(defn avatar [{:keys [id name url size status shape] :as props :or {size 32 shape :circle}}]
+  (let [url-str     (when url (str url))
+        broken?     (and url-str (contains? @!broken-urls url-str))
+        show-image? (and url-str (not (str/blank? url-str)) (not broken?))
+        len         (count name)
+        target      (if (#{:space :squircle :square} shape) 2 1)
+        initials    (if (pos? len) (subs name 0 (min len target)) "?")
+        bg-color    (if (= shape :none) "transparent" (get-avatar-color id name))
+        local-url?  (and url-str (or (str/starts-with? url-str "blob:")
+                                     (str/starts-with? url-str "data:")))
+        thumb-size  (if (<= size 48) 96 256)
+        dom-props   (dissoc props :id :name :url :size :status :shape)]
+    (into [:div.avatar-wrapper
+           (merge dom-props
+                  {:class (kname shape)
+                   :style (merge (:style dom-props) {:width size :height size})})]
+          [(when-not show-image?
+             [:div.avatar-placeholder-layer
+              {:style {:background-color bg-color}}
+              (when-not (= shape :none)
+                [:span.avatar-text
+                 {:style {:font-size (str (/ size (if (= shape :circle) 2.2 2.5)) "px")}}
+                 initials])])
 
-               (when status
-                 [:div.avatar-status {:class (kname status)}])])))))
+           (when show-image?
+             (if local-url?
+               [:img.avatar-img-layer
+                {:src      url-str
+                 :alt      ""
+                 :on-error #(swap! !broken-urls conj url-str)}]
+               [media
+                {:uri      url-str
+                 :width    thumb-size
+                 :height   thumb-size
+                 :method   "crop"
+                 :class    "avatar-img-layer"
+                 :alt      ""
+                 :on-error #(swap! !broken-urls conj url-str)}]))
+
+           (when status
+             [:div.avatar-status {:class (kname status)}])])))
 #+end_src
 
 
