@@ -90,7 +90,9 @@ instances.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/sci_runner/shared.cljs
 (def async-namespaces
-  {'cljs.core.async (expose-ns cljs.core.async)
+  {'clojure.core    {'instance? safe-instance?}
+   'cljs.core       {'instance? safe-instance?}
+   'cljs.core.async (expose-ns cljs.core.async)
    'cljs.core.async.interop
    {'p->c cljs.core.async.interop/p->c
     '<p!  (sci/new-macro-var '<p!
@@ -98,14 +100,17 @@ instances.
                                (list 'cljs.core.async/<! (list 'cljs.core.async.interop/p->c p))))}
    'cljs.core.async.impl.dispatch   {'run dispatch/run}
    'cljs.core.async.impl.ioc-helpers (merge
-                                      (expose-ns cljs.core.async.impl.ioc-helpers)
-                                      {'aset-all! (sci/new-macro-var 'aset-all!
-                                                    (fn [_ _ obj & key-vals]
-                                                      (let [sym (gensym "state_arr")]
-                                                        (concat (list 'let (vector sym obj))
-                                                                (map (fn [[k v]] (list 'aset sym k v))
-                                                                     (partition 2 key-vals))
-                                                                (list sym)))))})})
+                                       (expose-ns cljs.core.async.impl.ioc-helpers)
+                                       {'return-chan               jvm-return-chan
+                                        'process-exception         jvm-process-exception
+                                        'run-state-machine-wrapped jvm-run-state-machine-wrapped
+                                        'aset-all!                 (sci/new-macro-var 'aset-all!
+                                                                     (fn [_ _ obj & key-vals]
+                                                                       (let [sym (gensym "state_arr")]
+                                                                         (concat (list 'let (vector sym obj))
+                                                                                 (map (fn [[k v]] (list 'aset sym k v))
+                                                                                      (partition 2 key-vals))
+                                                                                 (list sym)))))})})
 
 (def common-namespaces
   (merge async-namespaces
