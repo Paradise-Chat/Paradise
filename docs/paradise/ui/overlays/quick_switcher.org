@@ -156,5 +156,22 @@ switching.
 #+end_src
 
 
+**** Keybind
 
+One of the first keybinds created, it made me think we should probably
+keep our key handler ignorant to all the mundane details and instead
+make a multi-method for it as well
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/quick_switcher.cljs
+(defmethod keybind-spec :ui/quick-switcher [_]
+  {:id              "ui/quick-switcher"
+   :label-key       :settings.keybinds/action-quick-switcher
+   :accelerator     "CommandOrControl+K"
+   :global?         false
+   :allow-in-input? true
+   :dispatch        [:ui/open-modal :quick-switcher
+                     {:backdrop-props {:class "lightbox-backdrop"}
+                      :window-props   {:style {:background "transparent"
+                                               :box-shadow "none"}}}]})
+#+end_src
 
