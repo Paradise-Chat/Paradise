@@ -10,7 +10,7 @@
             [cljs.core.async :refer [go <!]]
             [paradise.shared.utils.helpers :refer [sanitize-custom-html hiccup->text format-divider-date format-time linkify-text truncate-name]]
             [paradise.media.component :refer [media]]
-            [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper request-batched-redraw!]]
+            [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.ui.container.members :refer [profile-popover-trigger]]
             [paradise.ui.container.timeline.hydrator :refer [get-cached-react-tree]]
             [paradise.ui.input.base :refer [inline-editor]]
@@ -277,7 +277,7 @@
       {:style {:position "absolute" :inset 0 :display "flex" :align-items "center" :justify-content "center"}}
       [:div.spinner]]
      [media
-      {:mxc (:source content)
+      {:uri (:source content)
        :source-map (:source-map content)
        :tag-type tag-type
        :alt alt-text
@@ -326,11 +326,20 @@
     :tag-type "img"}])
 
 (defn ^:ui file-message [event content tr]
-  (let [hs-url @(re-frame/subscribe [:sdk/homeserver-url])
-        {:keys [caption source info]} content]
+  (let [{:keys [caption source source-map info]} content]
     [:div.file-attachment-container
      [:div.file-attachment
-      [:a {:href (mxc->url source {:homeserver hs-url :type :download}) :target "_blank" :className "file-link"}
+      [:a {:href      "#"
+           :className "file-link"
+           :on-click  (fn [e]
+                        (.preventDefault e)
+                        (re-frame/dispatch
+                         [:media/download {:uri        source
+                                           :source-map source-map
+                                           :filename   caption
+                                           :mime-type  (:mimetype info)
+                                           :room-id    (:room_id event)
+                                           :event-id   (:id event)}]))}
        [:span.file-icon [icons/file]]
        [:span.file-name (or caption (tr [:container.timeline.status/file-download]))]
        (when-let [size (:size info)]
@@ -350,24 +359,18 @@
  (fn [{:keys [db]} [_ url data room-id]]
    {:db (assoc-in db [:url-previews url] {:status :success :data data})}))
 
-
 (re-frame/reg-event-fx
  :media/fetch-url-preview
  (fn [{:keys [db]} [_ url room-id]]
    (when-not (get-in db [:url-previews url])
      (go
-       (let [hs-url (:auth/hs-url db)
-             token  (:auth/token db)
-             res    (<! (mesh/do-with-thread! :engine-pool
-                                              {:handler :get-url-preview
-                                               :arguments {:url url
-                                                           :hs-url hs-url
-                                                           :token token}}))]
+       (let [res (<! (mesh/do-with-thread! :engine-pool
+                                           {:handler   :get-url-preview
+                                            :arguments {:url url}}))]
          (if (= (:status res) "success")
            (re-frame/dispatch [:media/url-preview-success url (:data res) room-id])
            (re-frame/dispatch [:media/url-preview-error url])))))
    {:db (update-in db [:url-previews url] #(or % {:status :loading}))}))
-
 
 (re-frame/reg-event-db
  :media/url-preview-error
@@ -389,8 +392,7 @@
  (fn [db [_ url]]
    (get-in db [:inline-playing url] false)))
 
-
-(defn ^:defer link-preview-card [first-url hs-url room-id]
+(defn ^:defer link-preview-card [first-url room-id]
   (let [preview-state @(re-frame/subscribe [:media/url-preview first-url])]
     (if-not preview-state
       (do
@@ -406,10 +408,6 @@
           [:div {:style {:display "none"}}]
           (= status :success)
           (let [{:keys [og:title og:description og:image og:site_name]} data
-                img-url  (when og:image
-                           (if (clojure.string/starts-with? og:image "mxc://")
-                             (mxc->url og:image {:homeserver hs-url :type :thumbnail :width 400 :height 200})
-                             og:image))
                 hostname (try (.-hostname (js/URL. first-url)) (catch :default _ first-url))
                 site     (or og:site_name hostname)]
             (if (or og:title og:description)
@@ -418,59 +416,60 @@
                 [:div.embed-site site]
                 (when og:title [:div.embed-title og:title])
                 (when og:description [:div.embed-description og:description])]
-               (when img-url
-                 [:div.embed-thumbnail [:img {:src img-url}]])]
+               (when og:image
+                 [:div.embed-thumbnail
+                  [media {:uri    og:image
+                          :width  400
+                          :height 200
+                          :method "scale"
+                          :alt    (or og:title "preview")}]])]
               [:div {:style {:display "none"}}])))))))
 
 (defn ^:defer message-link-preview [msg-type-tag raw-body room-id]
   (let [first-url (when (#{"Text" "Notice" "Emote"} msg-type-tag)
                     (extract-first-url raw-body))]
     (if first-url
-      (let [hs-url        @(re-frame/subscribe [:sdk/homeserver-url])
-            policy        @(re-frame/subscribe [:settings/media-preview-policy])
+      (let [policy        @(re-frame/subscribe [:settings/media-preview-policy])
             room-meta     @(re-frame/subscribe [:rooms/active-metadata])
             is-private?   (= (:join-rule room-meta) "invite")
             show-preview? (or (= policy :on)
                               (and (= policy :private) is-private?))]
         (if show-preview?
-          [link-preview-card first-url hs-url room-id]
+          [link-preview-card first-url room-id]
           [:div {:style {:display "none"}}]))
       [:div {:style {:display "none"}}])))
 
-
-
-
 (defn ^:ui reaction-pill [emoji count senders my-id active-room event-id reactions]
   (let [members-map @(re-frame/subscribe [:room/members-map active-room])
-        hover-text (->> senders
-                        (map (fn [uid]
-                               (or (:display-name (get members-map uid)) uid)))
-                        (str/join ", "))]
+        hover-text  (->> senders
+                         (map (fn [uid]
+                                (or (:display-name (get members-map uid)) uid)))
+                         (str/join ", "))]
     [:span.reaction-pill
-     {:class (when (contains? senders my-id) "active")
-      :title hover-text
+     {:class           (when (contains? senders my-id) "active")
+      :title           hover-text
       :on-context-menu (fn [e]
                          (.preventDefault e)
                          (.stopPropagation e)
                          (re-frame/dispatch
                           [:ui/open-modal :reaction-details
-                           {:room-id active-room
-                            :reactions reactions
+                           {:room-id      active-room
+                            :reactions    reactions
                             :window-props {:style {:max-width "400px" :min-height "300px"}}}]))
-      :on-click (fn [e]
-                  (.preventDefault e)
-                  (.stopPropagation e)
-                  (re-frame/dispatch [:sdk/toggle-reaction active-room event-id emoji]))
-      :style {:cursor "pointer" :user-select "none"}}
-     (if (str/starts-with? emoji "mxc://")
+      :on-click        (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (re-frame/dispatch [:sdk/toggle-reaction active-room event-id emoji]))
+      :style           {:cursor "pointer" :user-select "none"}}
+     (if (str/includes? (str emoji) "://")
        [media
-        {:mxc   emoji
+        {:uri   emoji
          :class "reaction-custom"
          :style {:pointer-events "none"
-                 :height "1.2em"
-                 :width "auto"
+                 :height         "1.2em"
+                 :width          "auto"
                  :vertical-align "middle"
-                 :object-fit "contain"}
+                 :object-fit     "contain"}
          :alt   "emote"}]
        [:span.reaction-emoji {:style {:pointer-events "none"}} emoji])
      [:span.reaction-count {:style {:pointer-events "none"}} count]]))
@@ -660,7 +659,7 @@
             member-data      (get members-map sender-id)
             popover-member   {:user-id sender-id
                               :display-name (or (:display-name member-data) sender-name)
-                              :avatar-url (or (:avatar-url member-data) (mxc->url sender-avatar {:homeserver hs-url :type :thumbnail :width 48 :height 48}))
+                              :avatar-url (or (:avatar-url member-data) sender-avatar)
                               :power-level (or (:power-level member-data) 0)}]
         (if (= type :virtual)
           [virtual-item item]
@@ -671,8 +670,7 @@
               :on-action (fn [action]
                            (re-frame/dispatch [:input/set-context active-room action item]))
               :wrapper-props (merge (long-press-props
-                                     #(event-menu %1 %2 item active-room my-id)
-                                     )
+                                     #(event-menu %1 %2 item active-room my-id))
                                     {:class (str "timeline-message is-message"
                                                  (when merge-with-prev? " is-merged"))})}
 
@@ -682,7 +680,7 @@
               (when-not merge-with-prev?
                 [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
               [timeline-body item content active-room is-editing-this?]
-             (when (seq reactions)
+              (when (seq reactions)
                 [reaction-row {:reactions reactions
                                :my-id my-id
                                :members-map members-map
