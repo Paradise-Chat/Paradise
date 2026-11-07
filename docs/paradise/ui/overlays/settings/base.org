@@ -88,7 +88,6 @@ Not entirely important to read, but certainly interesting.
      {:fx (mapv (fn [[db-key config]]
                   [:dispatch [:settings/load db-key (:event config) (:default config)]])
                 staged-settings)})))
-
 #+end_src
 
 
@@ -131,7 +130,9 @@ Not entirely important to read, but certainly interesting.
                            [:verification  :settings.tabs/verification]
                            [:accounts      :settings.tabs/accounts]
                            [:notifications :settings.tabs/notifications]
-                           [:language-time :settings.tabs/language-time]]]
+                           [:language-time :settings.tabs/language-time]
+                           [:keybinds      :settings.tabs/keybinds]
+                           ]]
        ^{:key id}
        [:div.settings-tab
         {:class (when (= active-tab id) "is-active")
@@ -161,7 +162,6 @@ Not entirely important to read, but certainly interesting.
        :on-click #(re-frame/dispatch [:settings/set-tab :advanced])}
       (tr [:settings.tabs/advanced])]]))
 
-
 (defn ^:ui settings-content [_props]
   (let [tr         @(re-frame/subscribe [:i18n/tr])
         active-tab @(re-frame/subscribe [:settings/active-tab])
@@ -177,13 +177,13 @@ Not entirely important to read, but certainly interesting.
         :my-account    [my-account-tab profile]
         :verification  [verification-tab]
         :accounts      [accounts-tab]
-
         :notifications [notifications-tab]
         :voice-video   [voice-video-tab]
         :language-time [language-time-tab]
+        :keybinds      [keybinds-tab]
         :about         [about-tab]
-        :credits       [credits-tab]
         :advanced      [advanced-tab]
+        :credits       [credits-tab]
         [:div {:style {:color "#fff"}} (tr [:settings.modal/not-found])])]]))
 
 (defmethod modal-component :settings [_]
