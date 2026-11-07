@@ -365,7 +365,7 @@ read receipts. This prevents any sort of spamming to the home server.
       {:style {:position "absolute" :inset 0 :display "flex" :align-items "center" :justify-content "center"}}
       [:div.spinner]]
      [media
-      {:mxc (:source content)
+      {:uri (:source content)
        :source-map (:source-map content)
        :tag-type tag-type
        :alt alt-text
@@ -423,11 +423,20 @@ read receipts. This prevents any sort of spamming to the home server.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
 (defn ^:ui file-message [event content tr]
-  (let [hs-url @(re-frame/subscribe [:sdk/homeserver-url])
-        {:keys [caption source info]} content]
+  (let [{:keys [caption source source-map info]} content]
     [:div.file-attachment-container
      [:div.file-attachment
-      [:a {:href (mxc->url source {:homeserver hs-url :type :download}) :target "_blank" :className "file-link"}
+      [:a {:href      "#"
+           :className "file-link"
+           :on-click  (fn [e]
+                        (.preventDefault e)
+                        (re-frame/dispatch
+                         [:media/download {:uri        source
+                                           :source-map source-map
+                                           :filename   caption
+                                           :mime-type  (:mimetype info)
+                                           :room-id    (:room_id event)
+                                           :event-id   (:id event)}]))}
        [:span.file-icon [icons/file]]
        [:span.file-name (or caption (tr [:container.timeline.status/file-download]))]
        (when-let [size (:size info)]
