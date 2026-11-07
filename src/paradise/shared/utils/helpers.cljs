@@ -371,31 +371,3 @@
       3 (tr [(keyword base-path "three")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (truncate-name (nth names 2) 16)])
       (tr [(keyword base-path "many")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (- cnt 2)]))))
 
-(defn fetch-state-event [homeserver token room-id event-type state-key]
-  (let [clean-hs (str/replace homeserver #"/+$" "")
-        key-path (if (empty? state-key) "" (str "/" state-key))
-        url      (str clean-hs "/_matrix/client/v3/rooms/" room-id "/state/" event-type key-path)]
-    (-> (p/let [resp (net/fetch url #js {:headers #js {:Authorization (str "Bearer " token)}})]
-          (when (.-ok resp)
-            (.json resp)))
-        (p/catch (constantly nil)))))
-
-(defn fetch-room-state
-  "Fetches room state and applies an optional transformation function (predicate/transducer).
-   - If event-type is nil, fetches the full state array.
-   - xf is a function that receives the clojurized data."
-  ([homeserver token room-id]
-   (fetch-room-state homeserver token room-id nil nil identity))
-  ([homeserver token room-id event-type state-key xf]
-   (let [clean-hs (str/replace homeserver #"/+$" "")
-         key-path (if (empty? state-key) "" (str "/" state-key))
-         url      (str clean-hs "/_matrix/client/v3/rooms/" room-id "/state"
-                       (when event-type (str "/" event-type key-path)))]
-     (-> (p/let [resp (net/fetch url #js {:headers #js {:Authorization (str "Bearer " token)}})]
-           (when (.-ok resp)
-             (p/let [json (.json resp)
-                     data (js->clj json :keywordize-keys true)]
-               (xf data))))
-         (p/catch (fn [err]
-                    (log/error "State fetch failed:" url err)
-                    nil))))))
