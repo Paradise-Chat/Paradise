@@ -1,13 +1,11 @@
 (ns paradise.ui.overlays.profiles
   (:require
-   [paradise.ui.overlays.base :refer [popover-component
-                          context-menu-component]]
+   [paradise.ui.overlays.base :refer [popover-component context-menu-component]]
    [taoensso.timbre :as log]
    [re-frame.core :as re-frame]
    [paradise.ui.global :refer [avatar]]
    [paradise.media.component :refer [media]]
    [paradise.shared.plugins :as plugins]))
-
 
 (defn ^:ui profile-preview-content [args]
   (let [{:keys [member tags]} args
@@ -15,14 +13,14 @@
         tag-data   (get tags (keyword (str pl)))
         role-name  (:name tag-data)
         role-color (or (:color tag-data) "var(--text-primary)")
-        icon-mxc   (some-> tag-data :icon :key)]
+        icon-uri   (some-> tag-data :icon :key)]
     [:div.profile-preview-card
      [:div.profile-preview-cover]
      [:div.profile-preview-content
       [:div.profile-preview-avatar-wrap
-       [avatar {:id (:user-id member)
+       [avatar {:id   (:user-id member)
                 :name (:display-name member)
-                :url (:avatar-url member)
+                :url  (:avatar-url member)
                 :size 64}]]
       [:div.profile-preview-id-block
        [:span.profile-preview-name {:style {:color role-color}}
@@ -31,10 +29,10 @@
         (:user-id member)]]
       (when role-name
         [:div.profile-preview-role-row
-         (when icon-mxc
-           [media {:mxc icon-mxc
-                       :class "member-item-role-icon"
-                       :alt role-name}])
+         (when icon-uri
+           [media {:uri   icon-uri
+                   :class "member-item-role-icon"
+                   :alt   role-name}])
          [:span.profile-preview-role-text {:style {:color role-color}}
           role-name]])
       [plugins/plugin-slot :profile-actions {:member member}]]]))
