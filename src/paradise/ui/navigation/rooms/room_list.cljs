@@ -334,7 +334,7 @@
       :input/focus-composer (not mobile?)
       :dispatch-n         dispatches})))
 
-(defui filter-toggle-bar []
+(defn ^:ui filter-toggle-bar []
   (let [tr            @(re-frame/subscribe [:i18n/tr])
         active-filter @(re-frame/subscribe [:room-list/active-filter])]
     [:div.filter-bar
@@ -371,7 +371,7 @@
 
 (re-frame/reg-sub :room-list/active-filter (fn [db _] (get db :active-filter-id "people")))
 
-(defui virtualized-room-list [tr client room-array active-space active-room closed-drawers active-filter]
+(defn ^:ui virtualized-room-list [tr client room-array active-space active-room closed-drawers active-filter]
   (let [item-renderer (render-room-item tr client room-array active-space active-room closed-drawers active-filter)]
     [:> Virtuoso
      {:style {:height "100%" :width "100%"}
@@ -379,7 +379,7 @@
       :endReached #(re-frame/dispatch [:room-list/paginate-global])
       :itemContent item-renderer}]))
 
-(defui room-list []
+(defn ^:ui room-list []
   (let [tr              @(re-frame/subscribe [:i18n/tr])
         rooms           @(re-frame/subscribe [:rooms/current-view])
         active-room     @(re-frame/subscribe [:rooms/active-id])
