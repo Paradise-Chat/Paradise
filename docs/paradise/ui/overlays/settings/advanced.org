@@ -13,7 +13,8 @@ live here.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/advanced.cljs
 (ns paradise.ui.overlays.settings.advanced
   (:require
-   [paradise.shared.plugins :as plugins]
+   [paradise.ui.overlays.settings.plugins :as plugins]
+   [paradise.ui.overlays.settings.registry :as registry]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 #+end_src
