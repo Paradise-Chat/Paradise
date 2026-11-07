@@ -231,8 +231,8 @@ and the tab completion.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/autocomplete.cljs
-(defn suggestion-menu []
-  (let [{:keys [active? type rect index] :as state} @(re-frame/subscribe [:suggestion/state])
+(defn suggestion-menu [& _]
+  (let [{:keys [active? type rect index]} @(re-frame/subscribe [:suggestion/state])
         room-id @(re-frame/subscribe [:rooms/active-id])
         emojis  @(re-frame/subscribe [:emoji/filtered-suggestions])
         members @(re-frame/subscribe [:mention/filtered-users room-id])
@@ -255,28 +255,37 @@ and the tab completion.
            :selected-index safe-idx
            :empty-text     (tr [:composer.suggestions/no-results])
            :item-class     "suggestion-item"
-           :key-fn (fn [item]
-                     (if is-emoji? (first item) (:user-id item)))
-           :on-select (fn [item]
-                        (when-let [cmd @!active-command]
-                          (let [selected (if is-emoji? (second item) item)]
-                            (cmd #js {:props selected}))))
-           :render-item (fn [item _selected?]
-                          (if is-emoji?
-                            (let [[shortcode emote-data] item]
-                              [:<>
-                               [media {:mxc (:url emote-data) :class "suggestion-img" :alt shortcode}]
-                               [:span.suggestion-text ":" shortcode ":"]])
-                            [:<>
-                             [avatar {:id    (:user-id item)
-                                      :name  (or (:display-name item) (:user-id item) "?")
-                                      :url   (:avatar-url item)
-                                      :size  24
-                                      :shape :circle}]
-                             [:div.suggestion-details
-                              [:span.suggestion-name (:display-name item)]
-                              [:span.suggestion-id (:user-id item)]]])) }]]))))
-
+           :key-fn         (fn [item]
+                             (if is-emoji?
+                               (first item)
+                               (or (:id item) (:user-id item))))
+           :on-select      (fn [raw-item]
+                             (when-let [cmd @!active-command]
+                               (let [selected (if is-emoji?
+                                                (let [[sc item] raw-item]
+                                                  (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
+                                                raw-item)]
+                                 (cmd #js {:props selected}))))
+           :render-item    (fn [item _selected?]
+                             (if is-emoji?
+                               (let [[shortcode emote-data] item
+                                     uri (or (:uri emote-data) (:url emote-data))]
+                                 [:<>
+                                  [media {:uri   uri
+                                          :class "suggestion-img"
+                                          :alt   shortcode}]
+                                  [:span.suggestion-text ":" shortcode ":"]])
+                               (let [uid   (or (:id item) (:user-id item))
+                                     dname (or (:display-name item) (:name item) uid "?")]
+                                 [:<>
+                                  [avatar {:id    uid
+                                           :name  dname
+                                           :url   (:avatar-url item)
+                                           :size  24
+                                           :shape :circle}]
+                                  [:div.suggestion-details
+                                   [:span.suggestion-name dname]
+                                   [:span.suggestion-id uid]]])))}]]))))
 #+end_src
 
 
