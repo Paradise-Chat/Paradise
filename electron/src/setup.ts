@@ -678,6 +678,9 @@ export class ElectronCapacitorApp {
         this.MainWindow = new BrowserWindow({
             icon,
             show: false,
+            frame: false,
+            autoHideMenuBar: true,
+            titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
             x: this.mainWindowState.x,
             y: this.mainWindowState.y,
             width: this.mainWindowState.width,
@@ -685,11 +688,62 @@ export class ElectronCapacitorApp {
             webPreferences: {
                 nodeIntegration: true,
                 contextIsolation: true,
-                // Use preload to inject the electron varriant overrides for capacitor plugins.
-                // preload: join(app.getAppPath(), "node_modules", "@capacitor-community", "electron", "dist", "runtime", "electron-rt.js"),
                 preload: preloadPath,
             },
         });
+
+        this.MainWindow.on("maximize", () => {
+            if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                this.MainWindow.webContents.send("paradise:window-maximized", true);
+            }
+        });
+
+        this.MainWindow.on("unmaximize", () => {
+            if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                this.MainWindow.webContents.send("paradise:window-maximized", false);
+            }
+        });
+
+        ipcMain.removeHandler("paradise:window-minimize");
+        ipcMain.handle("paradise:window-minimize", () => {
+            if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                this.MainWindow.minimize();
+            }
+        });
+
+        ipcMain.removeHandler("paradise:window-toggle-maximize");
+        ipcMain.handle("paradise:window-toggle-maximize", () => {
+            if (!this.MainWindow || this.MainWindow.isDestroyed()) return false;
+            if (this.MainWindow.isMaximized()) {
+                this.MainWindow.unmaximize();
+                return false;
+            } else {
+                this.MainWindow.maximize();
+                return true;
+            }
+        });
+
+        ipcMain.removeHandler("paradise:window-close");
+        ipcMain.handle("paradise:window-close", () => {
+            if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                this.MainWindow.close();
+            }
+        });
+
+        ipcMain.removeHandler("paradise:window-is-maximized");
+        ipcMain.handle("paradise:window-is-maximized", () => {
+            if (!this.MainWindow || this.MainWindow.isDestroyed()) return false;
+            return this.MainWindow.isMaximized();
+        });
+
+        ipcMain.removeHandler("paradise:window-toggle-devtools");
+        ipcMain.handle("paradise:window-toggle-devtools", () => {
+            if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                this.MainWindow.webContents.toggleDevTools();
+            }
+        });
+
+
         this.mainWindowState.manage(this.MainWindow);
 
         if (this.CapacitorFileConfig.backgroundColor) {
