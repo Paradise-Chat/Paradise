@@ -10,7 +10,6 @@
             [goog.object]
             [paradise.shared.client.state :as state]
             [reagent.dom.client :as rdom]
-            [paradise.media.component :refer [mxc->url]]
             [paradise.shared.utils.helpers :refer [sanitize-custom-html format-divider-date format-readers join-names get-status-string process-raw-event]]
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.shared.utils.svg :as icons]
