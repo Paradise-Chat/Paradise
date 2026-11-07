@@ -34,6 +34,7 @@ Not entirely important to read, but certainly interesting.
    [paradise.ui.overlays.settings.notifications :refer [notifications-tab]]
    [paradise.ui.overlays.settings.advanced :refer [advanced-tab]]
    [paradise.ui.overlays.settings.accounts :refer [accounts-tab]]
+   [paradise.ui.overlays.settings.keybinds :refer [keybinds-tab]]
    [paradise.ui.overlays.settings.verification :refer [verification-tab]]
    [paradise.ui.overlays.settings.about :refer [credits-tab about-tab]]
    [paradise.ui.overlays.settings.voice-video :refer [voice-video-tab]]
