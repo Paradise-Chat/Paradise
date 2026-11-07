@@ -472,6 +472,75 @@ html, body {
 
 
 
+#+begin_src css :tangle ../../../css/app.css
+.desktop-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  min-height: 32px;
+  width: 100%;
+  background: var(--bg-tertiary, #111214);
+  color: var(--text-muted, #949ba4);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: drag;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  z-index: 9999;
+}
+
+.desktop-titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.desktop-titlebar-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.desktop-titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.desktop-titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-normal, #f2f3f5);
+}
+
+.desktop-titlebar-btn.is-close:hover {
+  background: #da373c;
+  color: #ffffff;
+}
+
+
+.desktop-titlebar ~ .app-root,
+.desktop-titlebar ~ .login-screen,
+.desktop-titlebar ~ .booting-screen {
+    height: calc(100vh - 32px) !important;
+    max-height: calc(100vh - 32px) !important;
+}
+
+
+#+end_src
+
+
+
 #+begin_src css :tangle ../../../css/update-banner.css
 .global-update-banner {
   position: fixed;
