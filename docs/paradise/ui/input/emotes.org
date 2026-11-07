@@ -83,9 +83,9 @@ another space (unless the user has made them set as global).
    (if-let [pool @state/!engine-pool]
      (go
        (let [res (<! (main/do-with-pool! pool
-                                         {:handler :fetch-emotes
+                                         {:handler   :fetch-emotes
                                           :arguments {:source-type (name source-type)
-                                                      :room-id room-id}}))]
+                                                      :room-id     room-id}}))]
          (if (= (:status res) "success")
            (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:packs res)])
            (log/error "Worker emote fetch failed:" (:msg res)))))
