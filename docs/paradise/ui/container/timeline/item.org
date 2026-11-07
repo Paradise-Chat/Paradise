@@ -532,18 +532,15 @@ working on deferred rendered components.
   (let [first-url (when (#{"Text" "Notice" "Emote"} msg-type-tag)
                     (extract-first-url raw-body))]
     (if first-url
-      (let [hs-url        @(re-frame/subscribe [:sdk/homeserver-url])
-            policy        @(re-frame/subscribe [:settings/media-preview-policy])
+      (let [policy        @(re-frame/subscribe [:settings/media-preview-policy])
             room-meta     @(re-frame/subscribe [:rooms/active-metadata])
             is-private?   (= (:join-rule room-meta) "invite")
             show-preview? (or (= policy :on)
                               (and (= policy :private) is-private?))]
         (if show-preview?
-          [link-preview-card first-url hs-url room-id]
+          [link-preview-card first-url room-id]
           [:div {:style {:display "none"}}]))
       [:div {:style {:display "none"}}])))
-
-
 #+end_src
 
 
@@ -633,7 +630,6 @@ individual's display name.
 ****** TODO Need to calculate the height (because they can wrap)
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
-
 (defn ^:ui reaction-pill [emoji count senders my-id active-room event-id reactions]
   (let [members-map @(re-frame/subscribe [:room/members-map active-room])
         hover-text (->> senders
