@@ -752,8 +752,16 @@ export class ElectronCapacitorApp {
             );
         }
 
-        // If we close the main window with the splashscreen enabled we need to destory the ref.
+        this.MainWindow.on("show", () => {
+            this.updateTrayMenu();
+        });
+
+        this.MainWindow.on("hide", () => {
+            this.updateTrayMenu();
+        });
+
         this.MainWindow.on("closed", () => {
+            stopPipewireRouting();
             if (
                 this.SplashScreen?.getSplashWindow() &&
                 !this.SplashScreen.getSplashWindow().isDestroyed()
@@ -762,7 +770,6 @@ export class ElectronCapacitorApp {
             }
         });
 
-        // When the tray icon is enabled, setup the options.
         if (this.CapacitorFileConfig.electron?.trayIconAndMenuEnabled) {
             this.TrayIcon = new Tray(icon);
             this.TrayIcon.on("double-click", () => {
@@ -786,17 +793,37 @@ export class ElectronCapacitorApp {
                 }
             });
             this.TrayIcon.setToolTip(app.getName());
-            this.TrayIcon.setContextMenu(
-                Menu.buildFromTemplate(this.TrayMenuTemplate)
-            );
+            this.updateTrayMenu([]);
         }
 
-        // Setup the main manu bar at the top of our window.
-        Menu.setApplicationMenu(
-            Menu.buildFromTemplate(this.AppMenuBarMenuTemplate)
+        ipcMain.removeHandler("paradise:set-tray-menu");
+        ipcMain.handle(
+            "paradise:set-tray-menu",
+            (_event, items: DynamicTrayItem[]) => {
+                this.updateTrayMenu(Array.isArray(items) ? items : []);
+                return true;
+            }
         );
 
-        // If the splashscreen is enabled, show it first while the main window loads then switch it out for the main window, or just load the main window from the start.
+        ipcMain.removeHandler("paradise:set-tray-tooltip");
+        ipcMain.handle(
+            "paradise:set-tray-tooltip",
+            (_event, tooltip: string) => {
+                if (this.TrayIcon) {
+                    this.TrayIcon.setToolTip(tooltip || app.getName());
+                }
+                return true;
+            }
+        );
+
+        if (process.platform === "darwin") {
+            Menu.setApplicationMenu(
+                Menu.buildFromTemplate(this.AppMenuBarMenuTemplate)
+            );
+        } else {
+            Menu.setApplicationMenu(null);
+        }
+
         if (this.CapacitorFileConfig.electron?.splashScreenEnabled) {
             this.SplashScreen = new CapacitorSplashScreen({
                 imageFilePath: join(
@@ -813,7 +840,6 @@ export class ElectronCapacitorApp {
             this.loadMainWindow(this);
         }
 
-        // Security
         this.MainWindow.webContents.setWindowOpenHandler((details) => {
             if (!details.url.includes(this.customScheme)) {
                 return { action: "deny" };
@@ -831,10 +857,9 @@ export class ElectronCapacitorApp {
             }
         });
 
-        // Link electron plugins into the system.
         setupCapacitorElectronPlugins();
+        setupDisplayMedia();
 
-        // When the web app is loaded we hide the splashscreen if needed and show the mainwindow.
         this.MainWindow.webContents.on("dom-ready", () => {
             if (this.CapacitorFileConfig.electron?.splashScreenEnabled) {
                 this.SplashScreen.getSplashWindow().hide();
@@ -861,11 +886,18 @@ export function setupContentSecurityPolicy(customScheme: string): void {
             responseHeaders: {
                 ...details.responseHeaders,
                 "Content-Security-Policy": [
-                    electronIsDev
-                        ? `default-src ${customScheme}://* 'unsafe-inline' devtools://* 'unsafe-eval' 'wasm-unsafe-eval' data:; connect-src ${customScheme}://* https://* wss://*; img-src ${customScheme}://* https://* data: blob:; media-src ${customScheme}://* https://* data: blob:;`
-                        : `default-src ${customScheme}://* 'unsafe-inline' data: 'wasm-unsafe-eval'; connect-src ${customScheme}://* https://* wss://*; img-src ${customScheme}://* https://* data: blob:; media-src ${customScheme}://* https://* data: blob:;`,
+                    `default-src ${customScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
+                        `script-src ${customScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
+                        `style-src ${customScheme}://* 'self' 'unsafe-inline' http: https: data: blob:; ` +
+                        `font-src ${customScheme}://* 'self' http: https: data: blob:; ` +
+                        `connect-src ${customScheme}://* 'self' http: https: ws: wss: data: blob:; ` +
+                        `img-src ${customScheme}://* 'self' http: https: data: blob:; ` +
+                        `media-src ${customScheme}://* 'self' http: https: data: blob:; ` +
+                        `worker-src ${customScheme}://* 'self' http: https: data: blob:; ` +
+                        `frame-src ${customScheme}://* 'self' http: https: data: blob:;`,
                 ],
             },
         });
     });
 }
+
