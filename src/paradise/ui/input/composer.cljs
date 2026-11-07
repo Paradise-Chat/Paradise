@@ -1,19 +1,24 @@
 (ns paradise.ui.input.composer
-    (:require
-     [clojure.string :as str]
-     [paradise.media.component :refer [mxc->url url->mxc media]]
-     [paradise.shared.utils.macros :refer [defui]]
-     [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
-     ["react" :as react]
-     [taoensso.timbre :as log]
-     [reagent.core :as r]
-     ["@tiptap/react" :refer [useEditor EditorContent ReactNodeViewRenderer NodeViewWrapper]]
-     ["@tiptap/starter-kit" :default StarterKit]
-     ["@tiptap/extension-placeholder" :default Placeholder]
-     ["@tiptap/extension-mention" :default Mention]
-     ["@tiptap/extension-link" :default Link]
-     ["@tiptap/core" :refer [Extension Node mergeAttributes]]
-      ["prosemirror-state" :refer [Plugin PluginKey]]))
+  (:require
+   [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [clean-shortcode format-shortcode]]
+   [paradise.media.component :refer [media]]
+   [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
+   ["react" :as react]
+   [taoensso.timbre :as log]
+   [reagent.core :as r]
+   ["@tiptap/react" :refer [useEditor EditorContent ReactNodeViewRenderer NodeViewWrapper]]
+   ["@tiptap/starter-kit" :default StarterKit]
+   ["@tiptap/extension-placeholder" :default Placeholder]
+   ["@tiptap/extension-mention" :default Mention]
+   ["@tiptap/extension-link" :default Link]
+   ["@tiptap/core" :refer [Extension Node mergeAttributes]]
+   ["prosemirror-state" :refer [Plugin PluginKey]]))
+
+(def emoji-trigger
+  (-> Mention
+      (.extend #js {:name "emojiTrigger"})
+      (.configure #js {:suggestion (emoji-suggestion-options)})))
 
 (def emoji-trigger
   (-> Mention
@@ -23,38 +28,47 @@
 (def user-trigger
   (-> Mention
       (.extend #js {:name "userMention"
+                    :addAttributes (fn []
+                                     #js {:id    #js {:default nil}
+                                          :label #js {:default nil}
+                                          :uri   #js {:default nil}})
                     :renderHTML (fn [^js props]
                                   (let [node  (.-node props)
                                         id    (.. node -attrs -id)
-                                        label (.. node -attrs -label)]
-                                    #js ["a" #js {:href  (str "https://matrix.to/#/" id)
-                                                  :class "user-mention"
-                                                  :data-mx-user id}
+                                        label (or (.. node -attrs -label) id)
+                                        uri   (.. node -attrs -uri)
+                                        ]
+                                    #js ["a" #js {:href            uri
+                                                  :class           "user-mention"
+                                                  :data-mention-id id
+                                                  :data-mx-user    id}
                                          (str "@" label)]))})
       (.configure #js {:suggestion (user-mention-options)})))
 
 (defn renderHtml [^js props]
-  (let [attrs         (.-HTMLAttributes props)
-        raw-shortcode (aget attrs "shortcode")
-        display-code  (when raw-shortcode
-                        (str ":" (str/replace (str raw-shortcode) #":" "") ":"))]
+  (let [attrs        (.-HTMLAttributes props)
+        display-code (format-shortcode (aget attrs "shortcode"))
+        uri          (or (aget attrs "uri") (aget attrs "src"))
+        emote-id     (aget attrs "id")]
     #js ["img" (mergeAttributes
                 attrs
-                #js {"data-emote" true
-                     "class"      "chat-input-emote"
-                     "alt"        display-code
-                     "shortcode"  display-code
-                     "title"      display-code
-                     "style"      "height: 1.5em; width: auto; vertical-align: middle; display: inline-block;"})]))
+                #js {"data-emote"     true
+                     "data-emote-id"  emote-id
+                     "data-emote-uri" uri
+                     "class"          "chat-input-emote"
+                     "alt"            display-code
+                     "shortcode"      display-code
+                     "title"          display-code
+                     "style"          "height: 1.5em; width: auto; vertical-align: middle; display: inline-block;"})]))
 
 (defn prepare-html-for-editor [raw-html]
-  (if (string? raw-html)
-    (str/replace raw-html
-                 #"mxc://[^\"\'\s>]+"
-                 #(mxc->url %))
-    ""))
+  (if (string? raw-html) raw-html ""))
 
-(defn get-matrix-formatted-body [editor]
+(defn editor->ast [editor]
+  (when editor
+    (js->clj (.. editor getJSON -content) :keywordize-keys true)))
+
+(defn get-formatted-body [editor]
   (let [json (.. editor getJSON -content)
         node->html (fn node->html [node]
                      (let [type  (.-type node)
@@ -63,14 +77,22 @@
                            base-content
                            (cond
                              (= type "customEmote")
-                             (let [shortcode  (aget attrs "shortcode")
-                                   mxc-uri    (or (aget attrs "mxc") (url->mxc (aget attrs "src")))]
-                               (str "<img data-mx-emoticon=\"\" src=\"" mxc-uri "\""
-                                    " alt=\"" shortcode ":\" title=\"" shortcode ":\" height=\"32\">"))
+                             (let [shortcode (format-shortcode (aget attrs "shortcode"))
+                                   emote-id  (aget attrs "id")
+                                   raw-uri   (or (aget attrs "uri")
+                                                 (aget attrs "src"))]
+                               (str "<img data-emote=\"\""
+                                    (when emote-id (str " data-emote-id=\"" emote-id "\""))
+                                    " data-emote-uri=\"" raw-uri "\""
+                                    " src=\"" raw-uri "\""
+                                    " alt=\"" shortcode "\" title=\"" shortcode "\" height=\"32\">"))
+
                              (= type "userMention")
                              (let [id    (aget attrs "id")
-                                   label (or (aget attrs "label") id)]
-                               (str "<a href=\"https://matrix.to/#/" id "\">@" label "</a>"))
+                                   label (or (aget attrs "label") id)
+                                   uri   (or (aget attrs "uri") (str "mention://" id))]
+                               (str "<a href=\"" uri "\" data-mention-id=\"" id "\">@" label "</a>"))
+
                              (= type "hardBreak") "<br>"
                              (= type "text") (.-text node)
                              :else "")
@@ -89,59 +111,69 @@
                              base-content)]
                        with-marks))]
     (str/join ""
-      (map (fn [p]
-             (str "<p>"
-                  (str/join "" (map node->html (js/Array.from (or (.-content p) #js []))))
-                  "</p>"))
-           (js/Array.from json)))))
+              (map (fn [p]
+                     (str "<p>"
+                          (str/join "" (map node->html (js/Array.from (or (.-content p) #js []))))
+                          "</p>"))
+                   (js/Array.from json)))))
+
+(defn extract-editor-payload [editor]
+  (when editor
+    {:text (.getText editor)
+     :html (get-formatted-body editor)
+     :ast  (editor->ast editor)}))
 
 
 (defn emote-node-view [props]
   (let [node  (:node props)
         attrs (.-attrs node)
-        mxc   (or (aget attrs "mxc") (aget attrs "src"))
-        alt   (aget attrs "shortcode")]
+        uri   (or (aget attrs "uri") (aget attrs "src"))
+        alt   (format-shortcode (aget attrs "shortcode"))]
     [:> NodeViewWrapper {:as "span" :style {:display "inline-block" :vertical-align "middle"}}
      [media
-      {:mxc   mxc
+      {:uri   uri
        :class "chat-input-emote"
        :style {:height "1.5em" :width "auto"}
        :alt   alt}]]))
 
+(defn- parse-emote-dom-node [^js node]
+  (let [src (.getAttribute node "src")
+        uri (or (.getAttribute node "data-emote-uri")
+                src)]
+    #js {:id        (.getAttribute node "data-emote-id")
+         :uri       uri
+         :src       (or uri src)
+         :shortcode (clean-shortcode
+                     (or (.getAttribute node "shortcode")
+                         (.getAttribute node "alt")
+                         (.getAttribute node "title")))}))
+
 (def custom-emote
   (.create Node
-   #js {:name "customEmote"
-        :inline true
-        :group "inline"
-        :selectable true
-        :atom true
-        :addAttributes (fn [] #js {:src #js {:default nil}
-                                   :shortcode #js {:default nil}})
-        :addNodeView (fn []
-                       (ReactNodeViewRenderer (r/reactify-component emote-node-view)))
-        :renderText (fn [^js props]
-              (let [shortcode (str (.. props -node -attrs -shortcode))]
-                (if (and (seq shortcode)
-                         (not (str/starts-with? shortcode ":")))
-                  (str ":" shortcode ":")
-                  (if (seq shortcode)
-                    shortcode
-                    ":emote:"))))
-        :parseHTML (fn []
-                     #js [#js {:tag "img[data-emote]"}
-                          #js {:tag "img[data-mx-emoticon]"}
-                          #js {:tag "img"
-                               :getAttrs (fn [^js node]
-                                           #js {:src (.getAttribute node "mxc")
-                                                :shortcode (or (.getAttribute node "alt")
-                                                               (.getAttribute node "title"))})}])
-        :renderHTML renderHtml}))
+   #js {:name          "customEmote"
+        :inline        true
+        :group         "inline"
+        :selectable    true
+        :atom          true
+        :addAttributes (fn []
+                         #js {:id        #js {:default nil}
+                              :uri       #js {:default nil}
+                              :src       #js {:default nil}
+                              :shortcode #js {:default nil}})
+        :addNodeView   (fn []
+                         (ReactNodeViewRenderer (r/reactify-component emote-node-view)))
+        :renderText    (fn [^js props]
+                         (format-shortcode (.. props -node -attrs -shortcode)))
+        :parseHTML     (fn []
+                         #js [#js {:tag "img[data-emote]" :getAttrs parse-emote-dom-node}
+                              #js {:tag "img"             :getAttrs parse-emote-dom-node}])
+        :renderHTML    renderHtml}))
 
 (defn safe-extract-files [event]
-  (let [dt (.-dataTransfer event)
-        cd (.-clipboardData event)
+  (let [dt     (.-dataTransfer event)
+        cd     (.-clipboardData event)
         source (or dt cd)
-        arr (js/Array.)]
+        arr    (js/Array.)]
     (when source
       (let [files (.-files source)
             items (.-items source)]
@@ -167,7 +199,7 @@
              #js [(new Plugin
                        #js {:key (new PluginKey "fileDropHandler")
                             :props #js {:handleDOMEvents
-                                        #js {:drop (fn [view event]
+                                        #js {:drop (fn [_view event]
                                                      (try
                                                        (let [files (safe-extract-files event)]
                                                          (if (pos? (.-length files))
@@ -202,60 +234,60 @@
                 :addKeyboardShortcuts
                 (fn []
                   (this-as this
-                           #js {"Enter" (fn [context]
-                                          (let [editor  (.-editor context)
-                                                text    (.getText editor)
-                                                html    (.getHTML editor)
-                                                on-send (.. this -options -onSend)]
-                                            (when (and on-send (on-send text html))
-                                              (.commands.clearContent editor true))
-                                            true))
-                                "Shift-Enter" (fn [] false)}))}))
+                    #js {"Enter" (fn [context]
+                                   (let [editor  (.-editor context)
+                                         text    (.getText editor)
+                                         html    (get-formatted-body editor)
+                                         on-send (.. this -options -onSend)]
+                                     (when (and on-send (on-send text html))
+                                       (.commands.clearContent editor true))
+                                     true))
+                         "Shift-Enter" (fn [] false)}))}))
 
 (defn tiptap-component [^js props]
-  (let [active-id    (.. props -children -activeId)
-        on-send      (.. props -children -onSend)
-        on-files     (.. props -children -onFiles)
-        on-change    (.. props -children -onChange)
-        loaded-text  (.. props -children -loadedText)
-        cached-html  (.. props -children -cachedHtml)
-        placeholder  (.. props -children -placeholder)
-        on-ready     (.. props -children -onEditorReady)
-        latest-cbs   (react/useRef #js {:onSend on-send :onFiles on-files})
-        _            (set! (.-current latest-cbs) #js {:onSend on-send :onFiles on-files})
-        editor (useEditor
-                #js {:extensions #js [(.configure StarterKit #js {})
-                                      (.configure Placeholder #js {:placeholder placeholder})
-                                      (.configure submit-extension
-                                                  #js {:onSend (fn [text html]
-                                                                 (let [cb (.-onSend (.-current latest-cbs))]
-                                                                   (when cb (cb text html))))})
-                                      (.configure file-drop-extension
-                                                  #js {:onFiles (fn [files]
-                                                                  (let [cb (.-onFiles (.-current latest-cbs))]
-                                                                    (when cb (cb files))))})
-                                      (.configure custom-emote #js {})
-                                      emoji-trigger
-                                      user-trigger
-                                      (.configure Link #js {:openOnClick false
-                                                            :autolink true
-                                                            :linkOnPaste true})]
-                     :content (or cached-html loaded-text "")
-                     :editable (boolean active-id)
-                     :onUpdate (fn [ctx]
-                                 (when on-change
-                                   (on-change (.getText (.-editor ctx))
-                                              (.getHTML (.-editor ctx)))))
-                     :onCreate (fn [ctx]
-                                 (when on-ready
-                                   (on-ready (.-editor ctx))))
-                     :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
-                #js [active-id])]
+  (let [active-id   (.. props -children -activeId)
+        on-send     (.. props -children -onSend)
+        on-files    (.. props -children -onFiles)
+        on-change   (.. props -children -onChange)
+        loaded-text (.. props -children -loadedText)
+        cached-html (.. props -children -cachedHtml)
+        placeholder (.. props -children -placeholder)
+        on-ready    (.. props -children -onEditorReady)
+        latest-cbs  (react/useRef #js {:onSend on-send :onFiles on-files})
+        _           (set! (.-current latest-cbs) #js {:onSend on-send :onFiles on-files})
+        editor      (useEditor
+                     #js {:extensions #js [(.configure StarterKit #js {})
+                                           (.configure Placeholder #js {:placeholder placeholder})
+                                           (.configure submit-extension
+                                                       #js {:onSend (fn [text html]
+                                                                      (let [cb (.-onSend (.-current latest-cbs))]
+                                                                        (when cb (cb text html))))})
+                                           (.configure file-drop-extension
+                                                       #js {:onFiles (fn [files]
+                                                                       (let [cb (.-onFiles (.-current latest-cbs))]
+                                                                         (when cb (cb files))))})
+                                           (.configure custom-emote #js {})
+                                           emoji-trigger
+                                           user-trigger
+                                           (.configure Link #js {:openOnClick false
+                                                                 :autolink    true
+                                                                 :linkOnPaste true})]
+                          :content     (or cached-html loaded-text "")
+                          :editable    (boolean active-id)
+                          :onUpdate    (fn [ctx]
+                                         (when on-change
+                                           (let [ed (.-editor ctx)]
+                                             (on-change (.getText ed)
+                                                        (get-formatted-body ed)))))
+                          :onCreate    (fn [ctx]
+                                         (when on-ready
+                                           (on-ready (.-editor ctx))))
+                          :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
+                     #js [active-id])]
 
     (react/useEffect
      (fn []
-       (when (and editor loaded-text
-                  (.-schema editor))
+       (when (and editor loaded-text (.-schema editor))
          (let [current-html (.getHTML editor)]
            (when (not= current-html loaded-text)
              (.commands.setContent editor loaded-text))))
@@ -265,10 +297,8 @@
     (if-not editor
       (react/createElement "div" #js {:className "timeline-input-wrapper"}
                            (react/createElement "div" #js {:className "tiptap-editor-surface"}))
-
       (react/createElement "div"
-                           #js {:key (str "editor-surface-" active-id)
+                           #js {:key       (str "editor-surface-" active-id)
                                 :className "timeline-input-wrapper"
-                                :onClick (fn [] (.commands.focus editor))}
+                                :onClick   (fn [] (.commands.focus editor))}
                            (react/createElement EditorContent #js {:editor editor})))))
-
