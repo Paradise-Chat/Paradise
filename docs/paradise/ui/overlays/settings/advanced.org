@@ -25,8 +25,8 @@ live here.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/advanced.cljs
 (defn ^:ui advanced-preferences-view []
-  (let [tr          @(re-frame/subscribe [:i18n/tr])
-        policy      @(re-frame/subscribe [:settings/media-preview-policy])
+  (let [tr           @(re-frame/subscribe [:i18n/tr])
+        policy       @(re-frame/subscribe [:settings/media-preview-policy])
         previews-on? (= policy :on)]
     [:div.settings-section
      [:h3.settings-subheading
