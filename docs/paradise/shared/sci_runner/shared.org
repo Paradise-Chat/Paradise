@@ -17,7 +17,7 @@ can.
 (ns paradise.shared.sci-runner.shared
   (:require [sci.core :as sci]
             [cljs.core.async.impl.dispatch :as dispatch]
-            [cljs.core.async.impl.ioc-helpers]
+            [cljs.core.async.impl.ioc-helpers :as ioc-helpers]
             [cljs.core.async.interop]
             [cljs.core.async]
             [promesa.core]
