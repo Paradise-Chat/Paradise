@@ -204,11 +204,13 @@ For now this is just exploratory.
      (cond
        (str/starts-with? resolved-mime "image/")
        [:img.preview-image {:src preview-url}]
+
        (or (str/starts-with? resolved-mime "audio/")
            (str/starts-with? resolved-mime "video/"))
        [:div.preview-media-placeholder
         [:span [icons/chevron-down]]
         [:span.mime-label (last (str/split resolved-mime #"/"))]]
+
        :else
        [:div.preview-file
         [icons/file]
@@ -299,31 +301,30 @@ For now this is just exploratory.
        (unregister-file! (:file-id att))))
    {:db (-> db
             (assoc-in [:drafts room-id :attachments] [])
-            (assoc-in [:composer room-id] {:text ""
-                                           :html ""
+            (assoc-in [:composer room-id] {:text        ""
+                                           :html        ""
                                            :loaded-text ""
-                                           :uploading? false}))
+                                           :uploading?  false}))
     :dispatch [:composer/persist-draft room-id]}))
 
 (re-frame/reg-event-fx
  :composer/persist-draft
  (fn [{:keys [db]} [_ room-id]]
-   (let [attachments (get-in db [:drafts room-id :attachments] [])
+   (let [attachments        (get-in db [:drafts room-id :attachments] [])
          {:keys [text html]} (get-in db [:composer room-id])]
-
      (if-let [pool @state/!engine-pool]
        (go
          (try
            (let [worker-atts
                  (<p! (p/all (map (fn [att]
-                                    (p/let [f (get-file (:file-id att))
+                                    (p/let [f  (get-file (:file-id att))
                                             ab (file->array-buffer f)]
                                       (assoc att :buffer ab)))
                                   attachments)))
-                 res (<! (main/do-with-pool! pool {:handler :persist-draft
-                                                   :arguments {:room-id room-id
-                                                               :text (or text "")
-                                                               :html (or html "")
+                 res (<! (main/do-with-pool! pool {:handler   :persist-draft
+                                                   :arguments {:room-id     room-id
+                                                               :text        (or text "")
+                                                               :html        (or html "")
                                                                :attachments worker-atts}}))]
              (when (= (:status res) "error")
                (log/error "Persist failed:" (:msg res))))
@@ -331,7 +332,6 @@ For now this is just exploratory.
              (log/error "Exception in persist-draft:" (str e)))))
        (log/warn "No engine pool for draft auto-save"))
      {})))
-
 
 (re-frame/reg-sub
  :composer/cached-html
@@ -345,25 +345,23 @@ For now this is just exploratory.
      (when old-timer (js/clearTimeout old-timer))
      {:db (update-in db [:composer room-id]
                      merge
-                     {:text text
-                      :html html
+                     {:text        text
+                      :html        html
                       :loaded-text nil
-                      :save-timer (js/setTimeout
-                                   #(re-frame/dispatch [:composer/persist-draft room-id])
-                                   500)})})))
-
+                      :save-timer  (js/setTimeout
+                                    #(re-frame/dispatch [:composer/persist-draft room-id])
+                                    500)})})))
 
 (re-frame/reg-event-fx
  :composer/add-attachment
  (fn [{:keys [db]} [_ room-id attachment]]
-   {:db (update-in db [:drafts room-id :attachments] (fnil conj []) attachment)
+   {:db       (update-in db [:drafts room-id :attachments] (fnil conj []) attachment)
     :dispatch [:composer/persist-draft room-id]}))
 
 (re-frame/reg-sub
  :composer/attachments
  (fn [db [_ room-id]]
    (get-in db [:drafts room-id :attachments] [])))
-
 
 (re-frame/reg-event-fx
  :composer/remove-attachment
@@ -373,8 +371,8 @@ For now this is just exploratory.
        (js/URL.revokeObjectURL (:preview-url attachment)))
      (when (:file-id attachment)
        (unregister-file! (:file-id attachment))))
-   {:db (update-in db [:drafts room-id :attachments]
-                   (fn [atts] (vec (concat (take index atts) (drop (inc index) atts)))))
+   {:db       (update-in db [:drafts room-id :attachments]
+                         (fn [atts] (vec (concat (take index atts) (drop (inc index) atts)))))
     :dispatch [:composer/persist-draft room-id]}))
 
 (re-frame/reg-event-fx
@@ -382,13 +380,12 @@ For now this is just exploratory.
  (fn [_ [_ room-id]]
    (if-let [pool @state/!engine-pool]
      (go
-       (let [res (<! (main/do-with-pool! pool {:handler :load-draft
+       (let [res (<! (main/do-with-pool! pool {:handler   :load-draft
                                                :arguments {:room-id room-id}}))]
          (when (and (= (:status res) "success") (:draft res))
            (re-frame/dispatch [:composer/draft-loaded room-id (:draft res)]))))
      (log/error "No engine pool to load draft"))
    {}))
-
 
 (re-frame/reg-event-fx
  :composer/draft-loaded
@@ -399,10 +396,10 @@ For now this is just exploratory.
          restored-atts
          (mapv (fn [att]
                  (let [buffer (:buffer att)
-                       mime (or (:mimetype att) (:mime att) "application/octet-stream")
-                       blob (js/Blob. #js [buffer] #js {:type mime})
-                       url  (js/URL.createObjectURL blob)
-                       fid  (register-file! blob)]
+                       mime   (or (:mimetype att) (:mime att) "application/octet-stream")
+                       blob   (js/Blob. #js [buffer] #js {:type mime})
+                       url    (js/URL.createObjectURL blob)
+                       fid    (register-file! blob)]
                    (-> att
                        (assoc :preview-url url :file-id fid :mimetype mime :mime mime)
                        (dissoc :buffer))))
@@ -410,7 +407,6 @@ For now this is just exploratory.
      {:db (-> db
               (assoc-in [:composer room-id :loaded-text] (or html-text plain-text))
               (assoc-in [:drafts room-id :attachments] restored-atts))})))
-
 
 (re-frame/reg-sub
  :composer/loaded-text
@@ -441,7 +437,7 @@ continue sending as a file though until I reify everything properly.
 
 
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
+#+begin_src clojurescript ../../../../src/paradise/ui/input/drafts.cljs
 (defui send-attachments! [sdk timeline room attachments text html]
   (let [total (count attachments)]
     (p/let [_ (p/loop [idx 0]
