@@ -9,29 +9,24 @@
    [paradise.ui.overlays.settings.notifications :refer [notifications-tab]]
    [paradise.ui.overlays.settings.advanced :refer [advanced-tab]]
    [paradise.ui.overlays.settings.accounts :refer [accounts-tab]]
+   [paradise.ui.overlays.settings.keybinds :refer [keybinds-tab]]
    [paradise.ui.overlays.settings.verification :refer [verification-tab]]
    [paradise.ui.overlays.settings.about :refer [credits-tab about-tab]]
    [paradise.ui.overlays.settings.voice-video :refer [voice-video-tab]]
    ))
 
 (def settings-registry
-  {;; DB Key                  Hydration Event                       Default Value
-   "show_previews"         {:event :push/hydrate-previews-setting :default true      :stage  :login}
-   "theme"                 {:event :ui/hydrate-theme              :default :default  :stage  :boot}
-   "disabled_plugin_urls"  {:event :plugins/hydrate-disabled-urls :default []        :stage  :boot}
-   "plugin_urls"           {:event :plugins/hydrate-urls          :default []        :stage  :boot}
-   "space_hierarchies"    {:event :space/hydrate-hierarchies     :default {}        :stage  :login}
-   "call_audio_input"     {:event :settings/hydrate-audio-input  :default nil       :stage  :boot}
-   "call_video_input"     {:event :settings/hydrate-video-input  :default nil       :stage  :boot}
-   "call_audio_output"    {:event :settings/hydrate-audio-output :default nil       :stage  :boot}
-   "call_voice_threshold"
-   {:event   :settings/hydrate-voice-threshold
-    :default 0.12
-    :stage   :boot}
-   "call_noise_suppression"
-   {:event   :settings/hydrate-noise-suppression
-    :default true
-    :stage   :boot}})
+  {"show_previews"          {:event :push/hydrate-previews-setting :default true     :stage :login}
+   "theme"                  {:event :ui/hydrate-theme              :default :default :stage :boot}
+   "custom_registries"      {:event :registry/hydrate-custom-urls  :default []       :stage :boot}
+   "disabled_plugin_urls"   {:event :plugins/hydrate-disabled-urls :default []       :stage :boot}
+   "plugin_urls"            {:event :plugins/hydrate-urls          :default []       :stage :boot}
+   "space_hierarchies"      {:event :space/hydrate-hierarchies     :default {}       :stage :login}
+   "call_audio_input"       {:event :settings/hydrate-audio-input  :default nil      :stage :boot}
+   "call_video_input"       {:event :settings/hydrate-video-input  :default nil      :stage :boot}
+   "call_audio_output"      {:event :settings/hydrate-audio-output :default nil      :stage :boot}
+   "call_voice_threshold"   {:event :settings/hydrate-voice-threshold :default 0.12  :stage :boot}
+   "call_noise_suppression" {:event :settings/hydrate-noise-suppression :default true :stage :boot}})
 
 
 (re-frame/reg-event-fx
@@ -59,7 +54,6 @@
      {:fx (mapv (fn [[db-key config]]
                   [:dispatch [:settings/load db-key (:event config) (:default config)]])
                 staged-settings)})))
-
 
 (re-frame/reg-event-fx
  :settings/open
@@ -89,7 +83,9 @@
                            [:verification  :settings.tabs/verification]
                            [:accounts      :settings.tabs/accounts]
                            [:notifications :settings.tabs/notifications]
-                           [:language-time :settings.tabs/language-time]]]
+                           [:language-time :settings.tabs/language-time]
+                           [:keybinds      :settings.tabs/keybinds]
+                           ]]
        ^{:key id}
        [:div.settings-tab
         {:class (when (= active-tab id) "is-active")
@@ -119,7 +115,6 @@
        :on-click #(re-frame/dispatch [:settings/set-tab :advanced])}
       (tr [:settings.tabs/advanced])]]))
 
-
 (defn ^:ui settings-content [_props]
   (let [tr         @(re-frame/subscribe [:i18n/tr])
         active-tab @(re-frame/subscribe [:settings/active-tab])
@@ -135,13 +130,13 @@
         :my-account    [my-account-tab profile]
         :verification  [verification-tab]
         :accounts      [accounts-tab]
-
         :notifications [notifications-tab]
         :voice-video   [voice-video-tab]
         :language-time [language-time-tab]
+        :keybinds      [keybinds-tab]
         :about         [about-tab]
-        :credits       [credits-tab]
         :advanced      [advanced-tab]
+        :credits       [credits-tab]
         [:div {:style {:color "#fff"}} (tr [:settings.modal/not-found])])]]))
 
 (defmethod modal-component :settings [_]
