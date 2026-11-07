@@ -42,8 +42,10 @@ and the tab completion.
    (let [query (str/lower-case (or (:query state) ""))]
      (->> (vals members)
           (filter (fn [u]
-                    (or (str/includes? (str/lower-case (or (:display-name u) "")) query)
-                        (str/includes? (str/lower-case (or (:user-id u) "")) query))))
+                    (let [dname (str/lower-case (or (:display-name u) (:name u) ""))
+                          uid   (str/lower-case (or (:id u) (:user-id u) ""))]
+                      (or (str/includes? dname query)
+                          (str/includes? uid query)))))
           (take 8)))))
 
 (re-frame/reg-sub
@@ -53,10 +55,17 @@ and the tab completion.
  (fn [[packs state] _]
    (let [query (str/lower-case (str (or (:query state) "")))]
      (->> (vals packs)
-          (mapcat :images)
-          (filter (fn [[shortcode _]]
-                    (let [sc-str (if (keyword? shortcode) (name shortcode) (str shortcode))]
-                      (str/includes? (str/lower-case sc-str) query))))
+          (mapcat (fn [pack]
+                    (for [[raw-sc item] (:images pack)
+                          :let [sc  (clean-shortcode (or (:shortcode item) raw-sc))
+                                uri (or (:uri item) (:url item))]
+                          :when (and (seq sc) uri)]
+                      [sc (assoc item
+                                 :shortcode sc
+                                 :uri       uri
+                                 :url       uri)])))
+          (filter (fn [[sc _]]
+                    (str/includes? (str/lower-case sc) query)))
           (take 10)))))
 
 (re-frame/reg-event-db
