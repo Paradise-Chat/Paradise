@@ -462,24 +462,18 @@ working on deferred rendered components.
  (fn [{:keys [db]} [_ url data room-id]]
    {:db (assoc-in db [:url-previews url] {:status :success :data data})}))
 
-
 (re-frame/reg-event-fx
  :media/fetch-url-preview
  (fn [{:keys [db]} [_ url room-id]]
    (when-not (get-in db [:url-previews url])
      (go
-       (let [hs-url (:auth/hs-url db)
-             token  (:auth/token db)
-             res    (<! (mesh/do-with-thread! :engine-pool
-                                              {:handler :get-url-preview
-                                               :arguments {:url url
-                                                           :hs-url hs-url
-                                                           :token token}}))]
+       (let [res (<! (mesh/do-with-thread! :engine-pool
+                                           {:handler   :get-url-preview
+                                            :arguments {:url url}}))]
          (if (= (:status res) "success")
            (re-frame/dispatch [:media/url-preview-success url (:data res) room-id])
            (re-frame/dispatch [:media/url-preview-error url])))))
    {:db (update-in db [:url-previews url] #(or % {:status :loading}))}))
-
 
 (re-frame/reg-event-db
  :media/url-preview-error
@@ -501,8 +495,7 @@ working on deferred rendered components.
  (fn [db [_ url]]
    (get-in db [:inline-playing url] false)))
 
-
-(defn ^:defer link-preview-card [first-url hs-url room-id]
+(defn ^:defer link-preview-card [first-url room-id]
   (let [preview-state @(re-frame/subscribe [:media/url-preview first-url])]
     (if-not preview-state
       (do
@@ -518,10 +511,6 @@ working on deferred rendered components.
           [:div {:style {:display "none"}}]
           (= status :success)
           (let [{:keys [og:title og:description og:image og:site_name]} data
-                img-url  (when og:image
-                           (if (clojure.string/starts-with? og:image "mxc://")
-                             (mxc->url og:image {:homeserver hs-url :type :thumbnail :width 400 :height 200})
-                             og:image))
                 hostname (try (.-hostname (js/URL. first-url)) (catch :default _ first-url))
                 site     (or og:site_name hostname)]
             (if (or og:title og:description)
@@ -530,8 +519,13 @@ working on deferred rendered components.
                 [:div.embed-site site]
                 (when og:title [:div.embed-title og:title])
                 (when og:description [:div.embed-description og:description])]
-               (when img-url
-                 [:div.embed-thumbnail [:img {:src img-url}]])]
+               (when og:image
+                 [:div.embed-thumbnail
+                  [media {:uri    og:image
+                          :width  400
+                          :height 200
+                          :method "scale"
+                          :alt    (or og:title "preview")}]])]
               [:div {:style {:display "none"}}])))))))
 
 (defn ^:defer message-link-preview [msg-type-tag raw-body room-id]
