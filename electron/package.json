@@ -8,7 +8,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "https://github.com/Paradise-in-Matrix/Paradise"
+        "url": "https://github.com/Paradise-Chat/Paradise"
     },
     "license": "MIT",
     "main": "build/src/index.js",
