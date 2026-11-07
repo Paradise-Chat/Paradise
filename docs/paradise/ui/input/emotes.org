@@ -105,18 +105,33 @@ another space (unless the user has made them set as global).
 (re-frame/reg-event-db
  :sdk/save-all-emotes
  (fn [db [_ source-type source-id fetched-packs]]
-   (let [structured-packs (into {}
-                                (for [{:keys [pack-id data]} (remove nil? fetched-packs)
-                                      :let [clj-data    (if (map? data) data (js->clj data :keywordize-keys true))
-                                            images      (:images clj-data)
-                                            pack-info   (:pack clj-data)
-                                            usage-set   (set (:usage pack-info []))
-                                            is-sticker? (contains? usage-set "sticker")]
-                                      :when (seq images)]
-                                  [pack-id {:name             (or (:display_name pack-info) pack-id)
-                                            :avatar           (:avatar_url pack-info)
-                                            :is-sticker-pack? is-sticker?
-                                            :images           images}]))]
+   (let [structured-packs
+         (into {}
+               (for [{:keys [pack-id data]} (remove nil? fetched-packs)
+                     :let [clj-data    (if (map? data) data (js->clj data :keywordize-keys true))
+                           raw-images  (or (:images clj-data) (:items clj-data))
+                           pack-info   (or (:pack clj-data) clj-data)
+                           usage-set   (set (:usage pack-info []))
+                           is-sticker? (or (:is-sticker-pack? pack-info)
+                                           (contains? usage-set "sticker"))
+                           images      (into {}
+                                             (for [[raw-k v] raw-images
+                                                   :let [sc  (clean-shortcode raw-k)
+                                                         uri (or (:uri v) (:url v))]
+                                                   :when (and (seq sc) uri)]
+                                               [sc {:id               (or (:id v) (str pack-id ":" sc))
+                                                    :shortcode        sc
+                                                    :uri              uri
+                                                    :url              uri
+                                                    :info             (:info v)
+                                                    :search-text      (:search-text v)
+                                                    :is-unicode?      false
+                                                    :is-sticker-pack? is-sticker?}]))]
+                     :when (seq images)]
+                 [pack-id {:name             (or (:name pack-info) (:display_name pack-info) pack-id)
+                           :avatar           (or (:avatar pack-info) (:avatar_url pack-info))
+                           :is-sticker-pack? is-sticker?
+                           :images           images}]))]
      (if (= source-type :account)
        (assoc-in db [:emoji/packs :account] structured-packs)
        (assoc-in db [:emoji/packs source-type source-id] structured-packs)))))
