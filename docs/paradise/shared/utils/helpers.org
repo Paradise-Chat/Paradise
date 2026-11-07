@@ -72,6 +72,22 @@ throw an error.
    :del        #{:data-md}})
 
 (def non-text-tags #{:style :script :textarea :option :noscript :reply-quote :mx-reply})
+
+(defn clean-shortcode [raw]
+  (-> (if (keyword? raw) (name raw) (str raw))
+      (str/replace #":" "")
+      str/trim))
+
+(defn format-shortcode [raw]
+  (let [cleaned (clean-shortcode raw)]
+    (if (seq cleaned)
+      (str ":" cleaned ":")
+      ":emote:")))
+
+(defn media-uri? [s]
+  (and (string? s)
+       (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
+
   (if (string? style-str)
     (->> (str/split style-str #";")
          (remove str/blank?)
