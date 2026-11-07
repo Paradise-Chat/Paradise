@@ -20,10 +20,12 @@
    [paradise.ui.overlays.rooms]
    [paradise.ui.overlays.profiles]
    [paradise.ui.overlays.reactions]
+   [paradise.ui.overlays.tray :as tray]
+   [paradise.ui.overlays.titlebar :refer [desktop-titlebar]]
    [paradise.shared.plugin-storage]
    [paradise.ui.auth.events :refer [login-screen]]
    [paradise.ui.container.call.call-container :refer [persistent-call-container]]
-   [paradise.ui.container.call.native :refer [init-native-listeners!]]
+   [paradise.ui.container.call.native :as call]
    [paradise.shared.client.config :refer [load-config check-remote-version load-i18n eve-enabled?]]
    [paradise.shared.client.state :refer [!config]]
    [paradise.shared.client.session-store :as store]
@@ -65,7 +67,6 @@
  (fn [_ _]
    default-db
    ))
-
 
 (re-frame/reg-fx
  :ui/blur-active
@@ -147,7 +148,6 @@
  (fn [db _]
    (get-in db [:config :version] "Unknown")))
 
-
 (re-frame/reg-sub
  :i18n/locale
  (fn [db _] (:locale db)))
@@ -223,7 +223,7 @@
       :ui/hotswap-css href})))
 
 
-(defui booting-screen []
+(defn ^:ui booting-screen []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
     [:div.boot-container
      [:div.boot-content
@@ -255,55 +255,53 @@
                 (fn [_]
                   (re-frame/dispatch [:native/hardware-back]))))
 
-
-(defui main-layout []
+(defn ^:ui main-layout []
   (r/with-let [!drag-state (r/atom {:start-x nil :dx 0})]
     (let [auth-status   @(re-frame/subscribe [:auth/status])
           sidebar-open? @(re-frame/subscribe [:ui/sidebar-open?])
           update-ready? @(re-frame/subscribe [:app/update-available?])
-          platform         (.getPlatform js/Capacitor)
+          platform      (.getPlatform js/Capacitor)
           cushion       (if (= platform "ios")
                           "8px"
                           "env(safe-area-inset-bottom, 0px)")
-          swipe-props (make-swipe-handlers
-                       !drag-state
-                       {:on-end (fn [dx]
-                                  (let [start-x (:start-x @!drag-state)]
-                                    (cond
-                                      (and (not sidebar-open?) #_ (< start-x 40) (> dx 60))
-                                      (re-frame/dispatch [:ui/set-sidebar true])
-                                      (and sidebar-open? (< dx -60))
-                                      (re-frame/dispatch [:ui/set-sidebar false]))))})]
+          swipe-props   (make-swipe-handlers
+                         !drag-state
+                         {:on-end (fn [dx]
+                                    (let [start-x (:start-x @!drag-state)]
+                                      (cond
+                                        (and (not sidebar-open?) (> dx 60))
+                                        (re-frame/dispatch [:ui/set-sidebar true])
+                                        (and sidebar-open? (< dx -60))
+                                        (re-frame/dispatch [:ui/set-sidebar false]))))})]
+      [:<>
+       [desktop-titlebar]
+       (case auth-status
+         :checking [booting-screen]
+         (:logged-out :authenticating) [login-screen]
+         :logged-in
+         [:<>
+          (when update-ready?
+            [:div.global-update-banner
+             [:span "A new version of the app is available!"]
+             [:button {:on-click #(re-frame/dispatch [:app/apply-update])}
+              "Refresh"]])
 
-      (case auth-status
-        :checking [booting-screen]
-        (:logged-out :authenticating) [login-screen]
-        :logged-in
-        [:<>
-         (when update-ready?
-           [:div.global-update-banner
-            [:span "A new version of the app is available!"]
-            [:button {:on-click #(re-frame/dispatch [:app/apply-update])}
-             "Refresh"]])
-
-         [persistent-call-container]
-         (into [:div.app-root
-                (merge {:class (when sidebar-open? "sidebars-open")
-                        :style {:touch-action "pan-y"
-                                :padding-bottom cushion
-                                }}
-                       swipe-props)]
-               [[spaces-sidebar]
-                [room-list]
-                (when sidebar-open?
-                  [:div.mobile-overlay {:on-click #(re-frame/dispatch [:ui/set-sidebar false])}])
-                [container]
-                ])
-         [modal-root]
-         [popover-root]
-         [context-menu-root]
-         [global-key-listener]]
-        [:div "Unknown State"]))))
+          [persistent-call-container]
+          (into [:div.app-root
+                 (merge {:class (when sidebar-open? "sidebars-open")
+                         :style {:touch-action   "pan-y"
+                                 :padding-bottom cushion}}
+                        swipe-props)]
+                [[spaces-sidebar]
+                 [room-list]
+                 (when sidebar-open?
+                   [:div.mobile-overlay {:on-click #(re-frame/dispatch [:ui/set-sidebar false])}])
+                 [container]])
+          [modal-root]
+          [popover-root]
+          [context-menu-root]
+          [global-key-listener]]
+         [:div "Unknown State"])])))
 
 
 (defn init-window-size-listener! []
@@ -330,7 +328,8 @@
 
 (defn ^:export init []
   (re-frame/dispatch-sync [:initialize-db])
-  (init-native-listeners!)
+  (call/init-native-listeners!)
+  (tray/init-tray!)
   (re-frame/dispatch [:app/load-settings-by-stage :boot])
   (re-frame/dispatch [:app/start-boot-sequence])
   (mount-root))
@@ -396,7 +395,6 @@
                (re-frame/dispatch [:auth/set-status :logged-in])
                (re-frame/dispatch [:sdk/ignite-session]))))
          {})))))
-
 
 
 (defn ^:after-load re-render []
