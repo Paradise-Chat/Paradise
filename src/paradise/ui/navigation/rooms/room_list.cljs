@@ -5,7 +5,6 @@
    [cljs-workers.core :as main]
    [paradise.shared.client.state :as state]
    [paradise.shared.client.session-store :as store]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.shared.utils.svg :as icons]
    ["react-virtuoso" :refer [Virtuoso]]
    [paradise.ui.navigation.rooms.entry :refer [render-room-item active-call-panel]]
