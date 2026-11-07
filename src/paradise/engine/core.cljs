@@ -17,7 +17,6 @@
 
 (defn get-fallback-bootstrap [protocol]
   (let [prop-name (str (str/capitalize protocol) "EngineBootstrap")]
-    (js/console.error prop-name)
     (gobj/get js/globalThis prop-name)))
 
 (defn load-protocol-engine! [protocol]
