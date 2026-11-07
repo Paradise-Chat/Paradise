@@ -18,14 +18,12 @@ This is more or less where the layout and control of the container's contents wi
    [paradise.ui.container.members :refer [member-list]]
    [paradise.ui.container.search :refer [search]]
    [paradise.ui.container.pins :refer [pins]]
-   [paradise.shared.utils.helpers :refer [fetch-room-state]]
    [paradise.shared.utils.svg :as icons]
    [taoensso.timbre :as log]
    [promesa.core :as p]
    [reagent.core :as r]
    [reagent.dom.client :as rdom]
-   [paradise.shared.plugins :as plugins]
-   [paradise.shared.utils.macros :refer [defui]]))
+   [paradise.shared.plugins :as plugins]))
 #+end_src
 
 
