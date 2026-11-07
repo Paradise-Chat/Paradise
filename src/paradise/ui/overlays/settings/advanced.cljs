@@ -1,12 +1,13 @@
 (ns paradise.ui.overlays.settings.advanced
   (:require
-   [paradise.shared.plugins :as plugins]
+   [paradise.ui.overlays.settings.plugins :as plugins]
+   [paradise.ui.overlays.settings.registry :as registry]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 
 (defn ^:ui advanced-preferences-view []
-  (let [tr          @(re-frame/subscribe [:i18n/tr])
-        policy      @(re-frame/subscribe [:settings/media-preview-policy])
+  (let [tr           @(re-frame/subscribe [:i18n/tr])
+        policy       @(re-frame/subscribe [:settings/media-preview-policy])
         previews-on? (= policy :on)]
     [:div.settings-section
      [:h3.settings-subheading
@@ -32,10 +33,13 @@
 
 (defn ^:ui advanced-plugins-view []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [:div.settings-section
+    [:<>
      [:p.settings-description
       (tr [:settings.advanced/description])]
      [plugins/plugins-installer]]))
+
+(defn ^:ui advanced-registries-view []
+  [registry/registries-and-engines-panel])
 
 (defn ^:ui advanced-tab []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
@@ -45,19 +49,26 @@
         [:h2.settings-heading
          (tr [:settings.advanced/title])]]
 
-       [:div.settings-subtabs
-        [:button.settings-subtab
+       [:div.settings-actions.settings-subtabs
+        [:button.settings-button.settings-subtab
          {:class (when (= @!active-sub-tab :preferences)
                    "is-active")
           :on-click #(reset! !active-sub-tab :preferences)}
          (tr [:settings.advanced/section-prefs])]
 
-        [:button.settings-subtab
+        [:button.settings-button.settings-subtab
          {:class (when (= @!active-sub-tab :plugins)
                    "is-active")
           :on-click #(reset! !active-sub-tab :plugins)}
-         (tr [:settings.plugins/section-title])]]
+         (tr [:settings.plugins/section-title])]
+
+        [:button.settings-button.settings-subtab
+         {:class (when (= @!active-sub-tab :registries)
+                   "is-active")
+          :on-click #(reset! !active-sub-tab :registries)}
+         (tr [:settings.registry/section-title])]]
 
        (case @!active-sub-tab
          :preferences [advanced-preferences-view]
-         :plugins [advanced-plugins-view])])))
+         :plugins     [advanced-plugins-view]
+         :registries  [advanced-registries-view])])))
