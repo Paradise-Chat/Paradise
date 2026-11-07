@@ -589,6 +589,73 @@ export class ElectronCapacitorApp {
         return this.customScheme;
     }
 
+    updateTrayMenu(customItems: DynamicTrayItem[] = this.CustomTrayItems): void {
+        this.CustomTrayItems = customItems;
+        if (!this.TrayIcon) return;
+
+        const dynamicTemplate: MenuItemConstructorOptions[] = customItems.map(
+            (item) => {
+                if (item.type === "separator") {
+                    return { type: "separator" };
+                }
+                return {
+                    label: item.label || "",
+                    type: item.type || "normal",
+                    checked: item.checked,
+                    enabled: item.enabled ?? true,
+                    click: () => {
+                        if (
+                            item.id &&
+                            this.MainWindow &&
+                            !this.MainWindow.isDestroyed()
+                        ) {
+                            this.MainWindow.webContents.send(
+                                "paradise:tray-action",
+                                item.id
+                            );
+                        }
+                    },
+                };
+            }
+        );
+
+        const isVisible =
+            this.MainWindow && !this.MainWindow.isDestroyed()
+                ? this.MainWindow.isVisible()
+                : false;
+
+        const baseTemplate: (MenuItem | MenuItemConstructorOptions)[] = [
+            {
+                label: isVisible ? "Hide Paradise" : "Show Paradise",
+                click: () => {
+                    if (!this.MainWindow || this.MainWindow.isDestroyed()) {
+                        return;
+                    }
+                    if (this.MainWindow.isVisible()) {
+                        this.MainWindow.hide();
+                    } else {
+                        this.MainWindow.show();
+                        this.MainWindow.focus();
+                    }
+                    this.updateTrayMenu();
+                },
+            },
+            { type: "separator" },
+            ...this.TrayMenuTemplate,
+        ];
+
+        const fullTemplate =
+            dynamicTemplate.length > 0
+                ? [
+                      ...dynamicTemplate,
+                      { type: "separator" as const },
+                      ...baseTemplate,
+                  ]
+                : baseTemplate;
+
+        this.TrayIcon.setContextMenu(Menu.buildFromTemplate(fullTemplate));
+    }
+
     async init(): Promise<void> {
         const icon = nativeImage.createFromPath(
             join(
@@ -601,13 +668,13 @@ export class ElectronCapacitorApp {
             defaultWidth: 1000,
             defaultHeight: 800,
         });
-        // Setup preload script path and construct our main window.
         const preloadPath = join(
             app.getAppPath(),
             "build",
             "src",
             "preload.js"
         );
+
         this.MainWindow = new BrowserWindow({
             icon,
             show: false,
