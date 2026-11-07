@@ -328,7 +328,7 @@ environment."}
     :time-12 "12-hour (1:00 PM)"}
    :about
    {:title "About"
-    :description "%1 is a lightweight, modern Matrix client built with ClojureScript and Re-frame utilizing the Rust-SDK through WASM. Somewhat documented using org-mode."
+    :description "%1 is a lightweight, modern, multi-platform chat client built with ClojureScript and Re-frame utilizing dynamically loaded protocol engines to provide multi-protocol support alongside runtime loadable plugins that can change virtually anything you could hope to change at runtime and more. Somewhat documented using org-mode while using Emacs."
     :updates-title "Updates"
     :updates-desc "The app automatically checks for updates in the background, but you can also check manually."
     :check-updates "Check for Updates"}
