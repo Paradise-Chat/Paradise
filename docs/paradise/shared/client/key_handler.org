@@ -89,6 +89,122 @@ Interactions with storage and the IPC
 #+end_src
 
 
+**** Key Registering
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
+(defn- normalize-key-token [k]
+  (let [low (str/lower-case (str k))]
+    (case low
+      ("control" "ctrl" "commandorcontrol" "cmdorctrl" "meta" "cmd" "super") "mod"
+      ("alt" "option") "alt"
+      "shift" "shift"
+      " " "space"
+      "escape" "esc"
+      low)))
+
+(defn accelerator->signature [accelerator]
+  (when (and accelerator (not (str/blank? accelerator)))
+    (let [tokens (->> (str/split accelerator #"\+")
+                      (map str/trim)
+                      (remove str/blank?)
+                      (map normalize-key-token))
+          mods   (vec (sort (distinct (filter #{"mod" "alt" "shift"} tokens))))
+          main   (first (remove #{"mod" "alt" "shift"} tokens))]
+      (when main
+        (str/join "+" (conj mods main))))))
+
+(defn event->accelerator [^js e]
+  (let [raw-key  (or (.-key e) "")
+        low-key  (str/lower-case raw-key)
+        mod-key? (#{"control" "shift" "alt" "meta"} low-key)]
+    (when-not mod-key?
+      (let [mods     (cond-> []
+                       (or (.-ctrlKey e) (.-metaKey e)) (conj "CommandOrControl")
+                       (.-altKey e)                     (conj "Alt")
+                       (.-shiftKey e)                   (conj "Shift"))
+            norm-key (cond
+                       (= raw-key " ")        "Space"
+                       (= low-key "escape")   "Esc"
+                       (= (count raw-key) 1)  (str/upper-case raw-key)
+                       :else                  raw-key)]
+        (when (or (seq mods) (re-matches #"^F\d+$" norm-key))
+          (str/join "+" (conj mods norm-key)))))))
+
+(defn format-accelerator [accelerator]
+  (if (str/blank? accelerator)
+    "Unbound"
+    (let [mac? (and (exists? js/navigator)
+                    (str/includes? (str/lower-case (or (.-platform js/navigator) "")) "mac"))]
+      (-> accelerator
+          (str/replace "CommandOrControl" (if mac? "Cmd" "Ctrl"))
+          (str/replace "CmdOrCtrl" (if mac? "Cmd" "Ctrl"))
+          (str/replace "+" " + ")))))
+
+(defn- editable-target? [^js el]
+  (when el
+    (let [tag (some-> (.-tagName el) str/lower-case)]
+      (or (= tag "input")
+          (= tag "textarea")
+          (= tag "select")
+          (boolean (.-isContentEditable el))))))
+
+(defn effective-keybind [entry overrides]
+  (let [ov (get overrides (:id entry))]
+    (cond
+      (map? ov)
+      (merge entry
+             {:accelerator (get ov "accelerator" (:accelerator ov (:accelerator entry)))
+              :global?     (boolean (get ov "global?" (:global? ov (:global? entry))))})
+
+      (string? ov)
+      (assoc entry :accelerator ov)
+
+      :else
+      entry)))
+
+(defn trigger-action! [action-id]
+  (let [norm-id (normalize-id action-id)]
+    (when-let [{:keys [dispatch on-trigger]} (get (all-keybind-specs) norm-id)]
+      (let [now  (js/Date.now)
+            prev (get @!last-fired norm-id 0)]
+        (when (> (- now prev) 150)
+          (swap! !last-fired assoc norm-id now)
+          (when dispatch
+            (re-frame/dispatch dispatch))
+          (when on-trigger
+            (on-trigger)))))))
+
+(defn sync-global-shortcuts! [overrides]
+  (when-let [^js bridge (get-shortcuts-bridge)]
+    (let [payload (->> (vals (all-keybind-specs))
+                       (map #(effective-keybind % overrides))
+                       (keep (fn [{:keys [id accelerator global? enabled?]}]
+                               (when (and (not= enabled? false)
+                                          (true? global?)
+                                          (not (str/blank? accelerator)))
+                                 {:id          (str id)
+                                  :accelerator accelerator})))
+                       vec)]
+      (.setBindings bridge (clj->js payload)))))
+
+(defn register-keybind!
+  [{:keys [id] :as spec}]
+  (let [norm-id (normalize-id id)
+        entry   (merge {:global? false :allow-in-input? true}
+                       spec
+                       {:id norm-id})]
+    (swap! !registry assoc norm-id entry)
+    (when (exists? db/app-db)
+      (sync-global-shortcuts! (get-in @db/app-db [:settings :keybinds] {})))
+    norm-id))
+
+(defn unregister-keybind! [id]
+  (swap! !registry dissoc (normalize-id id))
+  (when (exists? db/app-db)
+    (sync-global-shortcuts! (get-in @db/app-db [:settings :keybinds] {}))))
+#+end_src
+
     (finally
       (.removeEventListener js/window "keydown" handler))))
 #+end_src
