@@ -46,10 +46,12 @@ actual UI components themselves.
    [paradise.ui.overlays.rooms]
    [paradise.ui.overlays.profiles]
    [paradise.ui.overlays.reactions]
+   [paradise.ui.overlays.tray :as tray]
+   [paradise.ui.overlays.titlebar :refer [desktop-titlebar]]
    [paradise.shared.plugin-storage]
    [paradise.ui.auth.events :refer [login-screen]]
    [paradise.ui.container.call.call-container :refer [persistent-call-container]]
-   [paradise.ui.container.call.native :refer [init-native-listeners!]]
+   [paradise.ui.container.call.native :as call]
    [paradise.shared.client.config :refer [load-config check-remote-version load-i18n eve-enabled?]]
    [paradise.shared.client.state :refer [!config]]
    [paradise.shared.client.session-store :as store]
@@ -110,7 +112,6 @@ https://day8.github.io/re-frame/application-state/
 
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
-
 (re-frame/reg-fx
  :ui/blur-active
  (fn [_]
@@ -190,7 +191,6 @@ https://day8.github.io/re-frame/application-state/
  :app/version
  (fn [db _]
    (get-in db [:config :version] "Unknown")))
-
 #+end_src
 
 
