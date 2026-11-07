@@ -1,14 +1,12 @@
 (ns paradise.shared.utils.helpers
   (:require
    [net :as net]
-   [paradise.media.component :refer [media media-native]]
    [clojure.string :as str]
    [promesa.core :as p]
    [hickory.core :as h]
    [hickory.render :as hr]
    [clojure.walk :as walk]
-   [taoensso.timbre :as log]
-   ))
+   [taoensso.timbre :as log]))
 
 (def max-tag-nesting 100)
 
