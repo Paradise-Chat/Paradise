@@ -74,8 +74,8 @@ and the tab completion.
    (assoc db :suggestion/menu
           {:active? true
            :type    type
-           :rect    {:top (.-top rect)
-                     :left (.-left rect)
+           :rect    {:top    (.-top rect)
+                     :left   (.-left rect)
                      :height (.-height rect)}
            :query   ""
            :index   0})))
@@ -100,12 +100,16 @@ and the tab completion.
                     (mod (inc current) max-items)
                     (mod (dec current) max-items)))))))
 
-(re-frame/reg-sub :suggestion/state (fn [db _] (:suggestion/menu db)))
+(re-frame/reg-sub
+ :suggestion/state
+ (fn [db _]
+   (:suggestion/menu db)))
 
 (re-frame/reg-event-db
  :suggestion/set-index
  (fn [db [_ idx]]
    (assoc-in db [:suggestion/menu :index] idx)))
+
 #+end_src
 
 
