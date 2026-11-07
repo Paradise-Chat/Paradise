@@ -142,7 +142,7 @@ Not entirely important to read, but certainly interesting.
      [:div.settings-tab
       {:class (when (= active-tab :voice-video) "is-active")
        :on-click #(re-frame/dispatch [:settings/set-tab :voice-video])}
-      "Voice & Video"]
+      (tr [:settings.tabs/voice-video])]
 
      [:div.settings-group-label {:style {:margin-top "1rem"}}
       (tr [:settings.groups/app])]
