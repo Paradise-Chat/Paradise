@@ -1,0 +1,101 @@
+
+** Titlebar
+
+**** Preface
+
+Desktop apps commonly expect a title bar, but the classic GTK
+tends to be rather ugly. Instead we'd rather define a nicely
+customizable title bar where we can add some neat behavior later.
+For now it'll just do the expected minimize, maximize, and quit.
+Oh, and show the title.
+
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
+(ns paradise.ui.overlays.titlebar
+  (:require
+   ["@capacitor/core" :refer [Capacitor]]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.shared.client.key-handler :refer [keybind-spec]]
+   [reagent.core :as r]))
+#+end_src
+
+
+
+**** Code
+
+
+***** Platform Check
+
+Really only ever want this to exist on the electron build.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
+(defn desktop-app? []
+  (= (.getPlatform Capacitor) "electron"))
+
+(defn- get-window-bridge ^js []
+  (when (desktop-app?)
+    (.-paradiseWindow js/globalThis)))
+#+end_src
+ 
+
+
+***** Titlebar component
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
+(defn ^:ui desktop-titlebar []
+  (when-let [^js win-bridge (get-window-bridge)]
+    (r/with-let [!maximized? (r/atom false)
+                 _           (-> (.isMaximized win-bridge)
+                                 (.then #(reset! !maximized? (boolean %))))
+                 unlisten    (.onMaximizedChange win-bridge
+                                                 #(reset! !maximized? (boolean %)))]
+      (let [mac? (= (.-platform win-bridge) "darwin")]
+        [:header.desktop-titlebar
+         [:div.desktop-titlebar-brand
+          {:style {:padding-left (if mac? "72px" "12px")}}
+          [:span.desktop-titlebar-title "Paradise"]]
+
+         (when-not mac?
+           [:div.desktop-titlebar-controls
+            [:button.desktop-titlebar-btn
+             {:title    "Minimize"
+              :on-click #(.minimize win-bridge)}
+             [icons/minimize {:width "12" :height "12"}]]
+
+            [:button.desktop-titlebar-btn
+             {:title    (if @!maximized? "Restore" "Maximize")
+              :on-click #(.toggleMaximize win-bridge)}
+             (if @!maximized?
+               [icons/restore {:width "12" :height "12"}]
+               [icons/maximize {:width "12" :height "12"}])]
+
+            [:button.desktop-titlebar-btn.is-close
+             {:title    "Close"
+              :on-click #(.close win-bridge)}
+             [icons/exit {:width "12" :height "12"}]]])])
+      (finally
+        (when (fn? unlisten)
+          (unlisten))))))
+#+end_src
+
+
+
+***** Dev Tools Keybind
+
+Not directly related, but prior you would normally access dev tools via the
+title bar.
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
+(defmethod keybind-spec :ui/toggle-devtools [_]
+  {:id              "ui/toggle-devtools"
+   :label-key       :settings.keybinds/action-toggle-devtools
+   :accelerator     "CommandOrControl+Shift+I"
+   :global?         false
+   :allow-in-input? true
+   :on-trigger      (fn []
+                      (when-let [^js win (.-paradiseWindow js/globalThis)]
+                        (.toggleDevTools win)))})
+#+end_src
