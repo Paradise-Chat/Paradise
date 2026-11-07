@@ -186,6 +186,61 @@ function rebuildCustomTrayMenu(
     customTray.setContextMenu(Menu.buildFromTemplate(fullTemplate));
 }
 
+
+export interface ShortcutBinding {
+    id: string;
+    accelerator: string;
+}
+
+const registeredAccelerators = new Set<string>();
+
+function syncGlobalShortcuts(
+    bindings: ShortcutBinding[]
+): Record<string, boolean> {
+    for (const acc of registeredAccelerators) {
+        try {
+            globalShortcut.unregister(acc);
+        } catch {}
+    }
+    registeredAccelerators.clear();
+
+    const results: Record<string, boolean> = {};
+
+    for (const item of bindings) {
+        if (!item?.id || !item?.accelerator) continue;
+        try {
+            const ok = globalShortcut.register(item.accelerator, () => {
+                const win = myCapacitorApp.getMainWindow();
+                if (win && !win.isDestroyed()) {
+                    win.webContents.send(
+                        "paradise:shortcut-triggered",
+                        item.id
+                    );
+                }
+            });
+            if (ok) {
+                registeredAccelerators.add(item.accelerator);
+            }
+            results[item.id] = Boolean(ok);
+        } catch {
+            results[item.id] = false;
+        }
+    }
+
+    return results;
+}
+
+
+app.on("will-quit", () => {
+    try {
+        globalShortcut.unregisterAll();
+    } catch {}
+});
+
+app.on("before-quit", () => {
+    isQuitting = true;
+});
+
     setupContentSecurityPolicy(myCapacitorApp.getCustomURLScheme());
     await myCapacitorApp.init();
 
