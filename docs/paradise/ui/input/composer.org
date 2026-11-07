@@ -156,47 +156,57 @@ so below is a helper function that converts the node BACK to Mxc on send.
 ***** Custom TipTap Node
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
+(defn extract-editor-payload [editor]
+  (when editor
+    {:text (.getText editor)
+     :html (get-formatted-body editor)
+     :ast  (editor->ast editor)}))
+
 
 (defn emote-node-view [props]
   (let [node  (:node props)
         attrs (.-attrs node)
-        mxc   (or (aget attrs "mxc") (aget attrs "src"))
-        alt   (aget attrs "shortcode")]
+        uri   (or (aget attrs "uri") (aget attrs "src"))
+        alt   (format-shortcode (aget attrs "shortcode"))]
     [:> NodeViewWrapper {:as "span" :style {:display "inline-block" :vertical-align "middle"}}
      [media
-      {:mxc   mxc
+      {:uri   uri
        :class "chat-input-emote"
        :style {:height "1.5em" :width "auto"}
        :alt   alt}]]))
 
+(defn- parse-emote-dom-node [^js node]
+  (let [src (.getAttribute node "src")
+        uri (or (.getAttribute node "data-emote-uri")
+                src)]
+    #js {:id        (.getAttribute node "data-emote-id")
+         :uri       uri
+         :src       (or uri src)
+         :shortcode (clean-shortcode
+                     (or (.getAttribute node "shortcode")
+                         (.getAttribute node "alt")
+                         (.getAttribute node "title")))}))
+
 (def custom-emote
   (.create Node
-   #js {:name "customEmote"
-        :inline true
-        :group "inline"
-        :selectable true
-        :atom true
-        :addAttributes (fn [] #js {:src #js {:default nil}
-                                   :shortcode #js {:default nil}})
-        :addNodeView (fn []
-                       (ReactNodeViewRenderer (r/reactify-component emote-node-view)))
-        :renderText (fn [^js props]
-              (let [shortcode (str (.. props -node -attrs -shortcode))]
-                (if (and (seq shortcode)
-                         (not (str/starts-with? shortcode ":")))
-                  (str ":" shortcode ":")
-                  (if (seq shortcode)
-                    shortcode
-                    ":emote:"))))
-        :parseHTML (fn []
-                     #js [#js {:tag "img[data-emote]"}
-                          #js {:tag "img[data-mx-emoticon]"}
-                          #js {:tag "img"
-                               :getAttrs (fn [^js node]
-                                           #js {:src (.getAttribute node "mxc")
-                                                :shortcode (or (.getAttribute node "alt")
-                                                               (.getAttribute node "title"))})}])
-        :renderHTML renderHtml}))
+   #js {:name          "customEmote"
+        :inline        true
+        :group         "inline"
+        :selectable    true
+        :atom          true
+        :addAttributes (fn []
+                         #js {:id        #js {:default nil}
+                              :uri       #js {:default nil}
+                              :src       #js {:default nil}
+                              :shortcode #js {:default nil}})
+        :addNodeView   (fn []
+                         (ReactNodeViewRenderer (r/reactify-component emote-node-view)))
+        :renderText    (fn [^js props]
+                         (format-shortcode (.. props -node -attrs -shortcode)))
+        :parseHTML     (fn []
+                         #js [#js {:tag "img[data-emote]" :getAttrs parse-emote-dom-node}
+                              #js {:tag "img"             :getAttrs parse-emote-dom-node}])
+        :renderHTML    renderHtml}))
 #+end_src
 
 
@@ -211,10 +221,10 @@ https://tiptap.dev/docs/editor/core-concepts/extensions
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (defn safe-extract-files [event]
-  (let [dt (.-dataTransfer event)
-        cd (.-clipboardData event)
+  (let [dt     (.-dataTransfer event)
+        cd     (.-clipboardData event)
         source (or dt cd)
-        arr (js/Array.)]
+        arr    (js/Array.)]
     (when source
       (let [files (.-files source)
             items (.-items source)]
@@ -240,7 +250,7 @@ https://tiptap.dev/docs/editor/core-concepts/extensions
              #js [(new Plugin
                        #js {:key (new PluginKey "fileDropHandler")
                             :props #js {:handleDOMEvents
-                                        #js {:drop (fn [view event]
+                                        #js {:drop (fn [_view event]
                                                      (try
                                                        (let [files (safe-extract-files event)]
                                                          (if (pos? (.-length files))
@@ -282,15 +292,15 @@ This determines the 'submit' behavior for the editor.
                 :addKeyboardShortcuts
                 (fn []
                   (this-as this
-                           #js {"Enter" (fn [context]
-                                          (let [editor  (.-editor context)
-                                                text    (.getText editor)
-                                                html    (.getHTML editor)
-                                                on-send (.. this -options -onSend)]
-                                            (when (and on-send (on-send text html))
-                                              (.commands.clearContent editor true))
-                                            true))
-                                "Shift-Enter" (fn [] false)}))}))
+                    #js {"Enter" (fn [context]
+                                   (let [editor  (.-editor context)
+                                         text    (.getText editor)
+                                         html    (get-formatted-body editor)
+                                         on-send (.. this -options -onSend)]
+                                     (when (and on-send (on-send text html))
+                                       (.commands.clearContent editor true))
+                                     true))
+                         "Shift-Enter" (fn [] false)}))}))
 #+end_src
 
 
@@ -304,49 +314,49 @@ re-frame tends to avoid them if possible. This is one of those if possible cases
 so we stick with what the complex component expects.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (defn tiptap-component [^js props]
-  (let [active-id    (.. props -children -activeId)
-        on-send      (.. props -children -onSend)
-        on-files     (.. props -children -onFiles)
-        on-change    (.. props -children -onChange)
-        loaded-text  (.. props -children -loadedText)
-        cached-html  (.. props -children -cachedHtml)
-        placeholder  (.. props -children -placeholder)
-        on-ready     (.. props -children -onEditorReady)
-        latest-cbs   (react/useRef #js {:onSend on-send :onFiles on-files})
-        _            (set! (.-current latest-cbs) #js {:onSend on-send :onFiles on-files})
-        editor (useEditor
-                #js {:extensions #js [(.configure StarterKit #js {})
-                                      (.configure Placeholder #js {:placeholder placeholder})
-                                      (.configure submit-extension
-                                                  #js {:onSend (fn [text html]
-                                                                 (let [cb (.-onSend (.-current latest-cbs))]
-                                                                   (when cb (cb text html))))})
-                                      (.configure file-drop-extension
-                                                  #js {:onFiles (fn [files]
-                                                                  (let [cb (.-onFiles (.-current latest-cbs))]
-                                                                    (when cb (cb files))))})
-                                      (.configure custom-emote #js {})
-                                      emoji-trigger
-                                      user-trigger
-                                      (.configure Link #js {:openOnClick false
-                                                            :autolink true
-                                                            :linkOnPaste true})]
-                     :content (or cached-html loaded-text "")
-                     :editable (boolean active-id)
-                     :onUpdate (fn [ctx]
-                                 (when on-change
-                                   (on-change (.getText (.-editor ctx))
-                                              (.getHTML (.-editor ctx)))))
-                     :onCreate (fn [ctx]
-                                 (when on-ready
-                                   (on-ready (.-editor ctx))))
-                     :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
-                #js [active-id])]
+  (let [active-id   (.. props -children -activeId)
+        on-send     (.. props -children -onSend)
+        on-files    (.. props -children -onFiles)
+        on-change   (.. props -children -onChange)
+        loaded-text (.. props -children -loadedText)
+        cached-html (.. props -children -cachedHtml)
+        placeholder (.. props -children -placeholder)
+        on-ready    (.. props -children -onEditorReady)
+        latest-cbs  (react/useRef #js {:onSend on-send :onFiles on-files})
+        _           (set! (.-current latest-cbs) #js {:onSend on-send :onFiles on-files})
+        editor      (useEditor
+                     #js {:extensions #js [(.configure StarterKit #js {})
+                                           (.configure Placeholder #js {:placeholder placeholder})
+                                           (.configure submit-extension
+                                                       #js {:onSend (fn [text html]
+                                                                      (let [cb (.-onSend (.-current latest-cbs))]
+                                                                        (when cb (cb text html))))})
+                                           (.configure file-drop-extension
+                                                       #js {:onFiles (fn [files]
+                                                                       (let [cb (.-onFiles (.-current latest-cbs))]
+                                                                         (when cb (cb files))))})
+                                           (.configure custom-emote #js {})
+                                           emoji-trigger
+                                           user-trigger
+                                           (.configure Link #js {:openOnClick false
+                                                                 :autolink    true
+                                                                 :linkOnPaste true})]
+                          :content     (or cached-html loaded-text "")
+                          :editable    (boolean active-id)
+                          :onUpdate    (fn [ctx]
+                                         (when on-change
+                                           (let [ed (.-editor ctx)]
+                                             (on-change (.getText ed)
+                                                        (get-formatted-body ed)))))
+                          :onCreate    (fn [ctx]
+                                         (when on-ready
+                                           (on-ready (.-editor ctx))))
+                          :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
+                     #js [active-id])]
 
     (react/useEffect
      (fn []
-       (when (and editor loaded-text
-                  (.-schema editor))
+       (when (and editor loaded-text (.-schema editor))
          (let [current-html (.getHTML editor)]
            (when (not= current-html loaded-text)
              (.commands.setContent editor loaded-text))))
@@ -356,14 +366,11 @@ so we stick with what the complex component expects.
     (if-not editor
       (react/createElement "div" #js {:className "timeline-input-wrapper"}
                            (react/createElement "div" #js {:className "tiptap-editor-surface"}))
-
       (react/createElement "div"
-                           #js {:key (str "editor-surface-" active-id)
+                           #js {:key       (str "editor-surface-" active-id)
                                 :className "timeline-input-wrapper"
-                                :onClick (fn [] (.commands.focus editor))}
+                                :onClick   (fn [] (.commands.focus editor))}
                            (react/createElement EditorContent #js {:editor editor})))))
-
-
 #+end_src
 
 ***** CSS
