@@ -225,6 +225,22 @@
 The Guix project for inspiration. Similarly, Clojure. Emacs for showing that
 code can be truly modular and that the user should own and control their
 environment."}
+   :keybinds {:title "Keybinds"
+              :description "Configure in-app and system-wide keyboard shortcuts."
+              :shortcuts-subheading "Shortcuts"
+              :global-hint "Use the toggle next to a shortcut to allow it to trigger while Paradise is in the background."
+              :global-toggle-tooltip "Enable system-wide shortcut"
+              :scope-global "Active system-wide"
+              :scope-in-app "Active while window is focused"
+              :press-keys "Press keys... (Esc to cancel)"
+              :reset "Reset"
+              :reset-all "Reset All"
+              :action-quick-switcher "Open Quick Switcher"
+              :action-toggle-mute "Toggle Microphone Mute"
+              :action-toggle-deafen "Toggle Deafen Audio"
+              :action-toggle-share "Toggle Screen Share"
+              :action-toggle-devtools "Toggle Developer Tools"
+              :action-hangup "Disconnect Call"}
    :advanced {:description  "Install custom modifications. Proceed with caution."
               :title "Plugins & Themes"
               :section-prefs "Preferences"
