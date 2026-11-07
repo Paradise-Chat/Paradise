@@ -61,7 +61,7 @@ switching.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/quick_switcher.cljs
-(defui quick-switcher-content []
+(defn ^:ui quick-switcher-content []
   (let [tr        @(re-frame/subscribe [:i18n/tr])
         rooms-map @(re-frame/subscribe [:rooms/unfiltered-indexed-map])
         rooms     (vals rooms-map)
