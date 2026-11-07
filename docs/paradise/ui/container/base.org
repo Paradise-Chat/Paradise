@@ -50,7 +50,7 @@ This is more or less where the layout and control of the container's contents wi
 **** Layout
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/base.cljs
-(defui main-content []
+(defn ^:ui main-content []
   (let [active-room  @(re-frame/subscribe [:rooms/active-id])
         main-focus   @(re-frame/subscribe [:container/main-focus])]
    [:div.main-content
@@ -60,7 +60,7 @@ This is more or less where the layout and control of the container's contents wi
         :timeline [timeline]
         )]))
 
-(defui side-content [side-panel]
+(defn ^:ui side-content [side-panel]
   (let [side-panel   @(re-frame/subscribe [:container/side-panel])
         tr           @(re-frame/subscribe [:i18n/tr])]
     (when-let [panel side-panel]
@@ -86,7 +86,7 @@ This is more or less where the layout and control of the container's contents wi
            :search   [search]
            :pins     [pins])]])))
 
-(defui container []
+(defn ^:ui container []
   (let [side-panel   @(re-frame/subscribe [:container/side-panel])]
     [:div.room-layout
      {:class (when side-panel "with-sidebar")}
