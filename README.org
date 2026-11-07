@@ -84,8 +84,23 @@ as analogous to Babel. So we must make our way to Paradise. Many individuals hav
 or finding Paradise, but the goal for this project is to provide people perhaps a small slice of paradise.
 
 A goal for Paradise is modularity on any device you choice to use. As an extra, I'd like the core to be modular
-as well so that it isn't inherently locked to being a Matrix client. Instead it should be agnostic of
-protocol.
+as well so that it isn't inherently locked to being a Matrix client. Instead it should be agnostic of protocol.
+
+
+
+#+begin_verse
+I wanted all things
+To seem to make some sense,
+So we could all be happy, yes,
+Instead of tense.
+And I made up lies
+So that they all fit nice,
+And I made this sad world
+A par-a-dise.
+- Kurt Vonnegut, Cat's Cradle
+#+end_verse
+
+
 
 
 ***** Set-up
