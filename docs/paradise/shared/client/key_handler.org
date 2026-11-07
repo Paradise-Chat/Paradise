@@ -63,20 +63,32 @@ module namespaces themselves.
 #+end_src
 
 
-**** Global Key Listener
+**** Bridge and Storage
 
+Interactions with storage and the IPC
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
-(defui global-key-listener []
-  (r/with-let [handler (fn [e]
-                         (when (and (= (.-key e) "k")
-                                    (or (.-metaKey e) (.-ctrlKey e)))
-                           (.preventDefault e)
-                           (re-frame/dispatch [:ui/open-modal :quick-switcher
-                                               {:backdrop-props {:class "lightbox-backdrop"}
-                                                :window-props   {:style {:background "transparent"
-                                                                      :box-shadow "none"}}}])))]
-    (.addEventListener js/window "keydown" handler)
+(defn- get-shortcuts-bridge ^js []
+  (.-paradiseShortcuts js/globalThis))
+
+(defn global-shortcuts-supported? []
+  (some? (get-shortcuts-bridge)))
+
+(defn- load-stored-overrides []
+  (when (exists? js/localStorage)
+    (try
+      (when-let [raw (.getItem js/localStorage storage-key)]
+        (js->clj (js/JSON.parse raw) :keywordize-keys false))
+      (catch :default _ nil))))
+
+(defn- save-stored-overrides! [overrides]
+  (when (exists? js/localStorage)
+    (try
+      (.setItem js/localStorage storage-key (js/JSON.stringify (clj->js (or overrides {}))))
+      (catch :default _ nil))))
+#+end_src
+
+
     (finally
       (.removeEventListener js/window "keydown" handler))))
 #+end_src
