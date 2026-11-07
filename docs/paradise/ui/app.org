@@ -297,7 +297,7 @@ This at least begins starting that off by providing some useful enough defaults.
 We need a boot up screen for those moments where we're not quite ready.
 Making sure this is dynamic, but abstract is important for now.
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
-(defui booting-screen []
+(defn ^:ui booting-screen []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
     [:div.boot-container
      [:div.boot-content
@@ -562,8 +562,7 @@ providing the encapsulation and parsing for us.
 
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
-
-(defui main-layout []
+(defn ^:ui main-layout []
   (r/with-let [!drag-state (r/atom {:start-x nil :dx 0})]
     (let [auth-status   @(re-frame/subscribe [:auth/status])
           sidebar-open? @(re-frame/subscribe [:ui/sidebar-open?])
