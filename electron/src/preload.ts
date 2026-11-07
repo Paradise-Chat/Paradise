@@ -15,3 +15,20 @@ contextBridge.exposeInMainWorld("paradiseAudio", {
     setTarget: (target: any) =>
         ipcRenderer.invoke("paradise:set-audio-target", target),
 });
+
+
+
+contextBridge.exposeInMainWorld("paradiseTray", {
+    setMenu: (items: any[]) =>
+        ipcRenderer.invoke("paradise:set-tray-menu", items),
+    setTooltip: (tooltip: string) =>
+        ipcRenderer.invoke("paradise:set-tray-tooltip", tooltip),
+    onAction: (callback: (actionId: string) => void) => {
+        const listener = (_event: any, actionId: string) => callback(actionId);
+        ipcRenderer.on("paradise:tray-action", listener);
+        return () =>
+            ipcRenderer.removeListener("paradise:tray-action", listener);
+    },
+});
+
+
