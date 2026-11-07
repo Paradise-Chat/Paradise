@@ -726,7 +726,8 @@ when we detatch and reload (basically when you hit control + s to save).
 
 (defn ^:export init []
   (re-frame/dispatch-sync [:initialize-db])
-  (init-native-listeners!)
+  (call/init-native-listeners!)
+  (tray/init-tray!)
   (re-frame/dispatch [:app/load-settings-by-stage :boot])
   (re-frame/dispatch [:app/start-boot-sequence])
   (mount-root))
@@ -792,7 +793,6 @@ when we detatch and reload (basically when you hit control + s to save).
                (re-frame/dispatch [:auth/set-status :logged-in])
                (re-frame/dispatch [:sdk/ignite-session]))))
          {})))))
-
 
 
 (defn ^:after-load re-render []
