@@ -127,7 +127,7 @@
      (when storage-key
        (store/set-setting! storage-key final-id))
 
-     (when (and final-id (call-rtc/current-room))
+     (when (and final-id (call-rtc/driver-active?))
        (-> (call-rtc/switch-device! (name kind) final-id)
            (p/catch
             (fn [err]
@@ -138,7 +138,7 @@
 (re-frame/reg-event-fx
  :settings/apply-call-devices
  (fn [{:keys [db]} _]
-   (when (call-rtc/current-room)
+   (when (call-rtc/driver-active?)
      (doseq [[kind device-id] (get-in db [:settings :call-devices])
              :when (seq device-id)]
        (-> (call-rtc/switch-device! (name kind) device-id)
@@ -169,12 +169,8 @@
          (log/warn err "Failed to enumerate media devices")
          (reset! !error err)))))
 
-(defn- live-microphone-enabled?
-  []
-  (if-let [publication
-           (call-rtc/current-microphone-publication)]
-    (not (.-isMuted publication))
-    false))
+(defn- live-microphone-enabled? []
+  (call-rtc/live-microphone-enabled?))
 
 
 (defn- restore-live-microphone!
