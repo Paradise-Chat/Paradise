@@ -61,11 +61,7 @@ app.setName("Paradise");
 app.commandLine.appendSwitch("ozone-platform-hint", "auto");
 app.commandLine.appendSwitch(
     "enable-features",
-    "WaylandWindowDecorations,WebRTCPipeWireCapturer,WebRtcAllowInputVolumeAdjustment"
-);
-app.commandLine.appendSwitch(
-    'enable-features',
-    'PulseaudioLoopbackForScreenShare,MacLoopbackAudioForScreenShare,MacCatapSystemAudioLoopbackCapture'
+    "WaylandWindowDecorations,WebRTCPipeWireCapturer,WebRtcAllowInputVolumeAdjustment,PulseaudioLoopbackForScreenShare,MacLoopbackAudioForScreenShare,MacCatapSystemAudioLoopbackCapture,GlobalShortcutsPortal"
 );
 unhandled();
 
