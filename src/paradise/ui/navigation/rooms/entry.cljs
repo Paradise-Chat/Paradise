@@ -400,9 +400,7 @@
           high-count  (or (:highlight-count r) (:unreadMentionsCount r) 0)
           url         (or (:avatar r) (:avatarUrl r))
           depth       (or (:depth r) 0)
-          call-parts  (or (:active-room-call-participants r)
-                          (:activeRoomCallParticipants r)
-                          (:active_room_call_participants r)
+          call-parts  (or (:activeRoomCallParticipants r)
                           [])
           open-menu   (fn [e mx my membership]
                         (when e (.preventDefault e) (.stopPropagation e))
