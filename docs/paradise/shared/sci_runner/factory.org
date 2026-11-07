@@ -36,14 +36,18 @@ across the thread boundary.
         walked-body
         (walk/postwalk
          (fn [node]
-           (if (and (seq? node) (or (= 'fn (first node)) (= 'fn* (first node))))
+           (if (and (seq? node)
+                    (or (= 'fn (first node)) (= 'fn* (first node)))
+                    (not (:once (meta node)))
+                    (not (:once (meta (first node))))
+                    (not (and (symbol? (second node))
+                              (str/starts-with? (name (second node)) "state-machine"))))
              (let [fn-hash (keyword "fn" (str (hash (pr-str node))))]
                (swap! extracted-fns assoc fn-hash node)
                fn-hash)
              node))
          body)]
     [@extracted-fns walked-body]))
-
 #+end_src
 
 Ensures override is treated as valid code in the interpreted instance.
@@ -72,7 +76,6 @@ Ensures override is treated as valid code in the interpreted instance.
           (defn ~comp-name ~@(when docstring [docstring]) ~args ~@final-body)
           (swap! ~!overrides-atom assoc ~fqn
                  {:plugin-id ~plugin-id :fn ~comp-name}))))))
-
 #+end_src
 
 
