@@ -16,9 +16,11 @@ Later, we'll expand it to handle native input for features like push to talk.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
 (ns paradise.shared.client.key-handler
   (:require
+   [clojure.string :as str]
    [reagent.core :as r]
-   [paradise.shared.utils.macros :refer [defui]]
-   [re-frame.core :as re-frame]))
+   [re-frame.core :as re-frame]
+   [re-frame.db :as db]))
+#+end_src
 
 #+end_src
 
