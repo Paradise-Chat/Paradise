@@ -43,6 +43,25 @@
    :u          #{:data-md}
    :s          #{:data-md}
    :del        #{:data-md}})
+
+(def non-text-tags #{:style :script :textarea :option :noscript :reply-quote :mx-reply})
+
+(defn clean-shortcode [raw]
+  (-> (if (keyword? raw) (name raw) (str raw))
+      (str/replace #":" "")
+      str/trim))
+
+(defn format-shortcode [raw]
+  (let [cleaned (clean-shortcode raw)]
+    (if (seq cleaned)
+      (str ":" cleaned ":")
+      ":emote:")))
+
+(defn media-uri? [s]
+  (and (string? s)
+       (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
+
+(defn- parse-style-str [style-str]
   (if (string? style-str)
     (->> (str/split style-str #";")
          (remove str/blank?)
@@ -53,12 +72,12 @@
     style-str))
 
 (defn- transform-font-span [attrs]
-  (let [bg (get attrs :data-mx-bg-color)
-        fg (get attrs :data-mx-color)
+  (let [bg             (or (get attrs :data-bg-color) (get attrs :data-mx-bg-color))
+        fg             (or (get attrs :data-color) (get attrs :data-mx-color))
         existing-style (parse-style-str (get attrs :style))
-        style-map (cond-> (or existing-style {})
-                    bg (assoc :background-color bg)
-                    fg (assoc :color fg))]
+        style-map      (cond-> (or existing-style {})
+                         bg (assoc :background-color bg)
+                         fg (assoc :color fg))]
     (if (seq style-map)
       (assoc attrs :style style-map)
       attrs)))
