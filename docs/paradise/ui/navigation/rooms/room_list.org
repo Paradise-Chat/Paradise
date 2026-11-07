@@ -473,7 +473,7 @@ entire room list to reload. Hopefully not.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
-(defui filter-toggle-bar []
+(defn ^:ui filter-toggle-bar []
   (let [tr            @(re-frame/subscribe [:i18n/tr])
         active-filter @(re-frame/subscribe [:room-list/active-filter])]
     [:div.filter-bar
@@ -564,7 +564,7 @@ Now, we can also add nifty behavior for the content itself by then
 checking for the "kind" of room. For now though, this is plenty sufficient.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
-(defui virtualized-room-list [tr client room-array active-space active-room closed-drawers active-filter]
+(defn ^:ui virtualized-room-list [tr client room-array active-space active-room closed-drawers active-filter]
   (let [item-renderer (render-room-item tr client room-array active-space active-room closed-drawers active-filter)]
     [:> Virtuoso
      {:style {:height "100%" :width "100%"}
@@ -630,7 +630,7 @@ We want to make sure the component updates if our rooms change, our active space
 or our active room changes. We then add some decorating Hiccup around it to round out the
 component.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
-(defui room-list []
+(defn ^:ui room-list []
   (let [tr              @(re-frame/subscribe [:i18n/tr])
         rooms           @(re-frame/subscribe [:rooms/current-view])
         active-room     @(re-frame/subscribe [:rooms/active-id])
