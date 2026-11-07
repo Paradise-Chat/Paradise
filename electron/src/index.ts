@@ -241,11 +241,71 @@ app.on("before-quit", () => {
     isQuitting = true;
 });
 
+(async () => {
+    await app.whenReady();
+
     setupContentSecurityPolicy(myCapacitorApp.getCustomURLScheme());
     await myCapacitorApp.init();
 
+    const iconPath = join(__dirname, "../../assets/appIcon.png");
+    const trayIcon = nativeImage.createFromPath(iconPath);
+
+    customTray = new Tray(trayIcon);
+    customTray.setToolTip("Paradise");
+    rebuildCustomTrayMenu([]);
+
+    customTray.on("double-click", () => {
+        const win = myCapacitorApp.getMainWindow();
+        if (win && !win.isDestroyed()) {
+            win.show();
+            win.focus();
+            rebuildCustomTrayMenu();
+        }
+    });
+
+    customTray.on("click", () => {
+        const win = myCapacitorApp.getMainWindow();
+        if (win && !win.isDestroyed()) {
+            if (win.isVisible()) {
+                win.hide();
+            } else {
+                win.show();
+                win.focus();
+            }
+            rebuildCustomTrayMenu();
+        }
+    });
+
+    ipcMain.removeHandler("paradise:set-tray-menu");
+    ipcMain.handle(
+        "paradise:set-tray-menu",
+        (_event, items: DynamicTrayItem[]) => {
+            rebuildCustomTrayMenu(Array.isArray(items) ? items : []);
+            return true;
+        }
+    );
+
+    ipcMain.removeHandler("paradise:set-tray-tooltip");
+    ipcMain.handle("paradise:set-tray-tooltip", (_event, tooltip: string) => {
+        if (customTray) {
+            customTray.setToolTip(tooltip || "Paradise");
+        }
+        return true;
+    });
+
+
+    ipcMain.removeHandler("paradise:set-global-shortcuts");
+    ipcMain.handle(
+        "paradise:set-global-shortcuts",
+        (_event, bindings: ShortcutBinding[]) => {
+            return syncGlobalShortcuts(Array.isArray(bindings) ? bindings : []);
+        }
+    );
+
     const mainWindow = myCapacitorApp.getMainWindow();
     if (mainWindow) {
+        mainWindow.on("show", () => rebuildCustomTrayMenu());
+        mainWindow.on("hide", () => rebuildCustomTrayMenu());
         mainWindow.on("close", (event) => {
             if (!isQuitting) {
                 event.preventDefault();
@@ -260,18 +320,13 @@ app.on("before-quit", () => {
     autoUpdater.checkForUpdatesAndNotify();
 })();
 
-// When the dock icon is clicked.
 app.on("activate", async function () {
-    // On OS X it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
     if (myCapacitorApp.getMainWindow().isDestroyed()) {
         await myCapacitorApp.init();
     }
 });
 
-// Place all ipc or other electron api calls and custom functionality under this line
-
-autoUpdater.on("update-downloaded", (info) => {
+autoUpdater.on("update-downloaded", () => {
     const win = myCapacitorApp.getMainWindow();
     dialog
         .showMessageBox(win, {
@@ -287,57 +342,4 @@ autoUpdater.on("update-downloaded", (info) => {
                 autoUpdater.quitAndInstall();
             }
         });
-});
-
-let customTray: Tray | null = null;
-let isQuitting = false;
-
-app.whenReady().then(() => {
-    const iconPath = join(__dirname, "../../assets/appIcon.png");
-    const trayIcon = nativeImage.createFromPath(iconPath);
-
-    customTray = new Tray(trayIcon);
-
-    const contextMenu = Menu.buildFromTemplate([
-        {
-            label: "Open Paradise",
-            click: () => {
-                const win = myCapacitorApp.getMainWindow();
-                if (win) {
-                    win.show();
-                    win.focus();
-                }
-            },
-        },
-        { type: "separator" },
-        {
-            label: "Quit",
-            click: () => {
-                isQuitting = true;
-                app.quit();
-            },
-        },
-    ]);
-
-    customTray.setToolTip("Paradise");
-    customTray.setContextMenu(contextMenu);
-
-    customTray.on("double-click", () => {
-        const win = myCapacitorApp.getMainWindow();
-        if (win) {
-            win.show();
-            win.focus();
-        }
-    });
-    customTray.on("click", () => {
-        const win = myCapacitorApp.getMainWindow();
-        if (win) {
-            if (win.isVisible()) {
-                win.hide();
-            } else {
-                win.show();
-                win.focus();
-            }
-        }
-    });
 });
