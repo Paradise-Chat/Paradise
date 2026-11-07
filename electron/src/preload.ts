@@ -32,3 +32,17 @@ contextBridge.exposeInMainWorld("paradiseTray", {
 });
 
 
+contextBridge.exposeInMainWorld("paradiseShortcuts", {
+    setBindings: (bindings: any[]) =>
+        ipcRenderer.invoke("paradise:set-global-shortcuts", bindings),
+    onTriggered: (callback: (actionId: string) => void) => {
+        const listener = (_event: any, actionId: string) => callback(actionId);
+        ipcRenderer.on("paradise:shortcut-triggered", listener);
+        return () =>
+            ipcRenderer.removeListener("paradise:shortcut-triggered", listener);
+    },
+});
+
+
+
+
