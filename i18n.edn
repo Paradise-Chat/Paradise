@@ -197,6 +197,7 @@
           :verification "Verification"
           :accounts "Accounts"
           :notifications "Notifications"
+          :voice-video "Voice & Video"
           :language-time "Language/Time"
           :about "About"
           :advanced "Advanced"}
