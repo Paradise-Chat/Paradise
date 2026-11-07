@@ -15,16 +15,14 @@ switching.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/quick_switcher.cljs
 (ns paradise.ui.overlays.quick-switcher
-(:require
- [paradise.shared.utils.svg :as icons]
- [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
- [paradise.media.component :refer [media]]
- [paradise.shared.utils.macros :refer [defui]]
- [re-frame.core :as re-frame]
- [reagent.core :as r]
- [clojure.string :as str]
- [taoensso.timbre :as log]
- [paradise.ui.overlays.base :refer [modal-component popover-component]]))
+  (:require
+   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [clojure.string :as str]
+   [taoensso.timbre :as log]
+   [paradise.shared.client.key-handler :refer [keybind-spec]]
+   [paradise.ui.overlays.base :refer [modal-component popover-component]]))
 #+end_src
 
 
