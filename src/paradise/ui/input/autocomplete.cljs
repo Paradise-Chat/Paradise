@@ -3,10 +3,9 @@
    [re-frame.core :as re-frame]
    [taoensso.timbre :as log]
    [clojure.string :as str]
-   [paradise.shared.utils.macros :refer [defui]]
-   [paradise.media.component :refer [mxc->url media]]
-   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
-   ))
+   [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.media.component :refer [media]]
+   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]))
 
 (re-frame/reg-sub
  :mention/filtered-users
@@ -17,8 +16,10 @@
    (let [query (str/lower-case (or (:query state) ""))]
      (->> (vals members)
           (filter (fn [u]
-                    (or (str/includes? (str/lower-case (or (:display-name u) "")) query)
-                        (str/includes? (str/lower-case (or (:user-id u) "")) query))))
+                    (let [dname (str/lower-case (or (:display-name u) (:name u) ""))
+                          uid   (str/lower-case (or (:id u) (:user-id u) ""))]
+                      (or (str/includes? dname query)
+                          (str/includes? uid query)))))
           (take 8)))))
 
 (re-frame/reg-sub
@@ -28,10 +29,17 @@
  (fn [[packs state] _]
    (let [query (str/lower-case (str (or (:query state) "")))]
      (->> (vals packs)
-          (mapcat :images)
-          (filter (fn [[shortcode _]]
-                    (let [sc-str (if (keyword? shortcode) (name shortcode) (str shortcode))]
-                      (str/includes? (str/lower-case sc-str) query))))
+          (mapcat (fn [pack]
+                    (for [[raw-sc item] (:images pack)
+                          :let [sc  (clean-shortcode (or (:shortcode item) raw-sc))
+                                uri (or (:uri item) (:url item))]
+                          :when (and (seq sc) uri)]
+                      [sc (assoc item
+                                 :shortcode sc
+                                 :uri       uri
+                                 :url       uri)])))
+          (filter (fn [[sc _]]
+                    (str/includes? (str/lower-case sc) query)))
           (take 10)))))
 
 (re-frame/reg-event-db
@@ -40,8 +48,8 @@
    (assoc db :suggestion/menu
           {:active? true
            :type    type
-           :rect    {:top (.-top rect)
-                     :left (.-left rect)
+           :rect    {:top    (.-top rect)
+                     :left   (.-left rect)
                      :height (.-height rect)}
            :query   ""
            :index   0})))
@@ -66,12 +74,16 @@
                     (mod (inc current) max-items)
                     (mod (dec current) max-items)))))))
 
-(re-frame/reg-sub :suggestion/state (fn [db _] (:suggestion/menu db)))
+(re-frame/reg-sub
+ :suggestion/state
+ (fn [db _]
+   (:suggestion/menu db)))
 
 (re-frame/reg-event-db
  :suggestion/set-index
  (fn [db [_ idx]]
    (assoc-in db [:suggestion/menu :index] idx)))
+
 
 (defonce !active-command (atom nil))
 
@@ -91,62 +103,89 @@
          (let [selected-item (if (= type :emoji) (second raw-item) raw-item)]
            (cmd #js {:props selected-item})))))))
 
-(defn emoji-suggestion-options []
-  #js {:char ":"
-       :command (fn [^js props]
-                  (let [ed (.-editor props)
-                        range (.-range props)
-                        item (.-props (.-props props))
-                        _ (log/debug item)]
-                    (-> ed .chain .focus
-                        (.deleteRange range)
-                        (.insertContent #js {:type "customEmote"
-                                             :attrs #js {:src (mxc->url (:url item))
-                                                         :shortcode (:shortcode item)}})
-                        .run)))
-       :render (fn []
-                 #js {:onStart (fn [props]
-                                 (reset! !active-command (.-command props))
-                                 (re-frame/dispatch [:suggestion/open-menu :emoji (.-clientRect props)]))
-                      :onUpdate (fn [props]
-                                  (reset! !active-command (.-command props))
-                                  (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
-                      :onKeyDown #(handle-suggestion-keydown % :emoji)
-                      :onExit (fn []
-                                (reset! !active-command nil)
-                                (re-frame/dispatch [:suggestion/close-menu]))})})
+(defonce !active-command (atom nil))
 
-(defn user-mention-options [on-start on-exit]
-  #js {:char "@"
+(defn handle-suggestion-keydown [^js props type]
+  (let [e       (.-event props)
+        room-id @(re-frame/subscribe [:rooms/active-id])
+        state   @(re-frame/subscribe [:suggestion/state])
+        items   (if (= type :emoji)
+                  @(re-frame/subscribe [:emoji/filtered-suggestions])
+                  @(re-frame/subscribe [:mention/filtered-users room-id]))
+        idx     (or (:index state) 0)]
+    (handle-list-navigation
+     e items idx
+     #(re-frame/dispatch [:suggestion/set-index %])
+     (fn [raw-item]
+       (when-let [cmd @!active-command]
+         (let [selected-item (if (= type :emoji)
+                               (let [[sc item] raw-item]
+                                 (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
+                               raw-item)]
+           (cmd #js {:props selected-item})))))))
+
+(defn emoji-suggestion-options []
+  #js {:char    ":"
        :command (fn [^js props]
-                  (let [ed (.-editor props)
-                        range (.-range props)
-                        user (.-props (.-props props))]
+                  (let [ed        (.-editor props)
+                        range     (.-range props)
+                        item      (.-props (.-props props))
+                        uri       (or (:uri item) (:url item))
+                        shortcode (clean-shortcode (:shortcode item))]
                     (-> ed .chain .focus
                         (.deleteRange range)
-                        (.insertContent #js {:type "userMention"
-                                             :attrs #js {:id (:user-id user)
-                                                         :label (:display-name user)}})
+                        (.insertContent #js {:type  "customEmote"
+                                             :attrs #js {:id        (:id item)
+                                                         :shortcode shortcode
+                                                         :uri       uri
+                                                         :src       uri}})
+                        .run)))
+       :render  (fn []
+                  #js {:onStart   (fn [props]
+                                    (reset! !active-command (.-command props))
+                                    (re-frame/dispatch [:suggestion/open-menu :emoji (.-clientRect props)]))
+                       :onUpdate  (fn [props]
+                                    (reset! !active-command (.-command props))
+                                    (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
+                       :onKeyDown #(handle-suggestion-keydown % :emoji)
+                       :onExit    (fn []
+                                    (reset! !active-command nil)
+                                    (re-frame/dispatch [:suggestion/close-menu]))})})
+
+(defn user-mention-options [& [on-start on-exit]]
+  #js {:char    "@"
+       :command (fn [^js props]
+                  (let [ed    (.-editor props)
+                        range (.-range props)
+                        user  (.-props (.-props props))
+                        uid   (or (:id user) (:user-id user))
+                        label (or (:display-name user) (:name user) uid)]
+                    (-> ed .chain .focus
+                        (.deleteRange range)
+                        (.insertContent #js {:type  "userMention"
+                                             :attrs #js {:id    uid
+                                                         :label label
+                                                         :uri   (:uri user)}})
                         (.insertContent " ")
                         .run)))
-       :render (fn []
-                 #js {:onStart (fn [props]
-                                 (reset! !active-command (.-command props))
-                                 (when on-start (on-start (.-command props)))
-                                 (let [active-id @(re-frame/subscribe [:rooms/active-id])]
-                                   (re-frame/dispatch [:room/fetch-members active-id]))
-                                 (re-frame/dispatch [:suggestion/open-menu :mention (.-clientRect props)]))
-                      :onUpdate (fn [props]
-                                  (reset! !active-command (.-command props))
-                                  (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
-                      :onKeyDown #(handle-suggestion-keydown % :mention)
-                      :onExit (fn []
-                                (reset! !active-command nil)
-                                (when on-exit (on-exit))
-                                (re-frame/dispatch [:suggestion/close-menu]))})})
+       :render  (fn []
+                  #js {:onStart   (fn [props]
+                                    (reset! !active-command (.-command props))
+                                    (when on-start (on-start (.-command props)))
+                                    (let [active-id @(re-frame/subscribe [:rooms/active-id])]
+                                      (re-frame/dispatch [:room/fetch-members active-id]))
+                                    (re-frame/dispatch [:suggestion/open-menu :mention (.-clientRect props)]))
+                       :onUpdate  (fn [props]
+                                    (reset! !active-command (.-command props))
+                                    (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
+                       :onKeyDown #(handle-suggestion-keydown % :mention)
+                       :onExit    (fn []
+                                    (reset! !active-command nil)
+                                    (when on-exit (on-exit))
+                                    (re-frame/dispatch [:suggestion/close-menu]))})})
 
-(defn suggestion-menu []
-  (let [{:keys [active? type rect index] :as state} @(re-frame/subscribe [:suggestion/state])
+(defn suggestion-menu [& _]
+  (let [{:keys [active? type rect index]} @(re-frame/subscribe [:suggestion/state])
         room-id @(re-frame/subscribe [:rooms/active-id])
         emojis  @(re-frame/subscribe [:emoji/filtered-suggestions])
         members @(re-frame/subscribe [:mention/filtered-users room-id])
@@ -169,24 +208,34 @@
            :selected-index safe-idx
            :empty-text     (tr [:composer.suggestions/no-results])
            :item-class     "suggestion-item"
-           :key-fn (fn [item]
-                     (if is-emoji? (first item) (:user-id item)))
-           :on-select (fn [item]
-                        (when-let [cmd @!active-command]
-                          (let [selected (if is-emoji? (second item) item)]
-                            (cmd #js {:props selected}))))
-           :render-item (fn [item _selected?]
-                          (if is-emoji?
-                            (let [[shortcode emote-data] item]
-                              [:<>
-                               [media {:mxc (:url emote-data) :class "suggestion-img" :alt shortcode}]
-                               [:span.suggestion-text ":" shortcode ":"]])
-                            [:<>
-                             [avatar {:id    (:user-id item)
-                                      :name  (or (:display-name item) (:user-id item) "?")
-                                      :url   (:avatar-url item)
-                                      :size  24
-                                      :shape :circle}]
-                             [:div.suggestion-details
-                              [:span.suggestion-name (:display-name item)]
-                              [:span.suggestion-id (:user-id item)]]])) }]]))))
+           :key-fn         (fn [item]
+                             (if is-emoji?
+                               (first item)
+                               (or (:id item) (:user-id item))))
+           :on-select      (fn [raw-item]
+                             (when-let [cmd @!active-command]
+                               (let [selected (if is-emoji?
+                                                (let [[sc item] raw-item]
+                                                  (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
+                                                raw-item)]
+                                 (cmd #js {:props selected}))))
+           :render-item    (fn [item _selected?]
+                             (if is-emoji?
+                               (let [[shortcode emote-data] item
+                                     uri (or (:uri emote-data) (:url emote-data))]
+                                 [:<>
+                                  [media {:uri   uri
+                                          :class "suggestion-img"
+                                          :alt   shortcode}]
+                                  [:span.suggestion-text ":" shortcode ":"]])
+                               (let [uid   (or (:id item) (:user-id item))
+                                     dname (or (:display-name item) (:name item) uid "?")]
+                                 [:<>
+                                  [avatar {:id    uid
+                                           :name  dname
+                                           :url   (:avatar-url item)
+                                           :size  24
+                                           :shape :circle}]
+                                  [:div.suggestion-details
+                                   [:span.suggestion-name dname]
+                                   [:span.suggestion-id uid]]])))}]]))))
