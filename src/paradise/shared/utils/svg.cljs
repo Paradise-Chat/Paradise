@@ -390,6 +390,27 @@
 (defn exit [props]
   (build-icon-hiccup props exit-shapes))
 
+(def minimize-shapes
+  [:g
+   [:line {:x1 "4" :y1 "12" :x2 "20" :y2 "12"}]])
+
+(defn minimize [props]
+  (build-icon-hiccup props minimize-shapes))
+
+(def maximize-shapes
+  [:g
+   [:rect {:x "5" :y "5" :width "14" :height "14"}]])
+
+(defn maximize [props]
+  (build-icon-hiccup props maximize-shapes))
+
+(def restore-shapes
+  [:g
+   [:path {:d "M7,7 L7,4 L20,4 L20,17 L17,17 M4,7 L17,7 L17,20 L4,20 Z"}]])
+
+(defn restore [props]
+  (build-icon-hiccup props restore-shapes))
+
 (def thread-shapes
   [:g
    [:circle {:cx "7" :cy "7" :r "3"}]
