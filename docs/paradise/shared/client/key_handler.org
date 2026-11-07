@@ -22,6 +22,44 @@ Later, we'll expand it to handle native input for features like push to talk.
    [re-frame.db :as db]))
 #+end_src
 
+
+**** Multi-method
+
+This allows for our namespace here to now be ignorant as to what key binds
+are registered. Instead that responsibility is pushed to the actual
+module namespaces themselves.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
+(def storage-key "paradise.settings.keybinds")
+
+(defn- normalize-id [id]
+  (if (keyword? id)
+    (subs (str id) 1)
+    (str id)))
+
+(defmulti keybind-spec identity)
+
+(defmethod keybind-spec :default [action-id]
+  nil)
+
+(defonce !registry (r/atom {}))
+
+(defonce !last-fired (atom {}))
+
+(defn all-keybind-specs []
+  (let [mm-entries (reduce-kv
+                    (fn [acc dispatch-val method-fn]
+                      (if (= dispatch-val :default)
+                        acc
+                        (if-let [spec (method-fn dispatch-val)]
+                          (let [norm-id (normalize-id (or (:id spec) dispatch-val))]
+                            (assoc acc norm-id (merge {:global? false :allow-in-input? true}
+                                                      spec
+                                                      {:id norm-id})))
+                          acc)))
+                    {}
+                    (methods keybind-spec))]
+    (merge mm-entries @!registry)))
 #+end_src
 
 
