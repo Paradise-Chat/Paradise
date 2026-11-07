@@ -26,6 +26,63 @@ can.
 #+end_src
 
 
+
+**** JVM Transpiler Helpers
+
+These are just helpers in handling some nuance in converting CLJS
+go blocks to CLJ go blocks.
+
+To be clear, this is due to the macro-expansion of plugins only
+running the Clojure compilation and not any of the shadow-cljs
+or cljs portions. If they ran that, then the resulting output
+would obviously be JS which wouldn't be as useful here.
+
+With SCI we can neatly control the allowed namespaces and classes.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/sci_runner/shared.cljs
+(defn jvm-return-chan [state value]
+  (let [c (aget state 5)]
+    (if-not (nil? value)
+      (cljs.core.async/put! c value (fn [_] (cljs.core.async/close! c)))
+      (cljs.core.async/close! c))
+    c))
+
+(defn jvm-process-exception [state ex]
+  (let [frames (aget state 4)]
+    (loop [frames frames]
+      (if (empty? frames)
+        (throw ex)
+        (let [{:keys [catch-block catch-exception-class exception-local continue-block]} (first frames)]
+          (if (and catch-block
+                   (or (= catch-exception-class :default)
+                       (= catch-exception-class 'java.lang.Throwable)
+                       (= catch-exception-class 'js/Error)))
+            (do
+              (aset state 1 catch-block)
+              (aset state exception-local ex)
+              (aset state 4 (rest frames))
+              :recur)
+            (do
+              (aset state 1 continue-block)
+              (aset state 4 (rest frames))
+              (aset state 2 ex)
+              :recur)))))))
+
+(defn jvm-run-state-machine-wrapped [state]
+  (try
+    (ioc-helpers/run-state-machine state)
+    (catch :default ex
+      (when-let [c (aget state 5)]
+        (cljs.core.async/close! c))
+      (throw ex))))
+
+(defn safe-instance? [c x]
+  (if (or (= c :default) (not (fn? c)))
+    (some? x)
+    (instance? c x)))
+#+end_src
+
+
 **** SCI Sauce
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/sci_runner/shared.cljs
