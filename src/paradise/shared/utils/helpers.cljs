@@ -281,16 +281,17 @@
                is-image? (str/starts-with? mime "image/")
                is-video? (str/starts-with? mime "video/")]
            (log/info "Safe extract-metadata -> Name:" filename "Mime:" mime "Size:" size)
-           (let [fid       (register-file! raw-file)
-                 preview   (try (js/URL.createObjectURL raw-file)
-                                (catch :default e
-                                  (log/warn "Failed to create object URL" e)
-                                  nil))
-                 base-att  {:file-id     fid
-                            :mime        mime
-                            :filename    filename
-                            :size        size
-                            :preview-url preview}]
+           (let [fid      (register-file! raw-file)
+                 preview  (try (js/URL.createObjectURL raw-file)
+                               (catch :default e
+                                 (log/warn "Failed to create object URL" e)
+                                 nil))
+                 base-att {:file-id     fid
+                           :mime        mime
+                           :mimetype    mime
+                           :filename    filename
+                           :size        size
+                           :preview-url preview}]
              (if (and preview (or is-image? is-video?))
                (let [el (if is-image? (js/Image.) (js/document.createElement "video"))]
                  (set! (.-onerror el)
@@ -317,8 +318,8 @@
 
 (defonce date-formatter
   (js/Intl.DateTimeFormat. js/undefined #js {:month "long"
-                                             :day "numeric"
-                                             :year "numeric"}))
+                                             :day   "numeric"
+                                             :year  "numeric"}))
 
 (defn format-divider-date [ts]
   (let [date         (js/Date. ts)
@@ -350,7 +351,6 @@
       3 (str (first names) ", " (second names) ", and " (first (last names)))
       (str (first names) ", " (second names) ", and " (- cnt 2) " others"))))
 
-
 (defn format-readers [names]
   (let [joined (join-names names)]
     (if (empty? joined)
@@ -360,7 +360,7 @@
                     " are following")))))
 
 (defn get-status-string [tr type names]
-  (let [cnt (count names)
+  (let [cnt       (count names)
         base-path (if (= type :typing)
                     "container.timeline.status.typing"
                     "container.timeline.status.reading")]
