@@ -85,86 +85,87 @@
 (defn- transform-a [attrs]
   (assoc attrs :rel "noopener" :target "_blank"))
 
-(defn- transform-img [attrs]
-  (let [src (get attrs :src "")]
-    (if (and (string? src) (str/starts-with? src "mxc://"))
-      {:tag "comp:paradise.media.component/media-native"
-       :attrs {:mxc   src
-               :class "timeline-emotes"
-               :className "timeline-emotes"
-               :alt   (get attrs :alt)}}
-      {:tag :a
-       :attrs {:href src :rel "noopener" :target "_blank"}
-       :content [(or (get attrs :alt) src)]})))
-
-
-
-
-(defn- filter-code-classes [attrs]
-  (if-let [cls (:class attrs)]
-    (let [classes (str/split cls #"\s+")
-          valid (filter #(str/starts-with? % "language-") classes)]
-      (if (seq valid)
-        (assoc attrs :class (str/join " " valid))
-        (dissoc attrs :class)))
-    attrs))
-
 (defn- valid-url? [href]
   (if (string? href)
     (let [scheme (-> href (str/split #":" 2) first str/lower-case)]
       (contains? url-schemes scheme))
     false))
 
-;; check to see perf impact of that into []
-;; was kinda just lazily (hah) solving edits failing
-;; by forcing the lazyseq to evaluate immediately
-;; but this may be undesirable
+
+(defn- transform-img [attrs]
+  (let [src    (or (get attrs :data-emote-uri) (get attrs :src) "")
+        alt    (get attrs :alt)
+        emote? (or (contains? attrs :data-emote)
+                   (contains? attrs :data-emote-id)
+                   (contains? attrs :data-mx-emoticon)
+                   (and (media-uri? src) (not (valid-url? src))))]
+    (if (and (media-uri? src) (or emote? (valid-url? src)))
+      {:tag   "comp:paradise.media.component/media-native"
+       :attrs {:uri       src
+;;               :mxc       src
+               :emote-id  (get attrs :data-emote-id)
+               :class     "timeline-emotes"
+               :className "timeline-emotes"
+               :alt       alt}}
+      {:tag     :a
+       :attrs   {:href src :rel "noopener" :target "_blank"}
+       :content [(or alt src)]})))
+
+(defn- filter-code-classes [attrs]
+  (if-let [cls (:class attrs)]
+    (let [classes (str/split cls #"\s+")
+          valid   (filter #(str/starts-with? % "language-") classes)]
+      (if (seq valid)
+        (assoc attrs :class (str/join " " valid))
+        (dissoc attrs :class)))
+    attrs))
+
 (defn sanitize-nodes [nodes depth]
   (if (> depth max-tag-nesting)
     []
     (into []
-      (mapcat
-       (fn [node]
-         (cond
-           (string? node)
-           [node]
-
-           (and (map? node) (= (:type node) :element))
-           (let [{:keys [tag attrs content]} node]
+          (mapcat
+           (fn [node]
              (cond
-               (contains? non-text-tags tag)
-               []
+               (string? node)
+               [node]
 
-               (contains? permitted-tags tag)
-               (let [allowed-keys (get permitted-attrs tag #{})
-                     clean-attrs (select-keys attrs allowed-keys)
-                     [final-tag final-attrs transformed-content]
-                     (case tag
-                       (:font :span) [tag (transform-font-span clean-attrs) nil]
-                       :a            [tag (transform-a clean-attrs) nil]
-                       :code         [tag (filter-code-classes clean-attrs) nil]
-                       :img          (let [{t :tag a :attrs c :content} (transform-img clean-attrs)]
-                                       [t a c])
-                       [tag clean-attrs nil])
-                     final-attrs (if (and (= final-tag :a)
-                                          (not (valid-url? (:href final-attrs))))
-                                   (dissoc final-attrs :href)
-                                   final-attrs)
-                     children (or transformed-content
-                                  (sanitize-nodes content (inc depth)))]
-                 [(if (seq final-attrs)
-                    (into [final-tag final-attrs] children)
-                    (into [final-tag] children))])
+               (and (map? node) (= (:type node) :element))
+               (let [{:keys [tag attrs content]} node]
+                 (cond
+                   (contains? non-text-tags tag)
+                   []
 
-               :else
-               (sanitize-nodes content depth)))
+                   (contains? permitted-tags tag)
+                   (let [allowed-keys (get permitted-attrs tag #{})
+                         clean-attrs  (select-keys attrs allowed-keys)
+                         [final-tag final-attrs transformed-content]
+                         (case tag
+                           (:font :span) [tag (transform-font-span clean-attrs) nil]
+                           :a            [tag (transform-a clean-attrs) nil]
+                           :code         [tag (filter-code-classes clean-attrs) nil]
+                           :img          (let [{t :tag a :attrs c :content} (transform-img clean-attrs)]
+                                           [t a c])
+                           [tag clean-attrs nil])
+                         final-attrs  (if (and (= final-tag :a)
+                                               (not (valid-url? (:href final-attrs))))
+                                        (dissoc final-attrs :href)
+                                        final-attrs)
+                         children     (or transformed-content
+                                          (sanitize-nodes content (inc depth)))]
+                     [(if (seq final-attrs)
+                        (into [final-tag final-attrs] children)
+                        (into [final-tag] children))])
 
-           :else []))
-       nodes))))
+                   :else
+                   (sanitize-nodes content depth)))
+
+               :else []))
+           nodes))))
 
 (defn sanitize-custom-html [raw-html]
   (when raw-html
-    (let [html-str (str raw-html)
+    (let [html-str      (str raw-html)
           raw-fragments (h/parse-fragment html-str)
           hickory-maps  (map h/as-hickory raw-fragments)]
       (sanitize-nodes hickory-maps 0))))
@@ -173,12 +174,11 @@
   (when raw-text
     (str/escape (str raw-text) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;" \' "&#39;"})))
 
-
 (defn linkify-text [text]
   (if (str/blank? text)
     [text]
     (let [pattern #"https?://[^\s]+"
-          parts (str/split text pattern -1)
+          parts   (str/split text pattern -1)
           matches (re-seq pattern text)]
       (if (empty? matches)
         [text]
@@ -192,27 +192,25 @@
                  (range (count parts))
                  parts))))))
 
-
-
 (def block-level-tags #{:p :div :h1 :h2 :h3 :h4 :h5 :h6 :blockquote :li :tr})
 
 (defn hiccup->text [node]
   (cond
     (string? node) node
     (vector? node)
-    (let [tag (first node)
+    (let [tag        (first node)
           has-attrs? (map? (second node))
-          attrs (if has-attrs? (second node) {})
-          children (if has-attrs? (drop 2 node) (drop 1 node))
+          attrs      (if has-attrs? (second node) {})
+          children   (if has-attrs? (drop 2 node) (drop 1 node))
           inner-text (str/join "" (map hiccup->text children))]
       (cond
         (= tag :br) "\n"
         (contains? block-level-tags tag) (str inner-text "\n")
-        (or (:mxc attrs) (= tag :img) (= tag "media-native")) " [e] "
+        (or (:uri attrs) (= tag :img) (= tag "media-native") (= tag "comp:paradise.media.component/media-native"))
+        (str " " (or (:alt attrs) "[e]") " ")
         :else inner-text))
     (sequential? node) (str/join "" (map hiccup->text node))
     :else ""))
-
 
 (defn process-raw-event [e source room-id]
   (let [html-txt     (or (get-in e [:content :inner :content :html]) "")
@@ -236,7 +234,6 @@
         (assoc :clean-text plain-text)
         (update :type keyword)
         (assoc :raw e))))
-
 
 (defonce !file-registry (atom {}))
 
@@ -269,7 +266,6 @@
              (.readAsArrayBuffer reader f))))
        (catch :default e
          (reject e))))))
-
 
 (defn extract-metadata [raw-file]
   (p/create
