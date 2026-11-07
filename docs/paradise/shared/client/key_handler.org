@@ -262,9 +262,47 @@ Interactions with storage and the IPC
    (->> (vals (all-keybind-specs))
         (sort-by :id)
         (mapv #(effective-keybind % overrides)))))
-    (finally
-      (.removeEventListener js/window "keydown" handler))))
 #+end_src
+
+
+
+**** Global Key Listener
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
+(defn global-key-listener []
+  (r/with-let [_            (re-frame/dispatch [:settings/init-keybinds])
+               unlisten-ipc (when-let [^js bridge (get-shortcuts-bridge)]
+                              (.onTriggered bridge (fn [action-id]
+                                                     (trigger-action! (str action-id)))))
+               handler      (fn [^js e]
+                              (when-not (or (.-repeat e)
+                                            (.-paradiseRecordingKeybind js/globalThis))
+                                (when-let [acc (event->accelerator e)]
+                                  (let [sig       (accelerator->signature acc)
+                                        overrides (get-in @db/app-db [:settings :keybinds] {})
+                                        matched   (first
+                                                   (filter
+                                                    (fn [raw-entry]
+                                                      (let [{:keys [accelerator enabled?]} (effective-keybind raw-entry overrides)]
+                                                        (and (not= enabled? false)
+                                                             (= (accelerator->signature accelerator) sig))))
+                                                    (vals (all-keybind-specs))))]
+                                    (when (and matched
+                                               (or (:allow-in-input? matched true)
+                                                   (not (editable-target? (.-target e)))))
+                                      (.preventDefault e)
+                                      (trigger-action! (:id matched)))))))]
+    (.addEventListener js/globalThis "keydown" handler)
+    [:<>]
+    (finally
+      (.removeEventListener js/globalThis "keydown" handler)
+      (when (fn? unlisten-ipc)
+        (unlisten-ipc)))))
+#+end_src
+
+
+
+**** Old Bits
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
