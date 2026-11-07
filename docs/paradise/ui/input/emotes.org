@@ -176,23 +176,26 @@ We then initialize them as a 'pack'
                         (let [meta    (get group-meta group-id {:name "Other" :icon "📦"})
                               pack-id (str "system-" group-id)]
                           (assoc acc pack-id
-                                 {:name             (:name meta)
-                                  :hero-icon        (:icon meta)
-                                  :is-unicode?      true
-                                  :system-priority  group-id
-                                  :images (into {}
-                                                (for [e emojis
-                                                      :let [char (or (:emoji e) (:unicode e))
-                                                            slug (or (first (:shortcodes e))
-                                                                     (:annotation e)
-                                                                     (:name e)
-                                                                     (:hexcode e))
-                                                            search-string (str/lower-case
-                                                                           (str (:name e) " " (:annotation e) " " (str/join " " (:tags e))))]
-                                                      :when (and char slug)]
-                                                  [(str slug) {:unicode     (str char)
-                                                               :search-text search-string}]))
-                                  }))))
+                                 {:name            (:name meta)
+                                  :hero-icon       (:icon meta)
+                                  :is-unicode?     true
+                                  :system-priority group-id
+                                  :images          (into {}
+                                                         (for [e emojis
+                                                               :let [char (or (:emoji e) (:unicode e))
+                                                                     slug (or (first (:shortcodes e))
+                                                                              (:annotation e)
+                                                                              (:name e)
+                                                                              (:hexcode e))
+                                                                     sc   (clean-shortcode slug)
+                                                                     search-string (str/lower-case
+                                                                                     (str (:name e) " " (:annotation e) " " (str/join " " (:tags e))))]
+                                                               :when (and char (seq sc))]
+                                                           [sc {:id          (str "unicode:" sc)
+                                                                :shortcode   sc
+                                                                :unicode     (str char)
+                                                                :is-unicode? true
+                                                                :search-text search-string}]))}))))
                     {}))))
 #+end_src
 
