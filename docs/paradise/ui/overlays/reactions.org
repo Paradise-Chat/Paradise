@@ -11,16 +11,16 @@ Realistically, we should have a rather generic modal in which we just offer prop
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/reactions.cljs
 (ns paradise.ui.overlays.reactions
-(:require
- [paradise.shared.utils.svg :as icons]
- [paradise.ui.global :refer [avatar]]
- [paradise.shared.utils.macros :refer [defui]]
- [paradise.media.component :refer [media]]
- [re-frame.core :as re-frame]
- [clojure.string :as str]
- [taoensso.timbre :as log]
- [paradise.ui.input.emotes :refer [emoji-sticker-board]]
- [paradise.ui.overlays.base :refer [modal-component popover-component]]))
+  (:require
+   [paradise.shared.utils.svg :as icons]
+   [paradise.shared.utils.helpers :refer [media-uri?]]
+   [paradise.ui.global :refer [avatar]]
+   [paradise.media.component :refer [media]]
+   [re-frame.core :as re-frame]
+   [clojure.string :as str]
+   [taoensso.timbre :as log]
+   [paradise.ui.input.emotes :refer [emoji-sticker-board]]
+   [paradise.ui.overlays.base :refer [modal-component popover-component]]))
 #+end_src
 
 
