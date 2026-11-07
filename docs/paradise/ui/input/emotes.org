@@ -24,13 +24,11 @@ https://github.com/matrix-org/matrix-spec-proposals/pull/2545
    [cljs-workers.core :as main]
    [paradise.shared.client.state :as state]
    [reagent.core :as r]
-   [paradise.shared.utils.helpers :refer [fetch-state-event fetch-room-state]]
+   [paradise.shared.utils.helpers :refer [clean-shortcode]]
    [paradise.ui.global :refer [click-away-wrapper]]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.media.component :refer [media]]
    ["emojibase-data/en/data.json" :as emoji-data]
-   ["react" :as react]
-   ))
+   ["react" :as react]))
 #+end_src
 
 
