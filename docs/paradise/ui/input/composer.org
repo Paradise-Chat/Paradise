@@ -42,16 +42,28 @@ just keep this to defining the look and feel itself.
       (.extend #js {:name "emojiTrigger"})
       (.configure #js {:suggestion (emoji-suggestion-options)})))
 
+(def emoji-trigger
+  (-> Mention
+      (.extend #js {:name "emojiTrigger"})
+      (.configure #js {:suggestion (emoji-suggestion-options)})))
+
 (def user-trigger
   (-> Mention
       (.extend #js {:name "userMention"
+                    :addAttributes (fn []
+                                     #js {:id    #js {:default nil}
+                                          :label #js {:default nil}
+                                          :uri   #js {:default nil}})
                     :renderHTML (fn [^js props]
                                   (let [node  (.-node props)
                                         id    (.. node -attrs -id)
-                                        label (.. node -attrs -label)]
-                                    #js ["a" #js {:href  (str "https://matrix.to/#/" id)
-                                                  :class "user-mention"
-                                                  :data-mx-user id}
+                                        label (or (.. node -attrs -label) id)
+                                        uri   (.. node -attrs -uri)
+                                        ]
+                                    #js ["a" #js {:href            uri
+                                                  :class           "user-mention"
+                                                  :data-mention-id id
+                                                  :data-mx-user    id}
                                          (str "@" label)]))})
       (.configure #js {:suggestion (user-mention-options)})))
 #+end_src
@@ -61,34 +73,36 @@ just keep this to defining the look and feel itself.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (defn renderHtml [^js props]
-  (let [attrs         (.-HTMLAttributes props)
-        raw-shortcode (aget attrs "shortcode")
-        display-code  (when raw-shortcode
-                        (str ":" (str/replace (str raw-shortcode) #":" "") ":"))]
+  (let [attrs        (.-HTMLAttributes props)
+        display-code (format-shortcode (aget attrs "shortcode"))
+        uri          (or (aget attrs "uri") (aget attrs "src"))
+        emote-id     (aget attrs "id")]
     #js ["img" (mergeAttributes
                 attrs
-                #js {"data-emote" true
-                     "class"      "chat-input-emote"
-                     "alt"        display-code
-                     "shortcode"  display-code
-                     "title"      display-code
-                     "style"      "height: 1.5em; width: auto; vertical-align: middle; display: inline-block;"})]))
+                #js {"data-emote"     true
+                     "data-emote-id"  emote-id
+                     "data-emote-uri" uri
+                     "class"          "chat-input-emote"
+                     "alt"            display-code
+                     "shortcode"      display-code
+                     "title"          display-code
+                     "style"          "height: 1.5em; width: auto; vertical-align: middle; display: inline-block;"})]))
 #+end_src
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (defn prepare-html-for-editor [raw-html]
-  (if (string? raw-html)
-    (str/replace raw-html
-                 #"mxc://[^\"\'\s>]+"
-                 #(mxc->url %))
-    ""))
+  (if (string? raw-html) raw-html ""))
 #+end_src
 
 Now Tiptap has the HTTPS URL inside of the message box, but we can't send that
 so below is a helper function that converts the node BACK to Mxc on send.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
-(defn get-matrix-formatted-body [editor]
+(defn editor->ast [editor]
+  (when editor
+    (js->clj (.. editor getJSON -content) :keywordize-keys true)))
+
+(defn get-formatted-body [editor]
   (let [json (.. editor getJSON -content)
         node->html (fn node->html [node]
                      (let [type  (.-type node)
@@ -97,14 +111,22 @@ so below is a helper function that converts the node BACK to Mxc on send.
                            base-content
                            (cond
                              (= type "customEmote")
-                             (let [shortcode  (aget attrs "shortcode")
-                                   mxc-uri    (or (aget attrs "mxc") (url->mxc (aget attrs "src")))]
-                               (str "<img data-mx-emoticon=\"\" src=\"" mxc-uri "\""
-                                    " alt=\"" shortcode ":\" title=\"" shortcode ":\" height=\"32\">"))
+                             (let [shortcode (format-shortcode (aget attrs "shortcode"))
+                                   emote-id  (aget attrs "id")
+                                   raw-uri   (or (aget attrs "uri")
+                                                 (aget attrs "src"))]
+                               (str "<img data-emote=\"\""
+                                    (when emote-id (str " data-emote-id=\"" emote-id "\""))
+                                    " data-emote-uri=\"" raw-uri "\""
+                                    " src=\"" raw-uri "\""
+                                    " alt=\"" shortcode "\" title=\"" shortcode "\" height=\"32\">"))
+
                              (= type "userMention")
                              (let [id    (aget attrs "id")
-                                   label (or (aget attrs "label") id)]
-                               (str "<a href=\"https://matrix.to/#/" id "\">@" label "</a>"))
+                                   label (or (aget attrs "label") id)
+                                   uri   (or (aget attrs "uri") (str "mention://" id))]
+                               (str "<a href=\"" uri "\" data-mention-id=\"" id "\">@" label "</a>"))
+
                              (= type "hardBreak") "<br>"
                              (= type "text") (.-text node)
                              :else "")
@@ -123,11 +145,11 @@ so below is a helper function that converts the node BACK to Mxc on send.
                              base-content)]
                        with-marks))]
     (str/join ""
-      (map (fn [p]
-             (str "<p>"
-                  (str/join "" (map node->html (js/Array.from (or (.-content p) #js []))))
-                  "</p>"))
-           (js/Array.from json)))))
+              (map (fn [p]
+                     (str "<p>"
+                          (str/join "" (map node->html (js/Array.from (or (.-content p) #js []))))
+                          "</p>"))
+                   (js/Array.from json)))))
 #+end_src
 
 
