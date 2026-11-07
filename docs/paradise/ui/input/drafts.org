@@ -197,7 +197,7 @@ For now this is just exploratory.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
-(defui attachment-preview [room-id attachment index]
+(defn ^:ui attachment-preview [room-id attachment index]
   [:div.attachment-preview
    (let [{:keys [mimetype mime preview-url filename]} attachment
          resolved-mime (or mime mimetype "application/octet-stream")]
