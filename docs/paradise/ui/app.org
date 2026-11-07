@@ -636,49 +636,48 @@ providing the encapsulation and parsing for us.
     (let [auth-status   @(re-frame/subscribe [:auth/status])
           sidebar-open? @(re-frame/subscribe [:ui/sidebar-open?])
           update-ready? @(re-frame/subscribe [:app/update-available?])
-          platform         (.getPlatform js/Capacitor)
+          platform      (.getPlatform js/Capacitor)
           cushion       (if (= platform "ios")
                           "8px"
                           "env(safe-area-inset-bottom, 0px)")
-          swipe-props (make-swipe-handlers
-                       !drag-state
-                       {:on-end (fn [dx]
-                                  (let [start-x (:start-x @!drag-state)]
-                                    (cond
-                                      (and (not sidebar-open?) #_ (< start-x 40) (> dx 60))
-                                      (re-frame/dispatch [:ui/set-sidebar true])
-                                      (and sidebar-open? (< dx -60))
-                                      (re-frame/dispatch [:ui/set-sidebar false]))))})]
+          swipe-props   (make-swipe-handlers
+                         !drag-state
+                         {:on-end (fn [dx]
+                                    (let [start-x (:start-x @!drag-state)]
+                                      (cond
+                                        (and (not sidebar-open?) (> dx 60))
+                                        (re-frame/dispatch [:ui/set-sidebar true])
+                                        (and sidebar-open? (< dx -60))
+                                        (re-frame/dispatch [:ui/set-sidebar false]))))})]
+      [:<>
+       [desktop-titlebar]
+       (case auth-status
+         :checking [booting-screen]
+         (:logged-out :authenticating) [login-screen]
+         :logged-in
+         [:<>
+          (when update-ready?
+            [:div.global-update-banner
+             [:span "A new version of the app is available!"]
+             [:button {:on-click #(re-frame/dispatch [:app/apply-update])}
+              "Refresh"]])
 
-      (case auth-status
-        :checking [booting-screen]
-        (:logged-out :authenticating) [login-screen]
-        :logged-in
-        [:<>
-         (when update-ready?
-           [:div.global-update-banner
-            [:span "A new version of the app is available!"]
-            [:button {:on-click #(re-frame/dispatch [:app/apply-update])}
-             "Refresh"]])
-
-         [persistent-call-container]
-         (into [:div.app-root
-                (merge {:class (when sidebar-open? "sidebars-open")
-                        :style {:touch-action "pan-y"
-                                :padding-bottom cushion
-                                }}
-                       swipe-props)]
-               [[spaces-sidebar]
-                [room-list]
-                (when sidebar-open?
-                  [:div.mobile-overlay {:on-click #(re-frame/dispatch [:ui/set-sidebar false])}])
-                [container]
-                ])
-         [modal-root]
-         [popover-root]
-         [context-menu-root]
-         [global-key-listener]]
-        [:div "Unknown State"]))))
+          [persistent-call-container]
+          (into [:div.app-root
+                 (merge {:class (when sidebar-open? "sidebars-open")
+                         :style {:touch-action   "pan-y"
+                                 :padding-bottom cushion}}
+                        swipe-props)]
+                [[spaces-sidebar]
+                 [room-list]
+                 (when sidebar-open?
+                   [:div.mobile-overlay {:on-click #(re-frame/dispatch [:ui/set-sidebar false])}])
+                 [container]])
+          [modal-root]
+          [popover-root]
+          [context-menu-root]
+          [global-key-listener]]
+         [:div "Unknown State"])])))
 
 #+end_src
 
