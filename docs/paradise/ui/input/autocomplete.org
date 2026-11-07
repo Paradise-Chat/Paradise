@@ -22,10 +22,9 @@ and the tab completion.
    [re-frame.core :as re-frame]
    [taoensso.timbre :as log]
    [clojure.string :as str]
-   [paradise.shared.utils.macros :refer [defui]]
-   [paradise.media.component :refer [mxc->url media]]
-   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
-   ))
+   [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.media.component :refer [media]]
+   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]))
 #+end_src
 
 
