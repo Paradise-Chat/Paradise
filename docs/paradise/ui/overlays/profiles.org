@@ -15,8 +15,7 @@ aspect.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
 (ns paradise.ui.overlays.profiles
   (:require
-   [paradise.ui.overlays.base :refer [popover-component
-                          context-menu-component]]
+   [paradise.ui.overlays.base :refer [popover-component context-menu-component]]
    [taoensso.timbre :as log]
    [re-frame.core :as re-frame]
    [paradise.ui.global :refer [avatar]]
