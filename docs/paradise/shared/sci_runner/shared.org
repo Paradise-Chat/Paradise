@@ -85,6 +85,9 @@ With SCI we can neatly control the allowed namespaces and classes.
 
 **** SCI Sauce
 
+These are classes and namespaces that can neatly be shared across all SCI
+instances.
+
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/sci_runner/shared.cljs
 (def async-namespaces
   {'cljs.core.async (expose-ns cljs.core.async)
