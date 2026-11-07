@@ -46,3 +46,18 @@ contextBridge.exposeInMainWorld("paradiseShortcuts", {
 
 
 
+contextBridge.exposeInMainWorld("paradiseWindow", {
+    platform: process.platform,
+    minimize: () => ipcRenderer.invoke("paradise:window-minimize"),
+    toggleMaximize: () => ipcRenderer.invoke("paradise:window-toggle-maximize"),
+    close: () => ipcRenderer.invoke("paradise:window-close"),
+    isMaximized: () => ipcRenderer.invoke("paradise:window-is-maximized"),
+    toggleDevTools: () => ipcRenderer.invoke("paradise:window-toggle-devtools"),
+    onMaximizedChange: (callback: (maximized: boolean) => void) => {
+        const listener = (_event: any, maximized: boolean) =>
+            callback(Boolean(maximized));
+        ipcRenderer.on("paradise:window-maximized", listener);
+        return () =>
+            ipcRenderer.removeListener("paradise:window-maximized", listener);
+    },
+});
