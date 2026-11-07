@@ -11,14 +11,16 @@ import {
     Menu,
     nativeImage,
     dialog,
-    session,
-    desktopCapturer,
+    ipcMain,
+    globalShortcut
 } from "electron";
 import electronIsDev from "electron-is-dev";
 import unhandled from "electron-unhandled";
 import { autoUpdater } from "electron-updater";
 import { join } from "path";
-
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import type { DynamicTrayItem } from "./setup";
 import {
     ElectronCapacitorApp,
     setupContentSecurityPolicy,
