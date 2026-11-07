@@ -148,6 +148,8 @@ aspect.
 **** Member Actions
 
 
+***** TODO The engine should be informing us of the actions to populate here
+
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
 (defn build-member-actions [{:keys [user-id display-name]} active-room]
   (let [tr @(re-frame/subscribe [:i18n/tr])]
