@@ -34,7 +34,7 @@ away.
 Inside the sdk attachments can be handle more or less universally as long as we
 provide a nice implementation to do so. So it's easier to just have a method that
 converts the attachment to a format we like to work with.
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
+#+begin_src clojurescript  ../../../../src/paradise/ui/input/drafts.cljs
 
 #_(defn reify-attachment [att]
   (let [mime       (or (:mime att) (:mimetype att) "application/octet-stream")
@@ -163,7 +163,7 @@ For now this is just exploratory.
 
 ***** Preparing Attachments
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
+#+begin_src clojurescript  ../../../../src/paradise/ui/input/drafts.cljs
 #_(defui prepare-attachment [sdk att]
   (let [mime       (or (:mime att) (:mimetype att) "application/octet-stream")
         safe-bytes (if (= (type (:buffer att)) js/Uint8Array)
