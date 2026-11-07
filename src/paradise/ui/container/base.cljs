@@ -7,14 +7,12 @@
    [paradise.ui.container.members :refer [member-list]]
    [paradise.ui.container.search :refer [search]]
    [paradise.ui.container.pins :refer [pins]]
-   [paradise.shared.utils.helpers :refer [fetch-room-state]]
    [paradise.shared.utils.svg :as icons]
    [taoensso.timbre :as log]
    [promesa.core :as p]
    [reagent.core :as r]
    [reagent.dom.client :as rdom]
-   [paradise.shared.plugins :as plugins]
-   [paradise.shared.utils.macros :refer [defui]]))
+   [paradise.shared.plugins :as plugins]))
 
 
 (defn thread-view []
@@ -28,7 +26,7 @@
    [:div "Thread 1..."]
   [:div "Thread 2..."]])
 
-(defui main-content []
+(defn ^:ui main-content []
   (let [active-room  @(re-frame/subscribe [:rooms/active-id])
         main-focus   @(re-frame/subscribe [:container/main-focus])]
    [:div.main-content
@@ -38,7 +36,7 @@
         :timeline [timeline]
         )]))
 
-(defui side-content [side-panel]
+(defn ^:ui side-content [side-panel]
   (let [side-panel   @(re-frame/subscribe [:container/side-panel])
         tr           @(re-frame/subscribe [:i18n/tr])]
     (when-let [panel side-panel]
@@ -64,7 +62,7 @@
            :search   [search]
            :pins     [pins])]])))
 
-(defui container []
+(defn ^:ui container []
   (let [side-panel   @(re-frame/subscribe [:container/side-panel])]
     [:div.room-layout
      {:class (when side-panel "with-sidebar")}
