@@ -5,17 +5,16 @@
             [taoensso.timbre :as log]
             [clojure.string :as str]
             [paradise.ui.input.drafts :refer [attachment-preview]]
-            [paradise.ui.input.composer :refer [tiptap-component get-matrix-formatted-body prepare-html-for-editor]]
+            [paradise.ui.input.composer :refer [tiptap-component extract-editor-payload prepare-html-for-editor]]
             [paradise.ui.input.emotes :refer [emoji-sticker-board]]
             [paradise.ui.input.autocomplete :refer [suggestion-menu]]
             [paradise.ui.global :refer [request-item-redraw! !active-popover]]
             [reagent.core :as r]
-            [paradise.media.component :refer [mxc->url]]
-            [paradise.shared.utils.helpers :refer [unregister-file! file->array-buffer register-file! get-file truncate-name extract-metadata]]
+            [paradise.shared.utils.helpers :refer [clean-shortcode unregister-file! file->array-buffer register-file! get-file truncate-name extract-metadata]]
             [paradise.shared.utils.svg :as icons]
-            [paradise.shared.utils.macros :refer [defui]]
             [cljs.core.async :refer [go <!]]
             [cljs-workers.core :as main]
+            [cljs-workers.mesh :as mesh]
             [paradise.shared.client.state :as state]
             [paradise.shared.plugins :as plugins]))
 
@@ -44,11 +43,11 @@
          (go
            (try
              (let [ab  (<p! (file->array-buffer file))
-                   res (<! (main/do-with-pool! pool {:handler :upload-media
+                   res (<! (main/do-with-pool! pool {:handler   :upload-media
                                                      :arguments {:mime mime :buffer ab}}))]
                (if (= (:status res) "success")
-                 (do
-                   (re-frame/dispatch (conj on-success-event (:url res))))
+                 (let [media-uri (or (:uri res) (:url res))]
+                   (re-frame/dispatch (conj on-success-event media-uri)))
                  (log/error "Worker upload failed:" (:msg res))))
              (catch :default e
                (log/error "Exception generating arrayBuffer or worker:" (str e)))))
@@ -56,36 +55,38 @@
        {:db (assoc db :uploading-files? true)})
      (do (log/warn "Missing file for upload") {}))))
 
-
 (re-frame/reg-event-fx
  :composer/submit
- (fn [{:keys [db]} [_ room-id text html]]
-   (let [attachments (get-in db [:drafts room-id :attachments])
-         raw-context (get-in db [:input-context room-id])
+ (fn [{:keys [db]} [_ room-id payload-or-text maybe-html]]
+   (let [{:keys [text html ast]} (if (map? payload-or-text)
+                                   payload-or-text
+                                   {:text payload-or-text :html maybe-html :ast nil})
+         attachments    (get-in db [:drafts room-id :attachments])
+         raw-context    (get-in db [:input-context room-id])
          worker-context (when raw-context
                           {:mode        (:mode raw-context)
                            :target      (get-in raw-context [:target :id])
                            :msg-tag     (get-in raw-context [:target :content :inner :tag])
                            :ffi-content (get-in raw-context [:target :content :inner :content :ffi-content])})
-         pool        @state/!engine-pool]
-
+         pool           @state/!engine-pool]
      (if (seq attachments)
        (go
          (try
            (let [worker-atts
                  (<p! (p/all (map (fn [att]
-                                    (p/let [f (get-file (:file-id att))
+                                    (p/let [f  (get-file (:file-id att))
                                             ab (if f (file->array-buffer f) (js/Promise.resolve (js/ArrayBuffer. 0)))]
                                       (assoc att :buffer ab)))
                                   attachments)))]
              (doseq [att attachments]
                (when (:preview-url att) (js/URL.revokeObjectURL (:preview-url att)))
                (when (:file-id att) (unregister-file! (:file-id att))))
-             (let [res (<! (main/do-with-pool! pool {:handler :send-attachments
-                                                     :arguments {:room-id room-id
+             (let [res (<! (main/do-with-pool! pool {:handler   :send-attachments
+                                                     :arguments {:room-id     room-id
                                                                  :attachments worker-atts
-                                                                 :text text
-                                                                 :html html}}))]
+                                                                 :text        text
+                                                                 :html        html
+                                                                 :ast         ast}}))]
                (when-not (#{"success" :success} (:status res))
                  (log/error "Failed to send attachments:" (:msg res)))))
            (catch :default e
@@ -93,38 +94,41 @@
        (go
          (try
            (log/info "Dispatching standard :send-message to worker...")
-           (let [res (<! (main/do-with-pool! pool {:handler :send-message
+           (let [res (<! (main/do-with-pool! pool {:handler   :send-message
                                                    :arguments {:room-id room-id
-                                                               :text text
-                                                               :html html
+                                                               :text    text
+                                                               :html    html
+                                                               :ast     ast
                                                                :context worker-context}}))]
              (log/info "Worker :send-message returned:" res)
              (when-not (#{"success" :success} (:status res))
                (log/error "Failed to send message:" (:msg res))))
            (catch :default e
              (log/error "Exception in send-message Go block:" (str e))))))
-
-     {:db (-> db
-              (assoc-in [:composer room-id] {:text "" :html "" :loaded-text "" :uploading? false})
-              (assoc-in [:drafts room-id :attachments] [])
-              (update :input-context dissoc room-id))
+     {:db       (-> db
+                    (assoc-in [:composer room-id] {:text "" :html "" :loaded-text "" :uploading? false})
+                    (assoc-in [:drafts room-id :attachments] [])
+                    (update :input-context dissoc room-id))
       :dispatch [:composer/persist-draft room-id]})))
-
 
 (re-frame/reg-event-fx
  :sdk/send-sticker
- (fn [_ [_ room-id mxc alt-text info]]
-   (if-let [pool @state/!engine-pool]
+ (fn [_ [_ room-id sticker-or-uri & [alt-text info]]]
+   (let [{:keys [id uri shortcode] :as sticker-map}
+         (if (map? sticker-or-uri)
+           sticker-or-uri
+           {:uri sticker-or-uri :shortcode alt-text :info info})]
      (go
-       (let [res (<! (main/do-with-pool! pool {:handler :send-raw-sticker
-                                               :arguments {:room-id room-id
-                                                           :mxc mxc
-                                                           :alt-text alt-text
-                                                           :info info}}))]
+       (let [res (<! (mesh/do-with-thread! :engine-pool
+                                           {:handler   :send-raw-sticker
+                                            :arguments {:room-id    room-id
+                                                        :sticker-id id
+                                                        :uri        uri
+                                                        :alt-text   shortcode
+                                                        :info       (:info sticker-map)}}))]
          (if (= (:status res) "success")
            (log/info "Sticker sent!")
-           (log/error "Sticker failed:" (:msg res)))))
-     (log/error "No engine pool to send sticker"))
+           (log/error "Sticker failed:" (:msg res))))))
    {}))
 
 (re-frame/reg-event-db
@@ -184,30 +188,26 @@
             raw-html     (:html m-content)
             initial-text (if (seq raw-html)
                            (prepare-html-for-editor raw-html)
-                           (or (:body m-content) ""))]
+                           (or (:body m-content) ""))
+            save-edit!   (fn []
+                           (when-let [ed @!editor]
+                             (let [{:keys [text html]} (extract-editor-payload ed)]
+                               (re-frame/dispatch [:msg/edit active-id item text html])
+                               (re-frame/dispatch [:input/clear-context active-id]))))]
         [:div.inline-editor-wrapper
          [:div.inline-editor-box
           [:> tiptap-component
-           #js {:activeId active-id
-                :loadedText initial-text
+           #js {:activeId      active-id
+                :loadedText    initial-text
                 :onEditorReady #(reset! !editor %)
-                :onSend (fn [text html]
-                          (let [matrix-html (get-matrix-formatted-body @!editor)]
-                            (re-frame/dispatch [:msg/edit active-id item text matrix-html])
-                            (re-frame/dispatch [:input/clear-context active-id])))}]]
+                :onSend        (fn [_ _] (save-edit!))}]]
          [:div.inline-editor-hint
           "escape to "
           [:span.link-btn {:on-click #(re-frame/dispatch [:input/clear-context active-id])} "cancel"]
-          " • enter to "
-          [:span.link-btn {:on-click (fn []
-                                       (when-let [ed @!editor]
-                                         (let [text (.getText ed)
-                                               matrix-html (get-matrix-formatted-body ed)]
-                                           (re-frame/dispatch [:msg/edit active-id item text matrix-html])
-                                           (re-frame/dispatch [:input/clear-context active-id]))))} "save"]]]))))
+          " \u2022 enter to "
+          [:span.link-btn {:on-click save-edit!} "save"]]]))))
 
-
-(defn ^:ui timeline-send-button [{:keys [submit-message! editor attachments]}]
+(defn ^:ui timeline-send-button [{:keys [submit-message! active-id]}]
   [:button.timeline-send-btn
    {:on-click (fn [e]
                 (.preventDefault e)
@@ -216,7 +216,7 @@
    [plugins/plugin-slot :composer-send {:room-id active-id}]
    [icons/send]])
 
-(defn ^:ui timeline-emoji-button [{:keys [on-click active? room-id]}]
+(defn ^:ui timeline-emoji-button [{:keys [on-click room-id]}]
   [:button.timeline-emoji-btn
    {:on-click (fn [e]
                 (.stopPropagation e)
@@ -225,56 +225,57 @@
    [plugins/plugin-slot :composer-emojis {:room-id room-id}]])
 
 (defn ^:ui message-input []
-  (r/with-let [!editor       (r/atom nil)
-               !sug-command  (r/atom nil)]
+  (r/with-let [!editor      (r/atom nil)
+               !sug-command (r/atom nil)]
     (fn []
-      (let [active-id      @(re-frame/subscribe [:rooms/active-id])
-            uploading?     @(re-frame/subscribe [:input/uploading?])
-            attachments    @(re-frame/subscribe [:composer/attachments active-id])
-            loaded-text    @(re-frame/subscribe [:composer/loaded-text active-id])
-            cached-html    @(re-frame/subscribe [:composer/cached-html active-id])
-            context        @(re-frame/subscribe [:input/context active-id])
-            picker-open?   (inline-emoji-open?)
-            tr             @(re-frame/subscribe [:i18n/tr])
+      (let [active-id       @(re-frame/subscribe [:rooms/active-id])
+            uploading?      @(re-frame/subscribe [:input/uploading?])
+            attachments     @(re-frame/subscribe [:composer/attachments active-id])
+            loaded-text     @(re-frame/subscribe [:composer/loaded-text active-id])
+            cached-html     @(re-frame/subscribe [:composer/cached-html active-id])
+            context         @(re-frame/subscribe [:input/context active-id])
+            picker-open?    (inline-emoji-open?)
+            tr              @(re-frame/subscribe [:i18n/tr])
             submit-message! (fn []
                               (when-let [ed @!editor]
-                                (let [text        (.getText ed)
-                                      matrix-html (get-matrix-formatted-body ed)
-                                      can-send?   (or (not (str/blank? text))
-                                                      (str/includes? matrix-html "<img")
-                                                      (seq attachments))]
+                                (let [{:keys [text html] :as payload} (extract-editor-payload ed)
+                                      can-send? (or (not (str/blank? text))
+                                                    (str/includes? html "<img")
+                                                    (seq attachments))]
                                   (if can-send?
                                     (do
-                                      (re-frame/dispatch [:composer/submit active-id text matrix-html])
+                                      (re-frame/dispatch [:composer/submit active-id payload])
                                       (-> ed .chain .clearContent .run)
                                       true)
                                     false))))]
         [:div.timeline-input-outer
-         [suggestion-menu
-          (fn [item]
-            (when-let [cmd @!sug-command]
-              (cmd #js {:props item})))]
+         [suggestion-menu]
          (when picker-open?
            [emoji-sticker-board
             {:inline?  true
              :on-close #(re-frame/dispatch [:ui/close-popover])
              :on-send-sticker
-             (fn [mxc alt-text info]
-               (re-frame/dispatch [:sdk/send-sticker active-id mxc alt-text info])
+             (fn [sticker-payload]
+               (re-frame/dispatch [:sdk/send-sticker active-id sticker-payload])
                (re-frame/dispatch [:ui/close-popover]))
              :on-insert-native
              (fn [unicode-char]
                (when-let [ed @!editor]
                  (-> ed .chain .focus (.insertContent unicode-char) .run)))
              :on-insert-emoji
-             (fn [shortcode url]
+             (fn [emote-or-shortcode & [maybe-url]]
                (when-let [ed @!editor]
-                 (-> ed .chain .focus
-                     (.insertContent #js {:type "customEmote"
-                                          :attrs #js {:shortcode shortcode
-                                                      :src (mxc->url url)
-                                                      :mxc url}})
-                     .run)))}])
+                 (let [{:keys [id shortcode uri]} (if (map? emote-or-shortcode)
+                                                    emote-or-shortcode
+                                                    {:shortcode emote-or-shortcode :uri maybe-url})
+                       clean-sc                   (clean-shortcode shortcode)]
+                   (-> ed .chain .focus
+                       (.insertContent #js {:type  "customEmote"
+                                            :attrs #js {:id        id
+                                                        :shortcode clean-sc
+                                                        :uri       uri
+                                                        :src       uri}})
+                       .run))))}])
          (when (and context (= (:mode context) :reply))
            (let [sender-name (truncate-name (-> context :target :sender-name) 32)]
              [:div.input-context-banner
@@ -282,7 +283,6 @@
                [:span (tr [:composer/replying-to] [sender-name])]]
               [:button.context-cancel-btn
                {:on-click #(re-frame/dispatch [:input/clear-context active-id])} [icons/exit]]]))
-
          [:div.timeline-input-wrapper
           (when (seq attachments)
             [:div.composer-attachments
@@ -291,22 +291,20 @@
                              ^{:key (str "att-" idx)}
                              [attachment-preview active-id att idx])
                            attachments))])
-
           (when uploading?
             ^{:key "upload-indicator"}
             [:div.upload-indicator
              [:span.upload-text (tr [:composer/uploading])]
              [:div.upload-progress-bar [:div.upload-progress-fill]]])
-
           ^{:key "composer-input-row"}
           [:div.timeline-input-row
            [:label.timeline-upload-btn
             {:title (tr [:composer/upload-tooltip])}
-            [:input {:type "file"
-                     :multiple true
-                     :style {:display "none"}
+            [:input {:type      "file"
+                     :multiple  true
+                     :style     {:display "none"}
                      :on-change (fn [e]
-                                  (let [files (.. e -target -files)
+                                  (let [files      (.. e -target -files)
                                         file-array (reduce (fn [acc i]
                                                              (if-let [f (aget files i)]
                                                                (conj acc f)
@@ -319,25 +317,24 @@
             [icons/plus]]
            [:div.timeline-editor-container
             [:> tiptap-component
-             #js {:activeId active-id
-                  :key (str "editor-" active-id)
-                  :loadedText loaded-text
-                  :cachedHtml cached-html
-                  :onChange (fn [text html]
-                              (re-frame/dispatch [:composer/on-change active-id text html]))
-                  :onSend submit-message!
-                  :onFiles (fn [files]
-                             (let [file-array (reduce (fn [acc i]
-                                                        (if-let [f (aget files i)]
-                                                          (conj acc f)
-                                                          acc))
-                                                      []
-                                                      (range (or (.-length files) 0)))]
-                               (when (seq file-array)
-                                 (handle-files! active-id file-array))
-                               ))
-                  :placeholder (tr [:composer/placeholder])
-                  :onEditorReady #(reset! !editor %)
+             #js {:activeId          active-id
+                  :key               (str "editor-" active-id)
+                  :loadedText        loaded-text
+                  :cachedHtml        cached-html
+                  :onChange          (fn [text html]
+                                       (re-frame/dispatch [:composer/on-change active-id text html]))
+                  :onSend            (fn [_ _] (submit-message!))
+                  :onFiles           (fn [files]
+                                       (let [file-array (reduce (fn [acc i]
+                                                                  (if-let [f (aget files i)]
+                                                                    (conj acc f)
+                                                                    acc))
+                                                                []
+                                                                (range (or (.-length files) 0)))]
+                                         (when (seq file-array)
+                                           (handle-files! active-id file-array))))
+                  :placeholder       (tr [:composer/placeholder])
+                  :onEditorReady     #(reset! !editor %)
                   :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
                   :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
            [plugins/plugin-slot :composer-actions {:room-id active-id}]
@@ -347,7 +344,6 @@
                                    :active?  picker-open?
                                    :room-id  active-id}]
            [timeline-send-button {:submit-message! submit-message!
-                                  :editor @!editor
-                                  :attachments attachments}]]]]))))
-
-
+                                  :active-id       active-id
+                                  :editor          @!editor
+                                  :attachments     attachments}]]]]))))
