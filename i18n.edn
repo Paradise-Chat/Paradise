@@ -198,6 +198,7 @@
           :accounts "Accounts"
           :notifications "Notifications"
           :voice-video "Voice & Video"
+          :keybinds "Keybinds"
           :language-time "Language/Time"
           :about "About"
           :advanced "Advanced"}
