@@ -207,7 +207,7 @@ We then initialize them as a 'pack'
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/emotes.cljs
-(defui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
+(defn ^:ui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
   (re-frame/dispatch [:sdk/fetch-all-emotes])
   (let [selected-pack-id (r/atom nil)
         sticker-mode?    (r/atom false)
