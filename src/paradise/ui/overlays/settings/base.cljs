@@ -95,10 +95,15 @@
      [:div.settings-tab
       {:class (when (= active-tab :voice-video) "is-active")
        :on-click #(re-frame/dispatch [:settings/set-tab :voice-video])}
-      "Voice & Video"]
+      (tr [:settings.tabs/voice-video])]
 
-     [:div.settings-group-label {:style {:margin-top "1rem"}}
+     #_[:div.settings-group-label {:style {:margin-top "1rem"}}
       (tr [:settings.groups/app])]
+
+     [:div.settings-tab
+      {:class (when (= active-tab :advanced) "is-active")
+       :on-click #(re-frame/dispatch [:settings/set-tab :advanced])}
+      (tr [:settings.tabs/advanced])]
 
      [:div.settings-tab
       {:class (when (= active-tab :about) "is-active")
@@ -110,10 +115,7 @@
        :on-click #(re-frame/dispatch [:settings/set-tab :credits])}
       (tr [:settings.credits/title])]
 
-     [:div.settings-tab
-      {:class (when (= active-tab :advanced) "is-active")
-       :on-click #(re-frame/dispatch [:settings/set-tab :advanced])}
-      (tr [:settings.tabs/advanced])]]))
+     ]))
 
 (defn ^:ui settings-content [_props]
   (let [tr         @(re-frame/subscribe [:i18n/tr])
