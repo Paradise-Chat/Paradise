@@ -144,7 +144,7 @@ Not entirely important to read, but certainly interesting.
        :on-click #(re-frame/dispatch [:settings/set-tab :voice-video])}
       (tr [:settings.tabs/voice-video])]
 
-     [:div.settings-group-label {:style {:margin-top "1rem"}}
+     #_[:div.settings-group-label {:style {:margin-top "1rem"}}
       (tr [:settings.groups/app])]
 
      [:div.settings-tab
