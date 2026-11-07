@@ -30,9 +30,10 @@
  (re-frame/reg-event-db
  :room/fetch-members-success
  (fn [db [_ room-id raw-members]]
-   (let [clean-members (mapv (fn [m]
-                               (assoc m :avatar-url (:avatar-mxc m)))
-                             raw-members)]
+   (let [clean-members (mapv
+                        (fn [m]
+                          (assoc m :avatar-url (or (:avatar-url m) (:avatar-uri m))))
+                        raw-members)]
      (-> db
          (assoc-in [:room-members room-id :data] clean-members)
          (assoc-in [:room-members room-id :loading?] false)))))
@@ -242,7 +243,7 @@
         tag-data   (get custom-tags (keyword (str pl)))
         role-name  (:name tag-data)
         role-color (or (:color tag-data) "var(--text-primary)")
-        icon-mxc   (some-> tag-data :icon :key)]
+        icon-uri   (some-> tag-data :icon :key)]
     [profile-popover-trigger m custom-tags active-room :left
      [:div.member-item
       [avatar {:id (:user-id m) :name (:display-name m) :url (:avatar-url m) :size 32}]
@@ -251,8 +252,8 @@
         [:span.member-item-name {:style {:color role-color}} (:display-name m)]
         (when role-name
           [:div.member-item-role-badge {:style {:color role-color :border (str "1px solid " role-color)}}
-           (when icon-mxc
-             [media {:mxc icon-mxc :class "member-item-role-icon"}])
+           (when icon-uri
+             [media {:uri icon-uri :class "member-item-role-icon"}])
            role-name])]
        [:span.member-item-user-id (:user-id m)]]]]))
 
