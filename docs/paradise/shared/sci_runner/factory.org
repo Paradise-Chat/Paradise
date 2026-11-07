@@ -15,6 +15,7 @@ This may be worth revisiting also to see if we can streamline it further.
 (ns paradise.shared.sci-runner.factory
   (:require [sci.core :as sci]
             [clojure.walk :as walk]
+            [clojure.string :as str]
             [paradise.shared.sci-runner.shared :as sci-shared]
             [sci.configs.reagent.reagent :as sci-reagent]
             [sci.configs.re-frame.re-frame :as sci-re-frame]))
