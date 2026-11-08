@@ -33,43 +33,19 @@ and protocol agnostic calling solution.
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
-(defonce !room
-  (atom nil))
+(defonce !driver-instance (atom nil))
+(defonce !loaded-drivers (atom {}))
+(defonce !encoder-worker (atom nil))
+(defonce !participants (atom []))
+(defonce !pending-crypto-queue (atom []))
 
-(defonce !e2ee-key-provider
-  (atom nil))
+(defonce !voice-threshold (atom 0.12))
+(defonce !voice-gate-enabled? (atom true))
+(defonce !noise-suppression-enabled? (atom true))
+(defonce !audio-processor (atom nil))
 
-(defonce !cached-lk-options
-  (atom nil))
-
-(defonce !known-keys
-  (atom {}))
-
-(defonce !voice-threshold
-  (atom 0.12))
-
-(defonce !voice-gate-enabled?
-  (atom true))
-
-(defonce !noise-suppression-enabled?
-  (atom true))
-
-(defonce !audio-processor
-  (atom nil))
-
-(defonce !audio-processor-track
-  (atom nil))
-
-(defonce !local-track-published-listener
-  (atom nil))
-
-(defn- microphone-capture-options []
-  #js
-  {:echoCancellation true
-   :noiseSuppression false
-   :autoGainControl true
-   :channelCount 1
-   :sampleRate 48000})
+(defonce !local-media-state
+  (atom {:audio false :video false :screen-sharing false}))
 #+end_src
 
 
