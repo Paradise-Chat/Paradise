@@ -145,29 +145,89 @@ Most of the call re-frame events and subscriptions are listed here
           (log/warn err "Call driver disconnect returned an error"))))))
 #+end_src
 
+****** Protocol Events
 
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/events.cljs
+(rf/reg-event-fx
+ :call/init-widget
+ (fn [{:keys [db]} [_ room-id]]
+   (mesh/do-with-thread! :engine-pool
+                         {:handler :call/start-crypto-driver
+                          :arguments {:room-id room-id}})
+   {:db db}))
 
+(rf/reg-event-fx
+ :call/start
+ (fn [{:keys [db]} [_ room-id]]
+   (go
+     (let [res (<! (mesh/do-with-thread!
+                    :engine-pool
+                    {:handler :call/request-session
+                     :arguments {:room-id room-id}}))]
+       (if (or (= (:status res) :success) (= (:status res) "success"))
+         (rf/dispatch [:call/session-negotiated res])
+         (log/error "Engine failed to negotiate call session:" (:msg res)))))
+   {:db (-> db
+            (assoc-in [:call :active-room-id] room-id)
+            (assoc-in [:call :is-active?] true)
+            (assoc-in [:call :status] :negotiating))}))
+
+(rf/reg-event-fx
+ :call/session-negotiated
+ (fn [{:keys [db]} [_ {:keys [driver-url encoder-url session-config url token]}]]
+   (let [normalized-config (or session-config {:url url :token token})]
+     {:db (assoc-in db [:call :status] :connecting)
+      :call.driver/boot {:driver-url driver-url
+                         :encoder-url encoder-url
+                         :session-config normalized-config}})))
+
+(rf/reg-event-fx
+ :call/driver-connected
+ (fn [{:keys [db]} _]
+   (let [audio-enabled? (get-in db [:call :audio-enabled?] true)
+         video-enabled? (get-in db [:call :video-enabled?] false)
+         call-devices   (get-in db [:settings :call-devices])]
+     (cond-> {:db (assoc-in db [:call :status] :connected)
+              :call.driver/set-microphone audio-enabled?}
+       video-enabled?
+       (assoc :call.driver/set-camera true)
+
+       (seq call-devices)
+       (assoc :call.driver/switch-devices call-devices)))))
+
+(rf/reg-event-db
+ :call/active-participants-changed
+ (fn [db [_ participants]]
+   (let [participants (vec (or participants []))
+         valid-video-ids (set (keep (fn [p]
+                                      (when (and (:video-track p) (not (:video-muted? p)))
+                                        (:id p)))
+                                    participants))]
+     (-> db
+         (assoc-in [:call :participants] participants)
+         (update-in [:call :unwatched-ids]
+                    (fn [current]
+                      (set (keep valid-video-ids (or current #{})))))))))
+
+(rf/reg-event-fx
+ :call/forward-signal-to-engine
+ (fn [{:keys [db]} [_ payload]]
+   (let [room-id (get-in db [:call :active-room-id])]
+     (mesh/do-with-thread! :engine-pool
+                           {:handler :call/driver-signal
+                            :arguments {:room-id room-id
+                                        :payload payload}})
+     {:db db})))
+
+(rf/reg-event-fx
+ :call/engine-signal-received
+ (fn [_ [_ payload]]
+   {:call.driver/deliver-signal payload}))
 
 (rf/reg-event-fx
  :call/e2ee-key-received
- (fn [_ [_ {:keys [participant-id
-                   key-index
-                   key-array]}]]
-
-   {:livekit/inject-e2ee-key
-    {:participant-id participant-id
-     :key-index key-index
-     :key-array key-array}}))
-
-
-(rf/reg-event-db
- :call/e2ee-error
- (fn [db [_ error]]
-   (assoc-in
-    db
-    [:call :e2ee-error]
-    error)))
-
+ (fn [_ [_ crypto-payload]]
+   {:call.driver/inject-crypto crypto-payload}))
 #+end_src
 
 ****** Media Controls
