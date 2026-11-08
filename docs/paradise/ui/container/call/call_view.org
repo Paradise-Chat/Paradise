@@ -28,52 +28,6 @@ this will be where that lives.
 **** Code
 
 
-***** Defs
-
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
-
-(def GridLayout
-  (.-GridLayout lk))
-
-(def ControlBar
-  (.-ControlBar lk))
-
-(def ParticipantTile
-  (.-ParticipantTile lk))
-
-
-(def RoomContext
-  (.-RoomContext lk))
-
-
-(def track-sources
-  #js [#js {:source
-            (.-Camera (.-Source (.-Track lkc)))
-            :withPlaceholder true}
-
-       #js {:source
-            (.-ScreenShare (.-Source (.-Track lkc)))
-            :withPlaceholder false}])
-
-(defn- sync-local-media-state! [room]
-  (when-let [participant (.-localParticipant room)]
-    (rf/dispatch
-     [:call/update-media-state
-      {:audio
-       (boolean (.-isMicrophoneEnabled participant))
-       :video
-       (boolean (.-isCameraEnabled participant))
-       :screen-sharing
-       (boolean (.-isScreenShareEnabled participant))}])))
-
-#+end_src
-
-
-***** Component
-
-
-
-
 ***** Functions
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
