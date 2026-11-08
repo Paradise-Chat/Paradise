@@ -150,7 +150,17 @@ https://github.com/Paradise-Chat/paradise-push
 #+end_src
 
 
+**** Shadow Client
 
+The idea of a shadow client remains integral as we don't know WHAT some protocols
+will expect and so the easiest way to handle any is to make sure we're not
+particularly restrictive instead.
+
+If the protocol needs some help then the ShadowDevice is here for it. If it does
+not then it is safely ignored.
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
 (re-frame/reg-sub
  :push/active-user
  (fn [db _] (:active-push-user db)))
@@ -173,7 +183,7 @@ https://github.com/Paradise-Chat/paradise-push
 
 (re-frame/reg-event-fx
  :push/toggle-previews
- (fn [{:keys [db]} [_ enabled?]]
+ (fn [_ [_ enabled?]]
    (store/set-setting! "show_previews" enabled?)
    (when (.isNativePlatform Capacitor)
      (-> (.setPreviewPreferences shadow-device #js {:enabled enabled?})
@@ -181,25 +191,54 @@ https://github.com/Paradise-Chat/paradise-push
    {:dispatch [:push/hydrate-previews-setting enabled?]}))
 
 
+(re-frame/reg-event-fx
+ :push/create-sleepy-shadow
+ (fn [{:keys [db]} [_ credentials]]
+   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+     (log/info "Creating Sleepy Shadow Device...")
+     (let [user-id (or (:user-id credentials) (:userId credentials) (:active-user-id db))]
+       (go
+         (try
+           (if-let [script-path (<! (active-notification-script))]
+             (let [script-name (last (str/split script-path #"/"))
+                   source      (<p! (fetch-notification-script script-path))
+                   payload     (cond-> (assoc credentials
+                                              :userId             user-id
+                                              :notificationScript script-name)
+                                 (not (str/blank? source))
+                                 (assoc :scriptSource source))
+                   res         (<p! (.createSleepyShadow shadow-device (clj->js payload)))]
+               (log/info "Sleepy Shadow SUCCESS:" (.-status res)))
+             (log/error "Sleepy Shadow FAILED: No push-url returned from engine"))
+           (catch :default e
+             (log/error "Sleepy Shadow FAILED:" e))))))
+   {}))
 
 (re-frame/reg-event-fx
  :push/activate-shadow
  (fn [{:keys [db]} [_ token]]
    (let [active-user (:active-user-id db)
-         old-user    (:active-push-user db)]
+         old-user    (:active-push-user db)
+         app-id      (resolve-app-id)
+         platform    (.getPlatform Capacitor)]
      (go
        (try
          (when (and old-user (string? old-user) (not= old-user active-user))
            (try
-             (<p! (.deactivateShadow shadow-device #js {:pushToken token :userId old-user}))
+             (<p! (.deactivateShadow shadow-device
+                                     #js {:pushToken token
+                                          :userId    old-user
+                                          :appId     app-id
+                                          :platform  platform}))
              (catch js/Error e
                (log/warn "Silent deactivate cleanup error:" e))))
          (<p! (.activateShadow shadow-device
                                #js {:pushToken token
-                                    :pushUrl (:push-url @!config)
-                                    :userId active-user}))
+                                    :pushUrl   (:push-url @!config)
+                                    :userId    active-user
+                                    :appId     app-id
+                                    :platform  platform}))
          (re-frame/dispatch [:push/set-active-user active-user])
-
          (catch js/Error err
            (log/error "Shadow Activated FAILED:" err)
            (re-frame/dispatch [:modal/open-shadow-login]))))
@@ -208,25 +247,41 @@ https://github.com/Paradise-Chat/paradise-push
 (re-frame/reg-event-fx
  :push/deactivate-shadow
  (fn [{:keys [db]} _]
-   (let [token (:native-token db)
-         target-user (:active-push-user db)]
+   (let [token       (:native-token db)
+         target-user (:active-push-user db)
+         app-id      (resolve-app-id)
+         platform    (.getPlatform Capacitor)]
      (when (and target-user (string? target-user))
        (go
          (try
            (<p! (.deactivateShadow shadow-device
-                                   #js {:pushToken (or token "") :userId target-user}))
+                                   #js {:pushToken (or token "")
+                                        :userId    target-user
+                                        :appId     app-id
+                                        :platform  platform}))
            (catch js/Error e
              (log/error "Shadow Deactivated FAILED:" e)))
          (re-frame/dispatch [:push/hydrate-status nil])))
      {})))
 
-
 (re-frame/reg-event-fx
  :push/verify-shadow
  (fn [_ [_ user-id recovery-key]]
    (when (.isNativePlatform Capacitor)
-     (-> (.verifyShadow shadow-device #js {:userId user-id :recoveryKey recovery-key})
-         (.catch #(log/error "Shadow verification failed:" %))))
+     (go
+       (try
+         (let [prep    (<! (mesh/do-with-thread!
+                            :engine-pool
+                            {:handler   :prepare-push-verification
+                             :arguments {:user-id      user-id
+                                         :recovery-key recovery-key}}))
+               payload (merge {:userId      user-id
+                               :recoveryKey (or recovery-key "")}
+                              (:verification-data prep))]
+           (<p! (.verifyShadow shadow-device (clj->js payload)))
+           (log/info "Shadow device verified successfully."))
+         (catch js/Error e
+           (log/error "Shadow verification failed:" e)))))
    {}))
 
 
