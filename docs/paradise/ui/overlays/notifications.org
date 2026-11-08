@@ -15,8 +15,9 @@ They are technically an overlay, so we'll group them here also.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
 (ns paradise.ui.overlays.notifications
-(:require [re-frame.core :as re-frame]
+  (:require [re-frame.core :as re-frame]
             [taoensso.timbre :as log]
+            [clojure.string :as str]
             [promesa.core :as p]
             [cljs.core.async :refer [go <!]]
             [cljs.core.async.interop :refer-macros [<p!]]
@@ -24,7 +25,7 @@ They are technically an overlay, so we'll group them here also.
             ["@capacitor/push-notifications" :refer [PushNotifications]]
             [paradise.shared.client.state :refer [!config] :as state]
             [paradise.shared.client.session-store :as store]
-            [cljs-workers.core :as main]))
+            [cljs-workers.mesh :as mesh]))
 #+end_src
 
 
