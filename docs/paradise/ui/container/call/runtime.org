@@ -5,7 +5,10 @@
 **** Preface
 
 A collection of helper functions and atoms for a call.
-
+Calling is handled by an externally loaded driver
+(and encoder) in which we can then bind those
+functions against while keep a completely custom
+and protocol agnostic calling solution.
 
 
 **** Imports
