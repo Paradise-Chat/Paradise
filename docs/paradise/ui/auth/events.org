@@ -226,6 +226,74 @@ This way we don't load a bunch of unneeded data from a
 large enough registry.
 
 
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
+(re-frame/reg-event-fx
+ :registry/load-success
+ (fn [{:keys [db]} [_ resolved-engines-map]]
+   {:db (assoc db :available-engines resolved-engines-map)}))
+
+(re-frame/reg-sub
+ :registry/available-engines
+ (fn [db _]
+   (get db :available-engines {})))
+
+
+(re-frame/reg-event-fx
+ :registry/sync-manifests
+ (fn [{:keys [db]} _]
+   (go
+     (<! (registry/ensure-environment!))
+     (re-frame/dispatch [:registry/set-available-engines (registry/resolve-engines)]))
+   {}))
+
+(re-frame/reg-event-db
+ :registry/set-available-engines
+ (fn [db [_ engines]]
+   (assoc db :available-engines engines)))
+
+(re-frame/reg-event-fx
+ :engine/fetch-manifest
+ (fn [{:keys [db]} [_ url]]
+   (go
+     (if-let [manifest (<! (registry/fetch-edn url))]
+       (let [engine-kw (keyword (:module-id manifest))
+             base-dir  (subs url 0 (inc (clojure.string/last-index-of url "/")))
+             js-path   (:path manifest)
+             abs-path  (if (clojure.string/starts-with? js-path "http") js-path (str base-dir js-path))]
+         (re-frame/dispatch [:registry/set-custom-engine engine-kw (assoc manifest :path abs-path)]))
+       (js/console.error "Failed to fetch custom manifest from:" url)))
+   {}))
+
+(re-frame/reg-event-db
+ :registry/set-custom-engine
+ (fn [db [_ engine-kw manifest]]
+   (assoc-in db [:available-engines engine-kw] manifest)))
+
+(re-frame/reg-event-fx
+ :auth/login-action
+ (fn [{:keys [db]} [_ engine-id action-id payload]]
+   (binding/set-active-engine! engine-id)
+   (if-let [pool @state/!engine-pool]
+     (go
+       (try
+         (let [res (<! (main/do-with-pool! pool {:handler :login-action
+                                                 :arguments {:action-id action-id
+                                                             :payload payload}}))
+               status-kw (keyword (:status res))]
+           (case status-kw
+             :redirect (set! (.-href js/window.location) (:url res))
+             :success (re-frame/dispatch [:auth/login-success
+                                          (assoc res :credentials payload
+                                                     :engine-id engine-id)])
+             (re-frame/dispatch [:auth/login-failure (:msg res)])))
+         (catch :default e
+           (re-frame/dispatch [:auth/login-failure (str e)]))))
+     (log/error "Cannot perform action: Engine pool not initialized"))
+
+   {:db (assoc db :auth-status :authenticating
+                  :login-error nil)}))
+#+end_src
+
 **** Sign-in Page Component
 
 
