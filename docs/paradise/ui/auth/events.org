@@ -314,7 +314,11 @@ large enough registry.
 
 ***** Login Screen
 
-This needs to be broken up a good bit, but it'll suffice for now
+
+More then ever this needs to be broken up. Still not entirely sure we want
+to provide loading custom engines at initial start. Also I think we want to
+move away from individual engine loads and instead require engines to be
+loaded through registries (unless mounted locally via dev execution).
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
 (defn ^:ui login-screen []
