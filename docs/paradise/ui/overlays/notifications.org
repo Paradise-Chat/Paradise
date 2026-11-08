@@ -97,22 +97,59 @@ https://github.com/Paradise-Chat/paradise-push
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
 (def shadow-device (registerPlugin "ShadowDevice"))
 
+(defn- resolve-app-id []
+  (let [cfg @!config]
+    (case (.getPlatform Capacitor)
+      "ios"     (:app-id-ios cfg)
+      "android" (:app-id-android cfg)
+      (or (:app-id-web cfg) (:app-id cfg)))))
+
+
+
+(defn- strip-source-map [s]
+  (when s
+    (let [marker (str "/" "/# sourceMappingURL=")]
+      (if-let [idx (str/last-index-of s marker)]
+        (subs s 0 idx)
+        s))))
+
+(defn- fetch-notification-script [url]
+  (-> (js/fetch url)
+      (p/then (fn [resp]
+                (when (.-ok resp)
+                  (.text resp))))
+      (p/then strip-source-map)
+      (p/catch (fn [_] nil))))
+
+(defn- active-notification-script []
+  (go
+    (let [res (<! (mesh/do-with-thread! :engine-pool
+                                        {:handler   :get-asset-urls
+                                         :arguments {}}))]
+      (when (#{"success" :success} (:status res))
+        (:push-url res)))))
+
 (re-frame/reg-event-fx
- :push/create-sleepy-shadow
- (fn [_ [_ credentials]]
-   (log/info "Creating Sleepy Shadow Device...")
-   (try
-     (-> (.createSleepyShadow shadow-device
-           #js {:homeserverUrl (:homeserver credentials)
-                :username (:username credentials)
-                :password (:password credentials)
-                :userId (:userId credentials)
-                })
-         (.then #(log/info "Sleepy Shadow SUCCESS:" (.-status %)))
-         (.catch #(log/error "Sleepy Shadow FAILED:" %)))
-     (catch js/Error e
-       (log/error "Synchronous CLJS Crash in createSleepyShadow:" e)))
+ :push/sync-engine-script
+ (fn [_ _]
+   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+     (go
+       (try
+         (if-let [script-path (<! (active-notification-script))]
+           (let [script-name (last (str/split script-path #"/"))
+                 source      (<p! (fetch-notification-script script-path))]
+             (log/info "Fetched push script:" script-name "bytes:" (count source))
+             (when (and source (not (str/blank? source)))
+               (.syncPushScript shadow-device
+                                #js {:scriptName   script-name
+                                     :scriptSource source})))
+           (log/error "No push-url returned from engine"))
+         (catch :default e
+           (log/error "Failed to sync notification script:" e)))))
    {}))
+#+end_src
+
+
 
 (re-frame/reg-sub
  :push/active-user
