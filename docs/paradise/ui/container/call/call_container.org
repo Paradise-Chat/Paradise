@@ -3,11 +3,15 @@
 
 **** Preface
 
-This just provides the container for the calls. Originally designed to house
-iframes it has massively simplified but still serves the same purpose.
-To enable the user to navigate away from the call without disconnecting
-the call.
+To note, initially we just juggled two iframes that way we could allow Element Call to handle
+the lobby behavior.
+Then we transitioned to a livekit base in which we customized the look and feel of.
 
+However, now we don't use Element call at all nor Livekit in the core app.
+Instead we load a driver from the engine and it maps to our functions and provides the
+functionality to our call interface.
+This means that regardless of protocol as long as the engine tells us how to map
+to their call spec then Paradise can just 'work' for their calls.
 
 **** Import
 
