@@ -1,514 +1,560 @@
 (ns paradise.ui.container.call.events
   (:require
    [re-frame.core :as rf]
-   [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
    [cljs.core.async :refer [go <!]]
-   [paradise.shared.client.state :as state]
    [promesa.core :as p]
    [taoensso.timbre :as log]
    [paradise.ui.container.call.runtime :as rtc]
    [paradise.ui.container.call.native :as native]))
 
-(rf/reg-event-fx
- :call/initiate-e2ee
- (fn [{:keys [db]} [_ room-id]]
-     (mesh/do-with-thread! :engine-pool
-                         {:handler :call/broadcast-e2ee-key
-                          :arguments {:room-id room-id}})
+(rf/reg-fx
+ :call.driver/boot
+ (fn [{:keys [driver-url encoder-url session-config]}]
+   (-> (rtc/start-driver!
+        {:driver-url driver-url
+         :encoder-url encoder-url
+         :session-config session-config
+         :callbacks
+         {:on-connected
+          #(rf/dispatch [:call/driver-connected])
+          :on-disconnected
+          #(rf/dispatch [:call/driver-disconnected %])
+          :on-participants-changed
+          (fn [participants]
+            (let [valid-ids (into []
+                                  (keep (fn [p]
+                                          (when (and (:video-track p) (not (:video-muted? p)))
+                                            (:id p))))
+                                  participants)]
+              (rf/dispatch [:call/prune-unwatched valid-ids])))
+          :on-local-media-changed
+          #(rf/dispatch [:call/update-media-state %])
+          :on-signal-out
+          #(rf/dispatch [:call/forward-signal-to-engine %])
+          :on-error
+          #(rf/dispatch [:call/media-error %1 %2])}})
+       (p/catch
+        (fn [err]
+          (log/error err "Failed to boot call driver")
+          (rf/dispatch [:call/media-error :driver err]))))))
 
+(rf/reg-fx
+ :call.driver/set-microphone
+ (fn [enabled?]
+   (-> (p/let [_ (rtc/set-microphone-enabled! enabled?)]
+         (rf/dispatch [:call/media-state-changed :audio enabled?]))
+       (p/catch
+        (fn [err]
+          (log/error err "Failed to change microphone state")
+          (rf/dispatch [:call/media-error :microphone err]))))))
 
-   {:db db}))
+(rf/reg-fx
+ :call.driver/set-camera
+ (fn [enabled?]
+   (-> (p/let [_ (rtc/set-camera-enabled! enabled?)]
+         (rf/dispatch [:call/media-state-changed :video enabled?]))
+       (p/catch
+        (fn [err]
+          (log/error err "Failed to change camera state")
+          (rf/dispatch [:call/media-error :camera err]))))))
 
+(rf/reg-fx
+ :call.driver/set-screen-share
+ (fn [enabled?]
+   (-> (p/let [_ (rtc/set-screen-share-enabled! enabled?)]
+         (rf/dispatch [:call/media-state-changed :screen-sharing enabled?]))
+       (p/catch
+        (fn [err]
+          (log/error err "Failed to change screen share state")
+          (rf/dispatch [:call/media-error :screen-share err]))))))
 
-(rf/reg-event-fx
- :call/get-key-provider
+(rf/reg-fx
+ :call.driver/switch-device
+ (fn [{:keys [kind device-id]}]
+   (when (seq device-id)
+     (-> (rtc/switch-device! (name kind) device-id)
+         (p/catch
+          (fn [err]
+            (log/warn err "Failed to switch active call device" kind device-id)
+            (rf/dispatch [:call/media-error kind err])))))))
+
+(rf/reg-fx
+ :call.driver/switch-devices
+ (fn [devices-map]
+   (doseq [[kind device-id] devices-map
+           :when (seq device-id)]
+     (-> (rtc/switch-device! (name kind) device-id)
+         (p/catch
+          (fn [err]
+            (log/warn err "Failed to apply preferred call device" kind device-id)
+            (rf/dispatch [:call/media-error kind err])))))))
+
+(rf/reg-fx
+ :call.audio/set-noise-suppression
+ (fn [enabled?]
+   (rtc/set-noise-suppression-enabled! enabled?)))
+
+(rf/reg-fx
+ :call.audio/set-voice-threshold
+ (fn [threshold]
+   (rtc/set-voice-threshold! threshold)))
+
+(rf/reg-fx
+ :call.driver/inject-crypto
+ (fn [payload]
+   (-> (rtc/inject-crypto-material! payload)
+       (p/catch
+        (fn [err]
+          (log/error err "Failed to inject call crypto material")
+          (rf/dispatch [:call/e2ee-error {:payload payload :error err}]))))))
+
+(rf/reg-fx
+ :call.driver/deliver-signal
+ (fn [payload]
+   (rtc/deliver-engine-signal! payload)))
+
+(rf/reg-fx
+ :call.driver/disconnect
  (fn [_]
-   (go
-       (let [res (<! (mesh/do-with-thread!
-                      :engine-pool
-                      {:handler :call/get-key-provider
-                       :arguments {}}))]
-         (when (and res (:provider res))
-           (js/console.log "Engine signaled KeyProvider ready"))))))
-
-
-
-
+   (-> (rtc/disconnect!)
+       (p/catch
+        (fn [err]
+          (log/warn err "Call driver disconnect returned an error"))))))
 
 (rf/reg-event-fx
  :call/init-widget
  (fn [{:keys [db]} [_ room-id]]
-   (js/console.log "DISPATCHED INIT WIDGET")
-   (mesh/do-with-thread! :engine-pool {:handler :call/start-crypto-driver :arguments {:room-id room-id}})
+   (mesh/do-with-thread! :engine-pool
+                         {:handler :call/start-crypto-driver
+                          :arguments {:room-id room-id}})
    {:db db}))
-
-
 
 (rf/reg-event-fx
  :call/start
  (fn [{:keys [db]} [_ room-id]]
-     (go
-       (let [res (<! (mesh/do-with-thread! :engine-pool
-                                         {:handler :call/request-sfu-token
-                                          :arguments {:room-id room-id}}))]
-         (if (or (= (:status res) :success) (= (:status res) "success"))
-           (do
-             (js/console.log "LiveKit Payload Received:" res)
-             (rf/dispatch [:call/sfu-token-received {:url (:url res) :token (:token res)}]))
-           (log/error "Engine failed to negotiate LiveKit token:" (:msg res)))))
-
+   (go
+     (let [res (<! (mesh/do-with-thread!
+                    :engine-pool
+                    {:handler :call/request-session
+                     :arguments {:room-id room-id}}))]
+       (if (or (= (:status res) :success) (= (:status res) "success"))
+         (rf/dispatch [:call/session-negotiated res])
+         (log/error "Engine failed to negotiate call session:" (:msg res)))))
    {:db (-> db
             (assoc-in [:call :active-room-id] room-id)
             (assoc-in [:call :is-active?] true)
-            (assoc-in [:call :status] :requesting-token))}))
+            (assoc-in [:call :status] :negotiating))}))
 
 (rf/reg-event-fx
- :call/sfu-token-received
- (fn [{:keys [db]} [_ {:keys [url token]}]]
-   {:db (-> db
-            (assoc-in [:call :livekit-url] url)
-            (assoc-in [:call :livekit-token] token)
-            (assoc-in [:call :status] :connected))}))
+ :call/session-negotiated
+ (fn [{:keys [db]} [_ {:keys [driver-url encoder-url session-config url token]}]]
+   (let [normalized-config (or session-config {:url url :token token})]
+     {:db (assoc-in db [:call :status] :connecting)
+      :call.driver/boot {:driver-url driver-url
+                         :encoder-url encoder-url
+                         :session-config normalized-config}})))
 
+(rf/reg-event-fx
+ :call/driver-connected
+ (fn [{:keys [db]} _]
+   (let [audio-enabled? (get-in db [:call :audio-enabled?] true)
+         video-enabled? (get-in db [:call :video-enabled?] false)
+         call-devices   (get-in db [:settings :call-devices])]
+     (cond-> {:db (assoc-in db [:call :status] :connected)
+              :call.driver/set-microphone audio-enabled?}
+       video-enabled?
+       (assoc :call.driver/set-camera true)
 
-(rf/reg-fx
- :livekit/set-microphone
- (fn [enabled?]
-   (-> (p/let [_ (rtc/set-microphone-enabled! enabled?)]
-         (rf/dispatch
-          [:call/media-state-changed
-           :audio
-           enabled?]))
+       (seq call-devices)
+       (assoc :call.driver/switch-devices call-devices)))))
 
-       (p/catch
-        (fn [err]
-          (log/error
-           err
-           "Failed to change microphone state")
+(rf/reg-event-db
+ :call/active-participants-changed
+ (fn [db [_ participants]]
+   (let [participants (vec (or participants []))
+         valid-video-ids (set (keep (fn [p]
+                                      (when (and (:video-track p) (not (:video-muted? p)))
+                                        (:id p)))
+                                    participants))]
+     (-> db
+         (assoc-in [:call :participants] participants)
+         (update-in [:call :unwatched-ids]
+                    (fn [current]
+                      (set (keep valid-video-ids (or current #{})))))))))
 
-          (rf/dispatch
-           [:call/media-error
-            :microphone
-            err]))))))
+(rf/reg-event-fx
+ :call/forward-signal-to-engine
+ (fn [{:keys [db]} [_ payload]]
+   (let [room-id (get-in db [:call :active-room-id])]
+     (mesh/do-with-thread! :engine-pool
+                           {:handler :call/driver-signal
+                            :arguments {:room-id room-id
+                                        :payload payload}})
+     {:db db})))
 
-
-(rf/reg-fx
- :livekit/set-camera
- (fn [enabled?]
-   (-> (p/let [_ (rtc/set-camera-enabled! enabled?)]
-         (rf/dispatch
-          [:call/media-state-changed
-           :video
-           enabled?]))
-
-       (p/catch
-        (fn [err]
-          (log/error
-           err
-           "Failed to change camera state")
-
-          (rf/dispatch
-           [:call/media-error
-            :camera
-            err]))))))
-
-
-(rf/reg-fx
- :livekit/set-screen-share
- (fn [enabled?]
-   (-> (p/let [_ (rtc/set-screen-share-enabled! enabled?)]
-         (rf/dispatch
-          [:call/media-state-changed
-           :screen-sharing
-           enabled?]))
-
-       (p/catch
-        (fn [err]
-          (log/error
-           err
-           "Failed to change screen share state")
-
-          (rf/dispatch
-           [:call/media-error
-            :screen-share
-            err]))))))
-
-
-(rf/reg-fx
- :livekit/inject-e2ee-key
- (fn [{:keys [participant-id
-              key-index
-              key-array]}]
-
-   (-> (p/let [_ (rtc/inject-key!
-                  participant-id
-                  key-index
-                  key-array)]
-         nil)
-
-       (p/catch
-        (fn [err]
-          (log/error
-           err
-           "Failed to inject LiveKit E2EE key"
-           participant-id
-           key-index)
-
-          (rf/dispatch
-           [:call/e2ee-error
-            {:participant-id participant-id
-             :key-index key-index
-             :error err}]))))))
-
-
-(rf/reg-fx
- :livekit/disconnect
- (fn [_]
-   (-> (p/let [_ (rtc/disconnect!)]
-         nil)
-
-       (p/catch
-        (fn [err]
-          (log/warn
-           err
-           "LiveKit disconnect returned an error"))))))
-
-
-
+(rf/reg-event-fx
+ :call/engine-signal-received
+ (fn [_ [_ payload]]
+   {:call.driver/deliver-signal payload}))
 
 (rf/reg-event-fx
  :call/e2ee-key-received
- (fn [_ [_ {:keys [participant-id
-                   key-index
-                   key-array]}]]
+ (fn [_ [_ crypto-payload]]
+   {:call.driver/inject-crypto crypto-payload}))
 
-   {:livekit/inject-e2ee-key
-    {:participant-id participant-id
-     :key-index key-index
-     :key-array key-array}}))
-
-
-(rf/reg-event-db
- :call/e2ee-error
- (fn [db [_ error]]
-   (assoc-in
-    db
-    [:call :e2ee-error]
-    error)))
-
-
+(rf/reg-event-fx
+ :call/set-microphone
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [enabled? (boolean enabled?)]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-microphone enabled?}
+       {:db (assoc-in db [:call :audio-enabled?] enabled?)}))))
 
 (rf/reg-event-fx
  :call/toggle-audio
  (fn [{:keys [db]} _]
-   {:livekit/set-microphone
-    (not
-     (get-in
-      db
-      [:call :audio-enabled?]
-      true))}))
-
+   (let [next-state (not (get-in db [:call :audio-enabled?] true))]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-microphone next-state}
+       {:db (assoc-in db [:call :audio-enabled?] next-state)}))))
 
 (rf/reg-event-fx
  :call/toggle-video
  (fn [{:keys [db]} _]
-   {:livekit/set-camera
-    (not
-     (get-in
-      db
-      [:call :video-enabled?]
-      false))}))
-
+   (let [next-state (not (get-in db [:call :video-enabled?] false))]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-camera next-state}
+       {:db (assoc-in db [:call :video-enabled?] next-state)}))))
 
 (rf/reg-event-fx
  :call/toggle-screen-share
  (fn [{:keys [db]} _]
-   {:livekit/set-screen-share
-    (not
-     (get-in
-      db
-      [:call :screen-sharing?]
-      false))}))
-
+   {:call.driver/set-screen-share
+    (not (get-in db [:call :screen-sharing?] false))}))
 
 (rf/reg-event-db
  :call/toggle-deafen
  (fn [db _]
-   (update-in
-    db
-    [:call :deafened?]
-    not)))
-
-
+   (update-in db [:call :deafened?] not)))
 
 (rf/reg-event-db
  :call/media-state-changed
  (fn [db [_ kind enabled?]]
    (case kind
-
-     :audio
-     (assoc-in
-      db
-      [:call :audio-enabled?]
-      enabled?)
-
-     :video
-     (assoc-in
-      db
-      [:call :video-enabled?]
-      enabled?)
-
-     :screen-sharing
-     (assoc-in
-      db
-      [:call :screen-sharing?]
-      enabled?)
-
+     :audio          (assoc-in db [:call :audio-enabled?] enabled?)
+     :video          (assoc-in db [:call :video-enabled?] enabled?)
+     :screen-sharing (assoc-in db [:call :screen-sharing?] enabled?)
      db)))
-
 
 (rf/reg-event-db
  :call/update-media-state
- (fn [db [_ {:keys [audio
-                    video
-                    screen-sharing]}]]
-
-   (cond-> db
-
-     (some? audio)
-     (assoc-in
-      [:call :audio-enabled?]
-      audio)
-
-     (some? video)
-     (assoc-in
-      [:call :video-enabled?]
-      video)
-
-     (some? screen-sharing)
-     (assoc-in
-      [:call :screen-sharing?]
-      screen-sharing))))
-
+ (fn [db [_ {:keys [audio video screen-sharing]}]]
+   (if (= (get-in db [:call :status]) :connected)
+     (cond-> db
+       (some? audio)          (assoc-in [:call :audio-enabled?] audio)
+       (some? video)          (assoc-in [:call :video-enabled?] video)
+       (some? screen-sharing) (assoc-in [:call :screen-sharing?] screen-sharing))
+     db)))
 
 (rf/reg-event-db
  :call/media-error
  (fn [db [_ device err]]
-   (assoc-in
-    db
-    [:call :media-error]
-    {:device device
-     :error err})))
+   (assoc-in db [:call :media-error] {:device device :error err})))
 
 (rf/reg-event-db
- :call/set-active-room
- (fn [db [_ room-id]]
-   (log/info
-    "Call: Setting active room to"
-    room-id)
-
-   (-> db
-       (assoc-in
-        [:call :active-room-id]
-        room-id)
-
-       (assoc-in
-        [:call :audio-enabled?]
-        true)
-
-       (assoc-in
-        [:call :video-enabled?]
-        false)
-
-       (assoc-in
-        [:call :screen-sharing?]
-        false)
-
-       (assoc-in
-        [:call :disconnecting?]
-        false)
-
-       (assoc-in
-        [:call :media-error]
-        nil)
-
-       (assoc-in
-        [:call :e2ee-error]
-        nil))))
-
-
-(rf/reg-event-db
- :call/set-active
- (fn [db [_ active?]]
-   (assoc-in
-    db
-    [:call :is-active?]
-    active?)))
-
+ :call/e2ee-error
+ (fn [db [_ error]]
+   (assoc-in db [:call :e2ee-error] error)))
 
 (rf/reg-event-fx
  :call/hangup
  (fn [{:keys [db]} [_ opts]]
    (let [opts         (or opts {})
-         room-id      (or (:room-id opts)
-                          (get-in db [:call :active-room-id]))
+         room-id      (or (:room-id opts) (get-in db [:call :active-room-id]))
          skip-native? (get opts :skip-native? false)]
-
      (when (and room-id (not skip-native?))
        (native/end-call! room-id))
-
-       (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
-                                 :arguments {:room-id room-id}})
-
-     {:livekit/disconnect true})))
-
-
+     (mesh/do-with-thread! :engine-pool
+                           {:handler :call/leave-sfu
+                            :arguments {:room-id room-id}})
+     {:db (assoc-in db [:call :disconnecting?] true)
+      :call.driver/disconnect true})))
 
 (rf/reg-event-fx
- :call/livekit-disconnected
+ :call/driver-disconnected
  (fn [{:keys [db]} [_ reason]]
    (let [room-id        (get-in db [:call :active-room-id])
          disconnecting? (get-in db [:call :disconnecting?] false)]
-
-     (log/info "LiveKit disconnected:" reason)
+     (log/info "Call driver disconnected:" reason)
      (when (and room-id (not disconnecting?))
        (native/end-call! room-id)
-         (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
-                                             :arguments {:room-id room-id}}))
-
-     {:db       (-> db
-                    (assoc-in [:call :active-room-id] nil)
-                    (assoc-in [:call :is-active?] false)
-                    (assoc-in [:call :livekit-url] nil)
-                    (assoc-in [:call :livekit-token] nil)
-                    (assoc-in [:call :e2ee-keys] nil)
-                    (assoc-in [:call :status] :idle))
+       (mesh/do-with-thread! :engine-pool
+                             {:handler :call/leave-sfu
+                              :arguments {:room-id room-id}}))
+     {:db (-> db
+              (assoc-in [:call :active-room-id] nil)
+              (assoc-in [:call :is-active?] false)
+              (assoc-in [:call :status] :idle))
       :dispatch [:call/teardown]})))
-
 
 (rf/reg-event-fx
  :call/teardown
  (fn [{:keys [db]} _]
    (rtc/reset-session!)
+   {:db (-> db
+            (assoc-in [:call :active-room-id] nil)
+            (assoc-in [:call :is-active?] false)
+            (assoc-in [:call :disconnecting?] false)
+            (assoc-in [:call :screen-sharing?] false)
+            (assoc-in [:call :participants] [])
+            (assoc-in [:call :unwatched-ids] #{})
+            (assoc-in [:call :focused-id] nil)
+            (assoc-in [:call :immersive?] false)
+            (assoc-in [:call :pip-tucked?] false)
+            (assoc-in [:call :media-error] nil)
+            (assoc-in [:call :e2ee-error] nil)
+            (assoc :main-focus :timeline))}))
 
-   {:db
-    (-> db
-        (assoc-in
-         [:call :active-room-id]
-         nil)
+(rf/reg-event-db
+ :call/set-active-room
+ (fn [db [_ room-id]]
+   (log/info "Call: Setting active room to" room-id)
+   (-> db
+       (assoc-in [:call :active-room-id] room-id)
+       (update-in [:call :audio-enabled?] #(if (some? %) % true))
+       (update-in [:call :video-enabled?] #(if (some? %) % false))
+       (assoc-in [:call :screen-sharing?] false)
+       (assoc-in [:call :disconnecting?] false)
+       (assoc-in [:call :media-error] nil)
+       (assoc-in [:call :e2ee-error] nil))))
 
-        (assoc-in
-         [:call :is-active?]
-         false)
-
-        (assoc-in
-         [:call :disconnecting?]
-         false)
-
-        (assoc-in
-         [:call :screen-sharing?]
-         false)
-
-        (assoc-in
-         [:call :media-error]
-         nil)
-
-        (assoc-in
-         [:call :e2ee-error]
-         nil)
-
-        (assoc
-         :main-focus
-         :timeline))}))
+(rf/reg-event-db
+ :call/set-active
+ (fn [db [_ active?]]
+   (assoc-in db [:call :is-active?] active?)))
 
 (rf/reg-event-db
  :call/toggle-chat
  (fn [db _]
-   (update-in
-    db
-    [:call :chat-open?]
-    not)))
+   (update-in db [:call :chat-open?] not)))
+
+(rf/reg-event-db
+ :call/set-stage-mounted
+ (fn [db [_ mounted?]]
+   (-> db
+       (assoc-in [:call :stage-mounted?] (boolean mounted?))
+       (cond-> (not mounted?)
+         (assoc-in [:call :immersive?] false)))))
+
+(rf/reg-event-db
+ :call/toggle-immersive
+ (fn [db _]
+   (update-in db [:call :immersive?] not)))
+
+(rf/reg-event-db
+ :call/set-focused-id
+ (fn [db [_ tile-id]]
+   (assoc-in db [:call :focused-id] tile-id)))
+
+(rf/reg-event-db
+ :call/stop-watching
+ (fn [db [_ tile-id-or-ids]]
+   (let [ids        (if (coll? tile-id-or-ids)
+                      (set tile-id-or-ids)
+                      #{tile-id-or-ids})
+         focused-id (get-in db [:call :focused-id])]
+     (cond-> (update-in db [:call :unwatched-ids] (fnil into #{}) ids)
+       (contains? ids focused-id)
+       (assoc-in [:call :focused-id] :grid)))))
+
+(rf/reg-event-db
+ :call/watch-stream
+ (fn [db [_ tile-id]]
+   (-> db
+       (update-in [:call :unwatched-ids] (fnil disj #{}) tile-id)
+       (assoc-in [:call :focused-id] tile-id))))
+
+(rf/reg-event-db
+ :call/prune-unwatched
+ (fn [db [_ valid-ids]]
+   (update-in db [:call :unwatched-ids]
+              (fn [current]
+                (set (keep (set valid-ids) (or current #{})))))))
+
+(rf/reg-event-db
+ :call/set-pip-corner
+ (fn [db [_ corner]]
+   (assoc-in db [:call :pip-corner] corner)))
+
+(rf/reg-event-db
+ :call/set-pip-tucked
+ (fn [db [_ tucked?]]
+   (assoc-in db [:call :pip-tucked?] (boolean tucked?))))
+
+(rf/reg-event-db
+ :call/set-room-participants
+ (fn [db [_ room-id participants]]
+   (assoc-in db [:call :lobbies room-id] (vec participants))))
+
+(rf/reg-event-db
+ :call/set-volume
+ (fn [db [_ volume-key volume]]
+   (let [clamped (-> (js/Number volume) (max 0) (min 100) js/Math.round)]
+     (-> db
+         (assoc-in [:call :volumes volume-key] clamped)
+         (cond-> (pos? clamped)
+           (update-in [:call :local-mutes] (fnil disj #{}) volume-key))))))
+
+(rf/reg-event-db
+ :call/toggle-local-mute
+ (fn [db [_ volume-key]]
+   (let [muted? (contains? (get-in db [:call :local-mutes] #{}) volume-key)]
+     (if muted?
+       (update-in db [:call :local-mutes] (fnil disj #{}) volume-key)
+       (update-in db [:call :local-mutes] (fnil conj #{}) volume-key)))))
+
+(rf/reg-event-db
+ :call/set-speaking-ids
+ (fn [db [_ speaking-ids]]
+   (assoc-in db [:call :speaking-ids] (or speaking-ids #{}))))
 
 (rf/reg-sub
  :call/state
  (fn [db _]
    (:call db)))
 
+(rf/reg-sub
+ :call/status
+ (fn [db _]
+   (get-in db [:call :status] :idle)))
+
+(rf/reg-sub
+ :call/participants
+ (fn [db _]
+   (get-in db [:call :participants] [])))
 
 (rf/reg-sub
  :call/active-room
  (fn [db _]
-   (get-in
-    db
-    [:call :active-room-id])))
-
+   (get-in db [:call :active-room-id])))
 
 (rf/reg-sub
  :call/is-active?
  (fn [db _]
-   (get-in
-    db
-    [:call :is-active?]
-    false)))
-
+   (get-in db [:call :is-active?] false)))
 
 (rf/reg-sub
  :call/audio-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:call :audio-enabled?]
-    true)))
-
+   (get-in db [:call :audio-enabled?] true)))
 
 (rf/reg-sub
  :call/video-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:call :video-enabled?]
-    false)))
-
+   (get-in db [:call :video-enabled?] false)))
 
 (rf/reg-sub
  :call/deafened?
  (fn [db _]
-   (get-in
-    db
-    [:call :deafened?]
-    false)))
-
+   (get-in db [:call :deafened?] false)))
 
 (rf/reg-sub
  :call/screen-sharing?
  (fn [db _]
-   (get-in
-    db
-    [:call :screen-sharing?]
-    false)))
-
+   (get-in db [:call :screen-sharing?] false)))
 
 (rf/reg-sub
  :call/chat-open?
  (fn [db _]
-   (get-in
-    db
-    [:call :chat-open?]
-    false)))
-
+   (get-in db [:call :chat-open?] false)))
 
 (rf/reg-sub
  :call/media-error
  (fn [db _]
-   (get-in
-    db
-    [:call :media-error])))
-
+   (get-in db [:call :media-error])))
 
 (rf/reg-sub
  :call/e2ee-error
  (fn [db _]
-   (get-in
-    db
-    [:call :e2ee-error])))
+   (get-in db [:call :e2ee-error])))
+
+(rf/reg-sub
+ :call/stage-mounted?
+ (fn [db _]
+   (get-in db [:call :stage-mounted?] false)))
+
+(rf/reg-sub
+ :call/unwatched-ids
+ (fn [db _]
+   (get-in db [:call :unwatched-ids] #{})))
+
+(rf/reg-sub
+ :call/focused-id
+ (fn [db _]
+   (get-in db [:call :focused-id])))
+
+(rf/reg-sub
+ :call/immersive?
+ (fn [db _]
+   (get-in db [:call :immersive?] false)))
+
+(rf/reg-sub
+ :call/pip-corner
+ (fn [db _]
+   (get-in db [:call :pip-corner] "bottom-right")))
+
+(rf/reg-sub
+ :call/pip-tucked?
+ (fn [db _]
+   (get-in db [:call :pip-tucked?] false)))
+
+(rf/reg-sub
+ :call/room-participants
+ :<- [:rooms/unfiltered-indexed-map]
+ :<- [:rooms/active-metadata]
+ :<- [:call/state]
+ (fn [[rooms-map active-meta call-state] [_ room-id]]
+   (let [raw-room (when (and rooms-map room-id)
+                    (get rooms-map room-id))
+         r        (if (map? raw-room)
+                    raw-room
+                    (when raw-room
+                      (js->clj raw-room :keywordize-keys true)))
+         raw-list (or (:activeRoomCallParticipants r)
+                      (:call-participants r)
+                      (:callParticipants r)
+                      (when raw-room
+                        (aget raw-room "activeRoomCallParticipants"))
+                      (:activeRoomCallParticipants active-meta)
+                      (:call-participants active-meta)
+                      (get-in call-state [:lobbies room-id])
+                      [])]
+     (js->clj raw-list :keywordize-keys true))))
+
+(rf/reg-sub
+ :call/volumes
+ (fn [db _]
+   (get-in db [:call :volumes] {})))
+
+(rf/reg-sub
+ :call/local-mutes
+ (fn [db _]
+   (get-in db [:call :local-mutes] #{})))
+
+(rf/reg-sub
+ :call/participant-volume
+ :<- [:call/volumes]
+ (fn [volumes [_ volume-key]]
+   (get volumes volume-key 100)))
+
+(rf/reg-sub
+ :call/participant-muted?
+ :<- [:call/local-mutes]
+ (fn [local-mutes [_ volume-key]]
+   (contains? local-mutes volume-key)))
+
+(rf/reg-sub
+ :call/speaking-ids
+ (fn [db _]
+   (get-in db [:call :speaking-ids] #{})))
