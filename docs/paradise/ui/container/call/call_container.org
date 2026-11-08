@@ -33,9 +33,10 @@ to their call spec then Paradise can just 'work' for their calls.
 
 **** Code
 
-To note, initially we just juggled two iframes that way we could allow Element Call to handle
-the lobby behavior. However, given we have full control over the UI now we can easily create
-that experience with just a single top level container.
+This definitely needs to be broken apart and better documented, but it was revised
+several, several times over the span of a few months.
+
+Likely we'll need some more tweaks in the future for other protocol support still.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defn persistent-call-container [children]
