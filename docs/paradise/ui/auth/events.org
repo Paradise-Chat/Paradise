@@ -128,15 +128,12 @@ Probably needs a better name (and logical grouping)
  (fn [db [_ error-msg]]
    (assoc db :auth-status :logged-out
              :login-error error-msg)))
-
-
 #+end_src
 
 
 **** Logout
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
-
 (re-frame/reg-fx
  :session/delete-from-store
  (fn [user-id]
@@ -217,6 +214,16 @@ Probably needs a better name (and logical grouping)
                   (log/info "All databases destroyed. Reloading...")
                   (.reload js/window.location)))))))
 #+end_src
+
+
+**** Register Validation
+So now that engines are loaded dynamically from the registry
+we want to populate the engine (read protocol) options at
+runtime. We've organized the registry in such a way that
+we can know the protocols and their login options
+with rather small EDN loads.
+This way we don't load a bunch of unneeded data from a
+large enough registry.
 
 
 **** Sign-in Page Component
