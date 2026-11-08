@@ -29,7 +29,6 @@ Probably needs a better name (and logical grouping)
 **** Login Reframe Components
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
-
 (re-frame/reg-event-db
  :auth/set-status
  (fn [db [_ status]]
@@ -53,23 +52,20 @@ Probably needs a better name (and logical grouping)
          [:dispatch [:settings/load-accounts]]]}))
 
 
+
 (re-frame/reg-event-fx
  :auth/login
- (fn [{:keys [db]} [_ engine-id hs user pass]]
+ (fn [{:keys [db]} [_ engine-id auth-payload]]
    (binding/set-active-engine! engine-id)
    (if-let [pool @state/!engine-pool]
      (go
        (try
          (let [res (<! (main/do-with-pool! pool {:handler :login
-                                                 :arguments {:hs hs
-                                                             :user user
-                                                             :pass pass}}))
+                                                 :arguments auth-payload}))
                status-kw (keyword (:status res))]
            (if (= status-kw :success)
              (re-frame/dispatch [:auth/login-success
-                                 (assoc res :credentials {:homeserver hs
-                                                          :username user
-                                                          :password pass}
+                                 (assoc res :credentials auth-payload
                                         :engine-id engine-id)])
              (re-frame/dispatch [:auth/login-failure (:msg res)])))
          (catch :default e
