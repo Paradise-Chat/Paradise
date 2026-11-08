@@ -370,44 +370,62 @@ loaded through registries (unless mounted locally via dev execution).
            {:on-submit (fn [e]
                          (.preventDefault e)
                          (when current-engine
-                           (re-frame/dispatch [:auth/login current-engine (:hs @fields) (:user @fields) (:pass @fields)])))}
+                           (re-frame/dispatch [:auth/login current-engine (build-payload)])))}
 
-           [:div.field-group.mb-4
-            [:label.field-label {:for "engine-select"} "Protocol Engine"]
-            [:select.field-input
-             {:id "engine-select"
-              :value (if current-engine (name current-engine) "")
-              :disabled auth?
-              :on-change (fn [e]
-                           (let [val (.. e -target -value)
-                                 kw-val (keyword val)]
-                             (swap! fields assoc :engine kw-val)
-                             (when (seq val)
-                               (re-frame/dispatch [:engine/load-protocol val]))))}
-             [:option {:value "" :disabled true} "Select a protocol..."]
-             [:option {:value "matrix"} "Matrix"]
-             [:option {:value "discord"} "Discord"]
-             [:option {:value "nostr"} "Nostr"]]]
+           [:div.field-group.mb-6
+            [:label.field-label.mb-2 "Protocol Engine"]
+            [:div.engine-buttons
+             (for [[engine-kw data] available-engines
+                   :let [selected? (= current-engine engine-kw)]]
+               ^{:key engine-kw}
+               [:button
+                {:class (if selected? "engine-btn btn-primary" "engine-btn")
+                 :type "button"
+                 :disabled auth?
+                 :on-click #(do
+                              (swap! fields assoc :engine engine-kw :show-custom? false)
+                              (re-frame/dispatch [:engine/load-protocol (name engine-kw)]))}
+                (or (:name data) (str/capitalize (name engine-kw)))])
+             [:button
+              {:class (if show-custom? "engine-btn btn-primary" "engine-btn")
+               :type "button"
+               :disabled auth?
+               :on-click #(swap! fields assoc :show-custom? true :engine nil)}
+              "Custom..."]]
 
-           (when (= current-engine :matrix)
-             [login-field
-              {:id "hs" :label (tr [:auth.labels/homeserver]) :value (:hs @fields)
-               :disabled auth? :on-change #(swap! fields assoc :hs (.. % -target -value))}])
+            (when show-custom?
+              [:div.mt-4
+               [login-field
+                {:id "custom-engine-url"
+                 :label "Engine Manifest URL (e.g. https://.../manifest.edn)"
+                 :value custom-url
+                 :disabled auth?
+                 :on-change (fn [e]
+                              (swap! fields assoc :custom-url (.. e -target -value)))
+                 :on-blur (fn [e]
+                            (let [url (.. e -target -value)]
+                              (when (seq url)
+                                (re-frame/dispatch [:engine/fetch-manifest url]))))}]])]
 
-           (when current-engine
-             [:<>
-              [login-field
-               {:id "user"
-                :label (if (= current-engine :matrix) (tr [:auth.labels/username]) "Authentication Token / Key")
-                :value (:user @fields)
-                :disabled auth? :on-change #(swap! fields assoc :user (.. % -target -value))}]
+           (for [{:keys [id label type default action-id]} auth-fields]
+             (if (= type :action)
+               ^{:key id}
+               [:button.btn-secondary.w-full.mt-4
+                {:type "button"
+                 :disabled auth?
+                 :on-click #(re-frame/dispatch [:auth/login-action current-engine action-id (build-payload)])}
+                label]
 
-              (when (= current-engine :matrix)
-                [login-field
-                 {:id "pass" :label (tr [:auth.labels/password]) :type "password" :value (:pass @fields)
-                  :disabled auth? :on-change #(swap! fields assoc :pass (.. % -target -value))}])])
+               ^{:key id}
+               [login-field
+                {:id (name id)
+                 :label label
+                 :type (if (keyword? type) (name type) (or type "text"))
+                 :value (get auth-data id (or default ""))
+                 :disabled auth?
+                 :on-change #(swap! fields assoc-in [:auth-data id] (.. % -target -value))}]))
 
-           [:button.btn-primary.w-full
+           [:button.btn-primary.w-full.mt-6
             {:type "submit" :disabled submit-disabled?}
             (if auth?
               (tr [:auth.actions/logging-in])
