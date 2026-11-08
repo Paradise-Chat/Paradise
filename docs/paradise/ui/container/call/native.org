@@ -58,5 +58,4 @@ Or call notifications.
         (let [room-id (.-roomId data)]
           (log/info "Native OS ended call:" room-id)
           (rf/dispatch [:call/hangup {:room-id room-id :wipe-state? true :skip-native? true}]))))))
-
 #+end_src
