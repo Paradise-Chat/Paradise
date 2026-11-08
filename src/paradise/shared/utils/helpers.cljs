@@ -346,7 +346,7 @@
       0 ""
       1 (first names)
       2 (str (first names) " and " (second names))
-      3 (str (first names) ", " (second names) ", and " (first (last names)))
+      3 (str (first names) ", " (second names) ", and " (nth names 2))
       (str (first names) ", " (second names) ", and " (- cnt 2) " others"))))
 
 (defn format-readers [names]
@@ -356,6 +356,17 @@
       (str joined (if (= 1 (count names))
                     " is following the conversation"
                     " are following")))))
+
+(defn format-call-participants
+  ([names]
+   (format-call-participants names nil))
+  ([names idle-text]
+   (let [joined (join-names names)]
+     (if (empty? joined)
+       idle-text
+       (str joined (if (= 1 (count names))
+                     " is in the call"
+                     " are in the call"))))))
 
 (defn get-status-string [tr type names]
   (let [cnt       (count names)
