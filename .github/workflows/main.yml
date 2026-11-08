@@ -29,13 +29,6 @@ jobs:
             exit 1
           fi
 
-      - name: Create Git Tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ env.PKG_VERSION }}"
-          git push origin "v${{ env.PKG_VERSION }}"
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -43,9 +36,21 @@ jobs:
 
       - name: Install System Dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
-          curl -L https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh | sudo bash
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+            https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh \
+            -o linux-install.sh
+          sudo bash linux-install.sh
+          rm -f linux-install.sh
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ env.PKG_VERSION }}"
+          git push origin "v${{ env.PKG_VERSION }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
