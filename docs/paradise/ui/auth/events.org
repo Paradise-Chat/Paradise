@@ -10,6 +10,7 @@ Probably needs a better name (and logical grouping)
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
 (ns paradise.ui.auth.events
   (:require [re-frame.core :as re-frame]
+            [clojure.string :as str]
             [reagent.core :as r]
             [paradise.shared.client.state :as state]
             [cljs-workers.core :as main]
@@ -17,7 +18,7 @@ Probably needs a better name (and logical grouping)
             [cljs.core.async :refer [go <!]]
             [paradise.binding.streams :as engines]
             [paradise.binding.core :as binding]
-            [paradise.shared.utils.macros :refer [defui]]
+            [paradise.shared.registry :as registry]
             [paradise.shared.client.session-store :as store]
             [paradise.shared.utils.svg :as icons]
             [net :refer [set-auth-context!]]
