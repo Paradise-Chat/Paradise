@@ -1,6 +1,5 @@
 (ns paradise.ui.overlays.settings.voice-video
   (:require
-   ["livekit-client" :as lkc]
    [paradise.shared.client.session-store :as store]
    [paradise.ui.container.call.runtime :as call-rtc]
    [promesa.core :as p]
