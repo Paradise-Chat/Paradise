@@ -11,7 +11,7 @@ For how they are handled and implemented that is in key_handler.
 **** Imports
 
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/keybinds.cljs
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/settings/keybinds.cljs
 (ns paradise.ui.overlays.settings.keybinds
   (:require
    [paradise.shared.client.key-handler :as kh]
@@ -24,7 +24,7 @@ For how they are handled and implemented that is in key_handler.
 **** Interface
 
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/keybinds.cljs
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/settings/keybinds.cljs
 (defn ^:ui keybind-row [{:keys [id label-key fallback-label accelerator global?]}
                         recording-id
                         set-recording!]
