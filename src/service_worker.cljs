@@ -4,29 +4,21 @@
             ["workbox-precaching" :refer [precacheAndRoute cleanupOutdatedCaches]]
             ["workbox-routing" :refer [registerRoute]]
             ["workbox-strategies" :refer [CacheFirst]]
-            ["workbox-range-requests" :refer [RangeRequestsPlugin]]
             ["workbox-expiration" :refer [ExpirationPlugin]])
   (:require-macros [paradise.shared.utils.macros :refer [load-static-config]]))
-
 
 (defonce active-sessions (atom {}))
 (defonce session-resolvers (atom []))
 (def MAX_CACHE_ITEMS 300)
+(def MAX_CACHE_BYTES 10485760)
 (def config (load-static-config "config.edn"))
-(def cache-name "matrix-media-v1")
+(def cache-name "paradise-media-v1")
+(def sw-session-file "paradise_sw_sessions.json")
+
 (cleanupOutdatedCaches)
 (let [manifest (or js/self.__WB_MANIFEST #js [])]
   (precacheAndRoute manifest))
 (set! (.-__WB_DISABLE_DEV_LOGS js/self) true)
-
-
-(registerRoute
- (fn [opts]
-   (let [path (.. opts -url -pathname)]
-     (str/includes? path "/element-call/")))
- (new CacheFirst
-      #js {:cacheName "element-call-cache"
-           :plugins #js [(new ExpirationPlugin #js {:maxEntries 50})]}))
 
 (registerRoute
  (fn [opts]
@@ -34,57 +26,60 @@
      (str/ends-with? (.-pathname url) ".wasm")))
  (new CacheFirst
       #js {:cacheName "wasm-heavy-cache"
-           :plugins #js [(new ExpirationPlugin #js {:maxEntries 10})] }))
+           :plugins   #js [(new ExpirationPlugin #js {:maxEntries 10})]}))
 
 (.addEventListener js/self "message"
-                   (fn [event]
-                     (let [data      (.-data event)
-                           msg-type  (.-type data)
-                           source-id (.. event -source -id)]
-                           (js/console.log "SW: Version " (:version config))
-                       (cond
-                         (= msg-type "SKIP_WAITING")
-                         (do
+  (fn [event]
+    (let [data      (.-data event)
+          msg-type  (when data (.-type data))
+          source-id (some-> event .-source .-id)]
+      (cond
+        (= msg-type "SKIP_WAITING")
+        (.skipWaiting js/self)
 
-                           (js/console.log "SW: Received SKIP_WAITING, taking control...")
-                           (.skipWaiting js/self))
+        (= msg-type "SET_SESSION")
+        (let [session-data (:session (js->clj data :keywordize-keys true))
+              session-key  (or (:user-id session-data) source-id :default)
+              full-session (assoc session-data :client-id source-id)
+              next-map     (swap! active-sessions assoc session-key full-session)]
+          (persist-sw-sessions! next-map)
+          (doseq [resolve-fn @session-resolvers]
+            (resolve-fn true))
+          (reset! session-resolvers []))))))
 
-                         (= msg-type "SET_SESSION")
-                         (let [session-data (:session (js->clj data :keywordize-keys true))
-                               full-session (assoc session-data :client-id source-id)]
-                           (swap! active-sessions assoc source-id full-session)
-                           (js/console.log "SW: Session synced for" source-id)
-                           (doseq [resolve-fn @session-resolvers]
-                             (resolve-fn true))
-                           (reset! session-resolvers []))))))
+(defn- persist-sw-sessions! [sessions-map]
+  (p/catch
+    (p/let [dir      (.. js/navigator -storage getDirectory)
+            handle   (.getFileHandle dir sw-session-file #js {:create true})
+            writable (.createWritable handle)
+            _        (.write writable (js/JSON.stringify (clj->js sessions-map)))
+            _        (.close writable)]
+      true)
+    (fn [_] nil)))
 
-(defn wait-for-session! []
-  (if (not-empty @active-sessions)
-    (p/resolved true)
-    (js/Promise. (fn [resolve-fn _]
-                   (swap! session-resolvers conj resolve-fn)))))
+(defn- load-sw-sessions []
+  (p/catch
+    (p/let [dir    (.. js/navigator -storage getDirectory)
+            handle (.getFileHandle dir sw-session-file)
+            file   (.getFile handle)
+            text   (.text file)]
+      (js->clj (js/JSON.parse text) :keywordize-keys true))
+    (fn [_] {})))
 
-(defn- get-token-from-vault [user-id]
-  (p/create
-   (fn [resolve-fn _]
-     (let [req (.open js/indexedDB "sw-vault" 1)]
-       (set! (.-onsuccess req)
-             (fn [e]
-                 (let [db (.. e -target -result)
-                       tx (try (.transaction db #js ["tokens"] "readonly") (catch :default _ nil))
-                       store (when tx (.objectStore tx "tokens"))
-                       get-req (if (and store user-id)
-                                 (.get store user-id)
-                                 (when store (.getAll store)))]
-                   (if-not get-req
-                     (resolve-fn nil)
-                     (set! (.-onsuccess get-req)
-                           (fn [res]
-                             (let [result (.. res -target -result)]
-                               (if (array? result)
-                                 (resolve-fn (some-> (first result) .-token))
-                                 (resolve-fn (some-> result .-token))))))))))
-       (set! (.-onerror req) #(resolve-fn nil))))))
+
+(defn- resolve-session [client-id user-id]
+  (let [mem @active-sessions]
+    (if (seq mem)
+      (p/resolved
+       (or (when client-id (get mem client-id))
+           (when user-id (first (filter #(= (:user-id %) user-id) (vals mem))))
+           (first (vals mem))))
+      (p/let [stored (load-sw-sessions)]
+        (when (seq stored)
+          (reset! active-sessions stored)
+          (or (when user-id (get stored (keyword user-id)))
+              (when user-id (get stored user-id))
+              (first (vals stored))))))))
 
 (defn prune-cache! [name max-items]
   (p/let [cache (js/caches.open name)
@@ -93,56 +88,57 @@
       (p/let [_ (.delete cache (first keys))]
         (prune-cache! name max-items)))))
 
+(defn- cacheable-media-response? [resp]
+  (when (and resp (.-ok resp))
+    (let [ct  (or (.get (.-headers resp) "content-type") "")
+          len (js/parseInt (or (.get (.-headers resp) "content-length") "0") 10)]
+      (and (or (str/starts-with? ct "image/")
+               (str/starts-with? ct "video/")
+               (str/starts-with? ct "audio/")
+               (str/starts-with? ct "application/octet-stream"))
+           (or (js/isNaN len) (zero? len) (< len MAX_CACHE_BYTES))))))
+
+(defn- matches-media-path? [path session]
+  (let [patterns (or (seq (:media-paths session)) ["/media/"])]
+    (boolean (some #(str/includes? path %) patterns))))
+
 (js/self.addEventListener "fetch"
-                          (fn [event]
-                            (let [request      (.-request event)
-                                  method       (.-method request)
-                                  request-url  (js/URL. (.-url request))
-                                  path         (.-pathname request-url)
-                                  auth-path?   (str/includes? path "/_matrix/client/v1/media/")
-                                  legacy-path? (or (str/includes? path "/_matrix/media/v3/")
-                                                   (str/includes? path "/_matrix/media/v1/"))]
-                              (when (= method "GET")
-                                (if (.has (.-headers request) "Authorization")
-                                  nil
-                                  (cond
-                                    auth-path?
-                                    (.respondWith event
-                                                  (p/let [cache  (js/caches.open cache-name)
-                                                          cached (.match cache request)]
-                                                    (if cached
-                                                      cached
-                                                      (p/let [_       (wait-for-session!)
-                                                              session (or (get @active-sessions (.-clientId event))
-                                                                          (first (vals @active-sessions)))
-                                                              token   (or (:accessToken session) (:token session))
-                                                              hs-url  (or (:homeserverUrl session) (:hsUrl session) (:hs_url session))]
-                                                        (if (or (not token)
-                                                                (not hs-url)
-                                                                (not= (.-origin request-url) (.-origin (js/URL. hs-url))))
-                                                          (js/Response.error)
-                                                          (let [headers (js/Headers. (.-headers request))]
-                                                            (.set headers "Authorization" (str "Bearer " token))
-                                                            (p/let [resp (js/fetch request-url #js {:headers headers
-                                                                                                    :mode "cors"
-                                                                                                    :credentials "omit"})]
-                                                              (when (and (.-ok resp) (< (js/parseInt (.get (.-headers resp) "content-length") 10) 10485760))
-                                                                (.put cache request (.clone resp)))
-                                                              resp)))))))
-
-                                    legacy-path?
-                                    (.respondWith event
-                                                  (p/let [cache  (js/caches.open cache-name)
-                                                          cached (.match cache request)]
-                                                    (if cached
-                                                      cached
-                                                      (p/let [resp (js/fetch request)]
-                                                        (when (and (.-ok resp) (< (js/parseInt (.get (.-headers resp) "content-length") 10) 10485760))
-                                                          (.put cache request (.clone resp)))
-                                                        resp))))
-                                    :else nil))))))
-
-
+  (fn [event]
+    (let [request     (.-request event)
+          method      (.-method request)
+          request-url (js/URL. (.-url request))
+          path        (.-pathname request-url)
+          dest        (.-destination request)]
+      (when (and (= method "GET")
+                 (or (#{"image" "video" "audio"} dest)
+                     (str/includes? path "/media/")))
+        (.respondWith event
+          (p/let [cache-key (.-href request-url)
+                  cache     (js/caches.open cache-name)
+                  cached    (.match cache cache-key)]
+            (if cached
+              cached
+              (if (.has (.-headers request) "Authorization")
+                (p/let [resp (js/fetch request)]
+                  (when (cacheable-media-response? resp)
+                    (.put cache cache-key (.clone resp)))
+                  resp)
+                (p/let [session (resolve-session (.-clientId event) nil)
+                        token   (:token session)
+                        origin  (:origin session)
+                        headers (js/Headers. (.-headers request))]
+                  (if (or (#{"image" "video" "audio"} dest)
+                          (matches-media-path? path session))
+                    (do
+                      (when (and token (= (.-origin request-url) origin))
+                        (.set headers "Authorization" (str "Bearer " token)))
+                      (p/let [resp (js/fetch request-url #js {:headers     headers
+                                                              :mode        "cors"
+                                                              :credentials "omit"})]
+                        (when (cacheable-media-response? resp)
+                          (.put cache cache-key (.clone resp)))
+                        resp))
+                    (js/fetch request)))))))))))
 
 (js/self.addEventListener "install"
   (fn [event]
@@ -156,134 +152,169 @@
 
 (def default-icon "/public/res/apple/apple-touch-icon-180x180.png")
 (def default-badge "/public/res/apple/apple-touch-icon-72x72.png")
+(def default-icon "/public/res/apple/apple-touch-icon-180x180.png")
+(def default-badge "/public/res/apple/apple-touch-icon-72x72.png")
 
-#_(defn- get-session-from-vault [user-id]
-  (p/create
-   (fn [resolve-fn reject]
-     (let [req (.open js/indexedDB "sw-vault" 1)]
-       (set! (.-onsuccess req)
-             (fn [e]
-               (let [db    (.. e -target -result)
-                     tx    (.transaction db #js ["tokens"] "readonly")
-                     store (.objectStore tx "tokens")]
-                 (if user-id
-                   (let [get-req (.get store user-id)]
-                     (set! (.-onsuccess get-req) #(resolve-fn (.. % -target -result)))
-                     (set! (.-onerror get-req) #(resolve-fn nil)))
-                   (let [all-req (.getAll store)]
-                     (set! (.-onsuccess all-req)
-                           (fn [ae]
-                             (let [results (vec (.. ae -target -result))]
-                               (if (empty? results)
-                                 (resolve-fn nil)
-                                 (resolve-fn (->> results
-                                               (sort-by #(.-updated_at %) >)
-                                               first)))))))))))))))
+(defn- array-buffer->data-url [buf mime-type]
+  (let [bytes  (js/Uint8Array. buf)
+        len    (.-byteLength bytes)
+        chunks #js []]
+    (dotimes [i len]
+      (.push chunks (js/String.fromCharCode (aget bytes i))))
+    (str "data:" (or mime-type "image/png") ";base64," (js/btoa (.join chunks "")))))
 
-(defn- get-session-from-opfs [user-id]
-  (p/let [dir         (.. js/navigator -storage getDirectory)
-          file-handle (p/catch (.getFileHandle dir "mx_session_v3.json") (fn [_] nil))]
-    (if-not file-handle
-      nil
-      (p/let [file     (.getFile file-handle)
-              text     (.text file)
-              sessions (try (.parse js/JSON text) (catch :default _ #js {}))
-              keys     (js/Object.keys sessions)
-              target-id (or user-id (when (pos? (.-length keys)) (aget keys 0)))]
+(defn- build-avatar-url [session raw-uri]
+  (cond
+    (str/blank? (str raw-uri))
+    nil
 
-        (if target-id
-          (let [data (aget sessions target-id)]
-            (if data
-              (let [session (aget data "session")]
-                #js {:token  (aget session "accessToken")
-                     :hs_url (aget session "homeserverUrl")})
-              nil))
-          nil)))))
+    (or (str/starts-with? (str raw-uri) "http://")
+        (str/starts-with? (str raw-uri) "https://")
+        (str/starts-with? (str raw-uri) "data:"))
+    (str raw-uri)
 
-(defn- fetch-avatar-url [hs-url token mxc-uri]
-  (if (and hs-url token mxc-uri)
-    (let [media-id (clojure.string/replace mxc-uri "mxc://" "")
-          thumb-url (str hs-url "/_matrix/media/v3/thumbnail/" media-id
-                         "?width=96&height=96&method=crop")]
-      (-> (js/fetch thumb-url #js {:headers #js {:Authorization (str "Bearer " token)}
-                                   :mode "cors"
-                                   :credentials "omit"})
-          (p/then (fn [resp]
-                    (if (.-ok resp)
-                      (p/let [blob (.blob resp)]
-                        (js/URL.createObjectURL blob))
-                      nil)))
-          (p/catch (fn [_] nil))))
+    (and (:base-url session) (:thumbnail-template session))
+    (let [clean-id (-> (str raw-uri)
+                       (str/replace #"^[a-zA-Z0-9+.-]+://" ""))]
+      (-> (:thumbnail-template session)
+          (str/replace "{base-url}" (str/replace (:base-url session) #"/+$" ""))
+          (str/replace "{id}" clean-id)))
+
+    :else nil))
+
+(defn- fetch-avatar-data-url [session avatar-uri]
+  (if-let [thumb-url (build-avatar-url session avatar-uri)]
+    (if (str/starts-with? thumb-url "data:")
+      (p/resolved thumb-url)
+      (let [token   (:token session)
+            headers (if token
+                      #js {:Authorization (str "Bearer " token)}
+                      #js {})]
+        (-> (js/fetch thumb-url #js {:headers     headers
+                                     :mode        "cors"
+                                     :credentials "omit"})
+            (p/then (fn [resp]
+                      (when (.-ok resp)
+                        (p/let [mime (.get (.-headers resp) "content-type")
+                                buf  (.arrayBuffer resp)]
+                          (array-buffer->data-url buf mime)))))
+            (p/catch (fn [_] nil)))))
     (p/resolved nil)))
 
-(defn- fetch-event-content [hs-url token room-id event-id]
-  (let [url (str hs-url "/_matrix/client/v3/rooms/" (js/encodeURIComponent room-id)
-                 "/context/" (js/encodeURIComponent event-id) "?limit=0")]
-    (-> (js/fetch url #js {:headers #js {:Authorization (str "Bearer " token)}
-                           :mode "cors"
-                           :credentials "omit"})
-        (p/then (fn [resp]
-                  (if (.-ok resp)
-                    (.json resp)
-                    (throw (js/Error. "Failed to fetch event context")))))
-        (p/then (fn [json]
-                  (let [event (.-event json)]
-                    {:body (get-in (js->clj event) ["content" "body"])
-                     :sender (or (.-sender event) "Someone")}))))))
+(defn- normalize-push-payload [raw-map]
+  (let [room-id  (or (:room_id raw-map) (:room-id raw-map) (:roomId raw-map) (:channel_id raw-map))
+        event-id (or (:event_id raw-map) (:event-id raw-map) (:eventId raw-map))
+        user-id  (or (:account_id raw-map) (:user_id raw-map) (:user-id raw-map) (:userId raw-map))]
+    (cond-> raw-map
+      room-id  (assoc :room_id room-id :room-id room-id :roomId room-id)
+      event-id (assoc :event_id event-id :event-id event-id :eventId event-id)
+      user-id  (assoc :account_id user-id :user_id user-id :user-id user-id :userId user-id))))
 
-(defn- show-smart-notification [push-data token hs-url]
-  (let [sender        (or (.-sender_display_name push-data) (.-sender push-data) "Someone")
-        room-name     (.-room_name push-data)
-        room-id       (.-room_id push-data)
-        unread-count  (.-unread push-data)
-        encrypted?    (= (.-type push-data) "m.room.encrypted")
-        avatar-mxc    (or (some-> push-data .-content .-avatar_url)
-                          (some-> push-data .-sender_avatar_url))
-        body          (if encrypted?
-                        "🔒 Encrypted Message"
-                        (or (some-> push-data .-content .-body) "New Message"))
-        title         (if room-name (str sender " in " room-name) sender)]
+(defn- request-client-decryption [raw-map timeout-ms]
+  (p/let [clients (.matchAll js/self.clients #js {:type "window" :includeUncontrolled true})
+          client  (first clients)]
+    (if-not client
+      nil
+      (js/Promise.
+       (fn [resolve-fn _]
+         (let [chan      (js/MessageChannel.)
+               port1     (.-port1 chan)
+               port2     (.-port2 chan)
+               norm-data (clj->js (normalize-push-payload raw-map))
+               timer     (js/setTimeout #(do (.close port1) (resolve-fn nil)) timeout-ms)]
+           (set! (.-onmessage port1)
+                 (fn [ev]
+                   (js/clearTimeout timer)
+                   (.close port1)
+                   (resolve-fn (.-data ev))))
+           (.postMessage client
+                         #js {:type    "RESOLVE_PUSH"
+                              :payload norm-data}
+                         #js [port2])))))))
 
+(defn- parse-push-event [event]
+  (when-let [event-data (.-data event)]
+    (try
+      (let [parsed (.json event-data)]
+        (or (.-notification parsed) parsed))
+      (catch :default _
+        (let [raw-text (try (.text event-data) (catch :default _ "New Message"))]
+          #js {:title "Paradise"
+               :body  (if (str/blank? raw-text) "New Message" raw-text)})))))
+
+(defn- fallback-notification [raw]
+  (let [sender     (or (:sender_display_name raw) (:sender raw) (:title raw) "Paradise")
+        room-name  (or (:room_name raw) (:channel_name raw))
+        encrypted? (boolean (or (:encrypted raw)
+                                (some-> (:type raw) (str/includes? "encrypted"))))]
+    {:title      (if room-name (str sender " in " room-name) sender)
+     :body       (if encrypted?
+                   "Encrypted Message"
+                   (or (:content_body raw)
+                       (get-in raw [:content :body])
+                       (:body raw)
+                       "New Message"))
+     :avatar-uri (or (:avatar_uri raw)
+                     (:avatar_url raw)
+                     (get-in raw [:content :avatar_url])
+                     (:sender_avatar_url raw)
+                     (:icon raw))
+     :room-id    (or (:room_id raw) (:room-id raw) (:channel_id raw))
+     :unread     (or (:unread raw) (get-in raw [:counts :unread]) (get-in raw [:aps :badge]))}))
+
+(defn- show-notification! [notif session]
+  (let [title      (:title notif)
+        body       (:body notif)
+        avatar-uri (or (:avatar-uri notif) (:avatar_uri notif) (:avatar_url notif) (:icon notif))
+        room-id    (or (:room-id notif) (:room_id notif) (:roomId notif))
+        raw-unread (:unread notif)
+        unread     (cond
+                     (number? raw-unread) raw-unread
+                     (string? raw-unread) (let [n (js/parseInt raw-unread 10)]
+                                            (when-not (js/isNaN n) n))
+                     :else nil)]
     (when (exists? js/navigator.setAppBadge)
-      (if (and unread-count (pos? unread-count))
-        (.setAppBadge js/navigator unread-count)
-        (when (= unread-count 0)
-          (.clearAppBadge js/navigator))))
-
-    (p/let [icon-url (fetch-avatar-url hs-url token avatar-mxc)
-            ]
-      (.showNotification js/self.registration title
-        #js {:body   body
-             :icon   (or icon-url default-icon)
-             :badge  default-badge
-             :tag    (or room-id "matrix-chat")
-             :data   #js {:room_id room-id}}))))
-
-
+      (try
+        (if (and unread (pos? unread))
+          (.setAppBadge js/navigator unread)
+          (when (= unread 0)
+            (.clearAppBadge js/navigator)))
+        (catch :default _ nil)))
+    (p/let [icon-url (fetch-avatar-data-url session avatar-uri)]
+      (.showNotification js/self.registration (or title "Paradise")
+        #js {:body  (or body "New Message")
+             :icon  (or icon-url default-icon)
+             :badge default-badge
+             :tag   (or room-id "paradise-chat")
+             :data  #js {:room_id room-id}}))))
 
 (js/self.addEventListener "push"
   (fn [event]
-    (let [data (try (.. event -data json) (catch :default _ nil))]
-      (when data
-        (let [user-id (.-user_id data)]
-          (.waitUntil event
-            (p/let [session (get-session-from-opfs user-id)
-                    token   (some-> session .-token)
-                    hs-url  (some-> session .-hs_url)]
-              (show-smart-notification data token hs-url))))))))
+    (let [raw-js  (parse-push-event event)
+          raw-map (if raw-js (js->clj raw-js :keywordize-keys true) {})
+          user-id (or (:account_id raw-map)
+                      (:user_id raw-map)
+                      (:user-id raw-map)
+                      (:userId raw-map))]
+      (.waitUntil event
+        (p/let [session  (resolve-session nil user-id)
+                resolved (when (seq raw-map) (request-client-decryption raw-map 1500))
+                notif    (if resolved
+                           (js->clj resolved :keywordize-keys true)
+                           (fallback-notification raw-map))]
+          (show-notification! notif session))))))
 
 (js/self.addEventListener "notificationclick"
   (fn [event]
     (let [notification (.-notification event)
           room-id      (.. notification -data -room_id)]
       (.close notification)
-
       (.waitUntil event
         (p/let [clients (.matchAll js/self.clients #js {:type "window" :includeUncontrolled true})
-                tab (first clients)]
+                tab     (first clients)]
           (if tab
             (do
               (.focus tab)
-              (.postMessage tab #js {:type "NAVIGATE_TO_ROOM"
+              (.postMessage tab #js {:type    "NAVIGATE_TO_ROOM"
                                      :room_id room-id}))
             (.openWindow js/self.clients "/")))))))
