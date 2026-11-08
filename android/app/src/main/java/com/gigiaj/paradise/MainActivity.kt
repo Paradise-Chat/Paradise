@@ -9,19 +9,19 @@ import com.getcapacitor.BridgeActivity
 class MainActivity : BridgeActivity() {
     public override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(ShadowDevicePlugin::class.java)
-        registerPlugin(ParadiseCallPlugin::class.java)
+//        registerPlugin(ParadiseCallPlugin::class.java)
         super.onCreate(savedInstanceState)
         
-        handleCallIntent(intent)
+      //  handleCallIntent(intent)
     }
-
+/*
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleCallIntent(intent)
     }
-
-    private fun handleCallIntent(incomingIntent: Intent?) {
+*/
+  /*  private fun handleCallIntent(incomingIntent: Intent?) {
         val action = incomingIntent?.getStringExtra("action")
         val roomId = incomingIntent?.getStringExtra("roomId")
         
@@ -34,4 +34,5 @@ class MainActivity : BridgeActivity() {
             incomingIntent.removeExtra("roomId")
         }
     }
+    */
 }
