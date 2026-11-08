@@ -74,29 +74,20 @@
  :settings/set-call-device
  (fn [{:keys [db]} [_ kind device-id]]
    (let [storage-key (get call-device-storage-keys kind)
-         final-id    (when (seq device-id) device-id)]
+         final-id    (when (seq device-id) device-id)
+         connected?  (= (get-in db [:call :status]) :connected)]
      (when storage-key
        (store/set-setting! storage-key final-id))
-
-     (when (and final-id (call-rtc/driver-active?))
-       (-> (call-rtc/switch-device! (name kind) final-id)
-           (p/catch
-            (fn [err]
-              (log/warn err "Failed to switch active call device" kind final-id)))))
-
-     {:db (assoc-in db [:settings :call-devices kind] final-id)})))
+     (cond-> {:db (assoc-in db [:settings :call-devices kind] final-id)}
+       (and connected? final-id)
+       (assoc :call.driver/switch-device {:kind kind :device-id final-id})))))
 
 (re-frame/reg-event-fx
  :settings/apply-call-devices
  (fn [{:keys [db]} _]
-   (when (call-rtc/driver-active?)
-     (doseq [[kind device-id] (get-in db [:settings :call-devices])
-             :when (seq device-id)]
-       (-> (call-rtc/switch-device! (name kind) device-id)
-           (p/catch
-            (fn [err]
-              (log/warn err "Failed to apply preferred call device" kind device-id))))))
-   {}))
+   (if (= (get-in db [:call :status]) :connected)
+     {:call.driver/switch-devices (get-in db [:settings :call-devices])}
+     {})))
 
 (re-frame/reg-sub
  :settings/call-device
