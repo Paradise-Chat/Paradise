@@ -27,95 +27,48 @@
  (fn [db [_ device-id]]
    (assoc-in db [:settings :call-devices :audiooutput] device-id)))
 
-
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :settings/hydrate-noise-suppression
- (fn [db [_ enabled?]]
-   (call-rtc/set-noise-suppression-enabled! enabled?)
-
-   (assoc-in
-    db
-    [:settings :noise-suppression-enabled?]
-    enabled?)))
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [enabled? (if (nil? enabled?) true (boolean enabled?))]
+     {:db (assoc-in db [:settings :noise-suppression-enabled?] enabled?)
+      :call.audio/set-noise-suppression enabled?})))
 
 (re-frame/reg-event-fx
  :settings/hydrate-voice-threshold
  (fn [{:keys [db]} [_ threshold]]
-   (let [threshold
-         (if (and (number? threshold)
-                  (<= 0 threshold 1))
-           threshold
-           0.12)]
-
-     (call-rtc/set-voice-threshold!
-      threshold)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :voice-threshold]
-       threshold)})))
-
-
+   (let [threshold (if (and (number? threshold)
+                            (<= 0 threshold 1))
+                     threshold
+                     0.12)]
+     {:db (assoc-in db [:settings :voice-threshold] threshold)
+      :call.audio/set-voice-threshold threshold})))
 
 (re-frame/reg-event-fx
  :settings/set-noise-suppression
  (fn [{:keys [db]} [_ enabled?]]
    (let [enabled? (boolean enabled?)]
-
-     (store/set-setting!
-      "call_noise_suppression"
-      enabled?)
-
-     (call-rtc/set-noise-suppression-enabled!
-      enabled?)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :noise-suppression-enabled?]
-       enabled?)})))
+     (store/set-setting! "call_noise_suppression" enabled?)
+     {:db (assoc-in db [:settings :noise-suppression-enabled?] enabled?)
+      :call.audio/set-noise-suppression enabled?})))
 
 (re-frame/reg-sub
  :settings/noise-suppression-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:settings :noise-suppression-enabled?]
-    true)))
-
-
-
+   (get-in db [:settings :noise-suppression-enabled?] true)))
 
 (re-frame/reg-event-fx
  :settings/set-voice-threshold
  (fn [{:keys [db]} [_ threshold]]
-   (let [threshold
-         (max 0.0
-              (min 1.0 threshold))]
-
-     (store/set-setting!
-      "call_voice_threshold"
-      threshold)
-
-     (call-rtc/set-voice-threshold!
-      threshold)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :voice-threshold]
-       threshold)})))
-
+   (let [threshold (max 0.0 (min 1.0 threshold))]
+     (store/set-setting! "call_voice_threshold" threshold)
+     {:db (assoc-in db [:settings :voice-threshold] threshold)
+      :call.audio/set-voice-threshold threshold})))
 
 (re-frame/reg-sub
  :settings/voice-threshold
  (fn [db _]
-   (get-in
-    db
-    [:settings :voice-threshold]
-    0.12)))
-
+   (get-in db [:settings :voice-threshold] 0.12)))
 
 (re-frame/reg-event-fx
  :settings/set-call-device
