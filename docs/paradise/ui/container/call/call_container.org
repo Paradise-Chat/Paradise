@@ -515,6 +515,33 @@ Likely we'll need some more tweaks in the future for other protocol support stil
      (when is-active?
        [:f> persistent-audio-renderer {:deafened? deafened?}])
      children]))
+
+(defmethod tray-section :call [_ db]
+  (let [call-state      (:call db)
+        connected?      (= (:status call-state) :connected)
+        audio-enabled?  (:audio-enabled? call-state true)
+        deafened?       (:deafened? call-state false)
+        screen-sharing? (:screen-sharing? call-state false)]
+    (when connected?
+      {:order   10
+       :tooltip "Paradise - In Call"
+       :items   [{:label   "Active Voice Call"
+                  :enabled false}
+                 {:id      "call/toggle-audio"
+                  :label   (if audio-enabled?
+                             "Mute Microphone"
+                             "Unmute Microphone")}
+                 {:id      "call/toggle-deafen"
+                  :label   (if deafened?
+                             "Undeafen Audio"
+                             "Deafen Audio")}
+                 {:id      "call/toggle-share"
+                  :label   (if screen-sharing?
+                             "Stop Screen Share"
+                             "Share Screen")}
+                 {:type    "separator"}
+                 {:id      "call/hangup"
+                  :label   "Disconnect Call"}]})))
 #+end_src
 
 
