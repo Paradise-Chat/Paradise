@@ -323,9 +323,9 @@ loaded through registries (unless mounted locally via dev execution).
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
 (defn ^:ui login-screen []
   (let [fields (r/atom {:engine nil
-                        :hs (or js/process.env.MATRIX_HOMESERVER "https://matrix.org")
-                        :user ""
-                        :pass ""})]
+                        :show-custom? false
+                        :custom-url ""
+                        :auth-data {}})]
     (fn []
       (let [tr       @(re-frame/subscribe [:i18n/tr])
             error    @(re-frame/subscribe [:auth/error])
