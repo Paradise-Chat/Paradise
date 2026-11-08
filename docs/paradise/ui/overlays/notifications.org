@@ -29,7 +29,10 @@ They are technically an overlay, so we'll group them here also.
 #+end_src
 
 
-**** Shadow Client
+**** Notification Script
+
+
+***** First Iteration Notes
 
 So, since we're utilizing Clojurescript and the WASM we actually don't have a very
 clean way to use native push notifs. Sygnal forwards them as silent notifications
@@ -65,6 +68,30 @@ to the expensive nature of the DBs in memory. It'll need some investgating
 before implementation.
 So we need to ensure there is visible clarity to this shortcoming provided
 to the user.
+
+***** Second Iteration Notes
+
+We actually ended up moving away from the WASM directly and Matrix.
+A truly modular chat client shouldn't care about protocol after all.
+So instead we need a way to make notifications work for Matrix (as it is still
+our protocol to build against for now) without bundling ANY code that knows
+about Matrix.
+
+The idea and concept are elaborated in far greater depth in the repos where
+this is solved, so I won't bother re-hashing that wealth of info and instead
+just link to them.
+
+The short is load a WASM converted to JS that runs in a sort of QuickJS environment
+in which we've provided the decrypting functionality and such.
+https://github.com/Paradise-Chat/paradise-matrix-push-crypto
+
+
+Then on the gateway end we need a multiplexing gateway. The concept was inspired
+by K8s ingress routes and is dynamically updatable without downtime to match
+how we want our actual client works.
+So new protocols can be added and supported by the gateway without much overhead.
+https://github.com/Paradise-Chat/paradise-push
+
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
