@@ -10,8 +10,7 @@
 (def call-device-storage-keys
   {:audioinput  "call_audio_input"
    :videoinput  "call_video_input"
-   :audiooutput "call_audio_output"
-   })
+   :audiooutput "call_audio_output"})
 
 (re-frame/reg-event-db
  :settings/hydrate-audio-input
