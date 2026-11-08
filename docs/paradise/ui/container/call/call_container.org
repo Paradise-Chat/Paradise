@@ -542,6 +542,38 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                  {:type    "separator"}
                  {:id      "call/hangup"
                   :label   "Disconnect Call"}]})))
+
+(defmethod keybind-spec :call/toggle-audio [_]
+  {:id              "call/toggle-audio"
+   :label-key       :settings.keybinds/action-toggle-mute
+   :accelerator     "CommandOrControl+Shift+M"
+   :global?         true
+   :allow-in-input? true
+   :dispatch        [:call/toggle-audio]})
+
+(defmethod keybind-spec :call/toggle-deafen [_]
+  {:id              "call/toggle-deafen"
+   :label-key       :settings.keybinds/action-toggle-deafen
+   :accelerator     "CommandOrControl+Shift+D"
+   :global?         true
+   :allow-in-input? true
+   :dispatch        [:call/toggle-deafen]})
+
+(defmethod keybind-spec :call/toggle-share [_]
+  {:id              "call/toggle-share"
+   :label-key       :settings.keybinds/action-toggle-share
+   :accelerator     "CommandOrControl+Shift+S"
+   :global?         true
+   :allow-in-input? true
+   :dispatch        [:call/toggle-screen-share]})
+
+(defmethod keybind-spec :call/hangup [_]
+  {:id              "call/hangup"
+   :label-key       :settings.keybinds/action-hangup
+   :accelerator     "CommandOrControl+Shift+H"
+   :global?         true
+   :allow-in-input? true
+   :dispatch        [:call/hangup]})
 #+end_src
 
 
