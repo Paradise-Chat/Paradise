@@ -1,0 +1,111 @@
+(ns paradise.shared.registry
+  (:require
+   [cljs.core.async :refer [go <!]]
+   [cljs.reader :as reader]
+   [clojure.string :as str]
+   [cljs.core.async.interop :refer-macros [<p!]]))
+
+(defonce !config (atom nil))
+(defonce !registry-indices (atom {}))
+(defonce !available-engines (atom {}))
+(defonce !available-plugins (atom {}))
+(defonce !user-registries (atom []))
+
+(defn fetch-edn [url]
+  (go
+    (try
+      (let [res (<p! (js/fetch url))]
+        (if (.-ok res)
+          (reader/read-string (<p! (.text res)))
+          nil))
+      (catch js/Error _ nil))))
+
+(defn resolve-relative-url [base-url target-path]
+  (if (str/starts-with? target-path "http")
+    target-path
+    (let [base-dir (subs base-url 0 (inc (str/last-index-of base-url "/")))]
+      (str base-dir (if (str/starts-with? target-path "/")
+                      (subs target-path 1)
+                      target-path)))))
+
+(defn load-manifests! [index-map !target-atom]
+  (go
+    (let [promises
+          (for [[item-kw pointer] index-map]
+            (js/Promise.
+             (fn [resolve]
+               (go
+                 (if (:engine-config pointer)
+                   (do (swap! !target-atom assoc item-kw pointer)
+                       (resolve true))
+                   (let [url (:manifest-url pointer)]
+                     (if url
+                       (if-let [manifest (<! (fetch-edn url))]
+                         (let [asset-path (:path manifest)]
+                           (if (string? asset-path)
+                             (let [abs-path (resolve-relative-url url asset-path)
+                                   merged   (-> (merge pointer manifest)
+                                                (assoc :id (or (:id manifest) item-kw)
+                                                       :path abs-path
+                                                       :manifest-url url))]
+                               (swap! !target-atom assoc item-kw merged))
+                             (js/console.error "Manifest fetched, but it is invalid or missing a :path string. URL:" url "Data:" (clj->js manifest))))
+                         (js/console.error "Failed to fetch or parse manifest.edn:" url))
+                       (js/console.warn "Registry index missing :manifest-url for:" (name item-kw) (clj->js pointer)))
+                     (resolve true)))))))]
+      (<p! (js/Promise.all (clj->js promises)))
+      @!target-atom)))
+
+(defn fetch-registry! [url & [id-override]]
+  (go
+    (if-let [data (<! (fetch-edn url))]
+      (do
+        (swap! !registry-indices assoc (or id-override url) data)
+        true)
+      false)))
+
+(defn ensure-environment! []
+  (go
+    (when-not @!config
+      (when-let [cfg (<! (fetch-edn "/config.edn"))]
+        (reset! !config cfg)))
+
+    (when-not (get @!registry-indices "core-baked")
+      (<! (fetch-registry! "/registry.edn" "core-baked")))
+
+    (when-let [core-url (:registry-url @!config)]
+      (<! (fetch-registry! core-url)))
+
+    (let [all-customs (distinct (concat (:custom-registries @!config) @!user-registries))]
+      (doseq [custom-url all-customs]
+        (<! (fetch-registry! custom-url))))
+
+    (let [config-data @!config
+          core-url    (:registry-url config-data)
+          baked       (get @!registry-indices "core-baked")
+          live-core   (get @!registry-indices core-url)
+          custom-maps (->> (dissoc @!registry-indices "core-baked" core-url)
+                           vals)
+          resolved-engines (merge (:engines baked)
+                                  (:engines live-core)
+                                  (apply merge (map :engines custom-maps))
+                                  (:engines config-data))
+          resolved-plugins (merge (:plugins baked)
+                                  (:plugins live-core)
+                                  (apply merge (map :plugins custom-maps))
+                                  (:plugins config-data))]
+      (<! (load-manifests! resolved-engines !available-engines))
+      (<! (load-manifests! resolved-plugins !available-plugins))
+      true)))
+
+(defn resolve-engines []
+  @!available-engines)
+
+(defn resolve-plugins []
+  @!available-plugins)
+
+(defn get-engine-url [protocol]
+  (get-in @!available-engines [(keyword protocol) :path]))
+
+(defn get-engine-manifest [protocol]
+  (get @!available-engines (keyword protocol)))
