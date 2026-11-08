@@ -111,7 +111,6 @@ Probably needs a better name (and logical grouping)
  (fn [db _]
    (:active-user-id db)))
 
-
 (re-frame/reg-event-fx
  :auth/switch-account
  (fn [{:keys [db]} [_ target-user-id]]
@@ -121,7 +120,7 @@ Probably needs a better name (and logical grouping)
                   :active-user-id nil
                   :rooms/data {}
                   :timeline/events [])
-    :fx [[:dispatch [:app/bootstrap target-user-id]]]}))
+    :fx [[:dispatch [:app/bootstrap target-user-id (:active-engine db)]]]}))
 
 
 (re-frame/reg-event-db
