@@ -17,8 +17,7 @@ and protocol agnostic calling solution.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (ns paradise.ui.container.call.runtime
   (:require
-   ["livekit-client" :as lkc]
-   [clojure.string :as str]
+   [shadow.esm :refer [dynamic-import]]
    [promesa.core :as p]
    [taoensso.timbre :as log]
    [paradise.ui.container.call.audio-processor :as audio-processor]))
