@@ -179,10 +179,9 @@ Probably needs a better name (and logical grouping)
                                                     :arguments {:user-id user-id}}))]
              (if (= (:status res) "success")
                (re-frame/dispatch [:session/nuke-single-account user-id])
-               (log/error "Homeserver rejected logout:" (:msg res)))))
+               (log/error "Server rejected logout:" (:msg res)))))
          {})
        {:dispatch [:session/nuke-everything]}))))
-
 
 (re-frame/reg-event-fx
  :session/nuke-local-state!
