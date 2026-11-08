@@ -187,11 +187,6 @@ object ShadowPushRuntime {
             return clean
         }
 
-        if (destFile.exists()) {
-            val existing = destFile.readText(Charsets.UTF_8)
-            if (existing.isNotBlank()) return existing
-        }
-
         val assetCandidates = listOf(
             "public/$cleanName",
             "public/push-workers/$cleanName",
@@ -208,6 +203,11 @@ object ShadowPushRuntime {
                 }
             } catch (_: Exception) {
             }
+        }
+
+        if (destFile.exists()) {
+            val existing = destFile.readText(Charsets.UTF_8)
+            if (existing.isNotBlank()) return existing
         }
 
         throw IllegalStateException("Could not locate notification script: $cleanName")
