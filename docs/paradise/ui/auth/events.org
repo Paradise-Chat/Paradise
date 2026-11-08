@@ -357,15 +357,13 @@ loaded through registries (unless mounted locally via dev execution).
               (for [acc accounts]
                 ^{:key (:userId acc)}
                 [:div.account-chooser-item
-                 {:style {:display "flex" :align-items "center" :padding "8px"
-                          :border "1px solid var(--border)" :border-radius "8px"
-                          :cursor "pointer" :margin-bottom "8px"}
-                  :on-click #(re-frame/dispatch [:auth/switch-account (:userId acc)])}
-                 [:div.avatar-placeholder {:style {:margin-right "12px"}} [icons/user]]
+                 {:on-click #(re-frame/dispatch [:auth/switch-account (:userId acc)])}
+                 [:div.avatar-placeholder [icons/user]]
                  [:div.account-details
-                  [:div.account-id {:style {:font-weight "bold"}} (:userId acc)]
-                  [:div.account-hs {:style {:font-size "0.8em" :color "gray"}} (:hs_url acc)]]])]
-             [:div.divider {:style {:text-align "center" :margin "16px 0" :color "gray"}}
+                  [:div.account-id (:userId acc)]
+                  (when-let [server (or (:server acc) (:server_url acc))]
+                    [:div.account-server server])]])]
+             [:div.divider
               (tr [:auth/divider])]])
 
           [:form.auth-form
