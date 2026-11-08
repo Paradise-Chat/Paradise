@@ -75,36 +75,34 @@ Probably needs a better name (and logical grouping)
    {:db (assoc db :auth-status :authenticating
                :login-error nil)}))
 
-
 (re-frame/reg-event-fx
  :auth/login-success
- (fn [{:keys [db]} [_ {:keys [user-id hs-url session-data credentials engine-id]}]]
+ (fn [{:keys [db]} [_ {:keys [user-id session-data credentials engine-id]}]]
    (when session-data
      (register-sw!)
-     (set-auth-context! (:accessToken session-data) (:homeserverUrl session-data))
+     (set-auth-context! (or (:token session-data) (:accessToken session-data))
+                        (:serverUrl session-data))
      (store/set-setting! "last_active_user" user-id)
      (store/set-setting! "last-active-engine" (name engine-id)))
-
 
    (when engine-id
      (engines/init-engine-streams! engine-id))
 
-   (let [actual-hs-url (or (:homeserverUrl session-data) hs-url)]
-     {:db (cond-> (assoc db
-                         :auth-status :logged-in
-                         :active-user-id user-id
-                         :rooms/data {}
-                         :timeline/events []
-                         :auth/token (:accessToken session-data)
-                         :auth/hs-url actual-hs-url)
-            actual-hs-url (assoc :homeserver-url actual-hs-url))
-      :fx (cond-> [[:dispatch [:app/load-settings-by-stage :login]]
-                   [:dispatch [:app/restore-user-session user-id]]
-                   [:dispatch [:push/check-status]]]
-            (and credentials session-data)
-            (conj [:dispatch [:push/create-sleepy-shadow
-                              (assoc credentials :homeserver actual-hs-url
-                                     :userId user-id)]]))})))
+   {:db (assoc db
+               :auth-status :logged-in
+               :active-user-id user-id
+               :rooms/data {}
+               :timeline/events []
+               :auth/session session-data)
+    :fx (cond-> [[:dispatch [:app/load-settings-by-stage :login]]
+                 [:dispatch [:app/restore-user-session user-id]]
+                 [:dispatch [:push/check-status]]]
+          (and credentials session-data)
+          (conj [:dispatch [:push/create-sleepy-shadow
+                            (merge credentials
+                                   session-data
+                                   {:userId user-id})]]))}))
+
 
 (re-frame/reg-sub
  :auth/active-user-id
@@ -327,13 +325,22 @@ loaded through registries (unless mounted locally via dev execution).
                         :custom-url ""
                         :auth-data {}})]
     (fn []
-      (let [tr       @(re-frame/subscribe [:i18n/tr])
-            error    @(re-frame/subscribe [:auth/error])
-            status   @(re-frame/subscribe [:auth/status])
-            accounts @(re-frame/subscribe [:settings/available-accounts])
-            auth?    (= status :authenticating)
-            current-engine (:engine @fields)
-            submit-disabled? (or auth? (nil? current-engine))]
+      (let [tr                @(re-frame/subscribe [:i18n/tr])
+            error             @(re-frame/subscribe [:auth/error])
+            status            @(re-frame/subscribe [:auth/status])
+            accounts          @(re-frame/subscribe [:settings/available-accounts])
+            available-engines @(re-frame/subscribe [:registry/available-engines])
+            auth?             (= status :authenticating)
+            current-engine    (:engine @fields)
+            show-custom?      (:show-custom? @fields)
+            submit-disabled?  (or auth? (nil? current-engine))
+            engine-meta       (get available-engines current-engine)
+            auth-fields       (get-in engine-meta [:engine-config :login :fields] [])
+            build-payload     (fn []
+                                (reduce (fn [acc {:keys [id default]}]
+                                          (assoc acc id (get-in @fields [:auth-data id] default)))
+                                        {}
+                                        auth-fields))]
         [:div.auth-page-container
          [:div.auth-card
           [:div.auth-header
