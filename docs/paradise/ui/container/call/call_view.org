@@ -70,8 +70,23 @@ this will be where that lives.
 ***** Component
 
 
+
+
+***** Functions
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
+
+
+
+
+#+end_src
+
+
+
 ****** CSS
 
+
+The CSS is quite verbose, so moving it below is more reasonable.
 
 #+begin_src css :tangle ../../../../../css/call.css
 .call-view-host {
@@ -186,6 +201,11 @@ this will be where that lives.
     align-items: center;
     justify-content: center;
     background-color: #5865f2;
+    transition: box-shadow 0.12s ease;
+}
+
+.call-lobby-card.is-speaking .call-lobby-card-avatar {
+    box-shadow: 0 0 0 3px #23a55a, 0 0 16px rgba(35, 165, 90, 0.45);
 }
 
 .call-lobby-empty-stage {
@@ -358,17 +378,24 @@ this will be where that lives.
 }
 
 .call-filmstrip {
-    flex: 0 0 132px;
+    flex: 0 0 136px;
     min-height: 0;
     width: 100%;
     display: flex;
     align-items: stretch;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 8px;
+    padding-bottom: 4px;
+    box-sizing: border-box;
     overflow-x: auto;
     overflow-y: hidden;
-    scrollbar-width: thin;
     -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+}
+
+.call-filmstrip:hover {
+    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
 }
 
 .call-filmstrip > .call-participant-tile {
@@ -376,6 +403,71 @@ this will be where that lives.
     width: 210px;
     height: 100%;
     min-height: 0;
+}
+
+.call-filmstrip > .call-participant-tile:first-child {
+    margin-left: auto;
+}
+
+.call-filmstrip > .call-participant-tile:last-child {
+    margin-right: auto;
+}
+
+.call-filmstrip::-webkit-scrollbar {
+    height: 5px;
+    width: 5px;
+    background: transparent;
+}
+
+.call-filmstrip::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.call-filmstrip::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 999px;
+}
+
+.call-filmstrip:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
+.call-filmstrip::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.38);
+}
+
+.call-grid-layout,
+.call-lobby-container,
+.call-share-audio-menu {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.call-grid-layout::-webkit-scrollbar,
+.call-lobby-container::-webkit-scrollbar,
+.call-share-audio-menu::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+    background: transparent;
+}
+
+.call-grid-layout::-webkit-scrollbar-track,
+.call-lobby-container::-webkit-scrollbar-track,
+.call-share-audio-menu::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.call-grid-layout::-webkit-scrollbar-thumb,
+.call-lobby-container::-webkit-scrollbar-thumb,
+.call-share-audio-menu::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+}
+
+.call-grid-layout::-webkit-scrollbar-thumb:hover,
+.call-lobby-container::-webkit-scrollbar-thumb:hover,
+.call-share-audio-menu::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.32);
 }
 
 .call-participant-tile {
@@ -395,6 +487,24 @@ this will be where that lives.
     cursor: pointer;
 }
 
+.call-participant-tile::after,
+.call-mini-player::after,
+.call-lobby-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: 6;
+    box-shadow: inset 0 0 0 0 transparent;
+    transition: box-shadow 0.12s ease;
+}
+
+.call-participant-tile.is-speaking::after,
+.call-mini-player.is-speaking::after,
+.call-lobby-card.is-speaking::after {
+    box-shadow: inset 0 0 0 3px #23a55a;
+}
 
 .call-participant-tile.is-screen-share,
 .call-participant-tile.is-spotlight {
@@ -472,6 +582,10 @@ this will be where that lives.
     width: 100%;
     height: 100%;
     object-fit: cover;
+}
+
+.call-participant-tile.is-speaking .call-tile-avatar {
+    box-shadow: 0 0 0 3px #23a55a, 0 0 16px rgba(35, 165, 90, 0.45);
 }
 
 .call-tile-actions {
@@ -589,6 +703,15 @@ this will be where that lives.
 .call-grid-container.is-immersive .call-tile-overlay {
     opacity: 0;
     transform: translateY(4px);
+}
+
+.call-tile-speaking-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #23a55a;
+    box-shadow: 0 0 6px rgba(35, 165, 90, 0.8);
+    flex: 0 0 auto;
 }
 
 .call-tile-name {
@@ -1001,41 +1124,6 @@ this will be where that lives.
     color: #ffffff;
 }
 
-
-
-.call-participant-tile::after,
-.call-mini-player::after,
-.call-lobby-card::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    z-index: 6;
-    box-shadow: inset 0 0 0 0 transparent;
-    transition: box-shadow 0.12s ease;
-}
-
-.call-participant-tile.is-speaking::after,
-.call-mini-player.is-speaking::after,
-.call-lobby-card.is-speaking::after {
-    box-shadow: inset 0 0 0 3px #23a55a;
-}
-
-.call-participant-tile.is-speaking .call-tile-avatar {
-    box-shadow: 0 0 0 3px #23a55a, 0 0 16px rgba(35, 165, 90, 0.45);
-}
-
-.call-tile-speaking-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: #23a55a;
-    box-shadow: 0 0 6px rgba(35, 165, 90, 0.8);
-    flex: 0 0 auto;
-}
-
-
 @media (hover: hover) and (pointer: fine) {
     .call-start-button:hover {
         background-color: #1a6334;
@@ -1159,8 +1247,13 @@ this will be where that lives.
 
     .call-filmstrip {
         flex: 0 0 96px;
-        justify-content: flex-start;
         gap: 6px;
+        padding-bottom: 0;
+        scrollbar-width: none;
+    }
+
+    .call-filmstrip::-webkit-scrollbar {
+        display: none;
     }
 
     .call-filmstrip > .call-participant-tile {
@@ -1258,6 +1351,8 @@ this will be where that lives.
         height: 100%;
         width: 160px;
         flex-direction: column;
+        padding-bottom: 0;
+        padding-right: 4px;
         overflow-y: auto;
         overflow-x: hidden;
     }
@@ -1266,6 +1361,16 @@ this will be where that lives.
         flex: 0 0 100px;
         width: 100%;
         height: 100px;
+    }
+
+    .call-filmstrip > .call-participant-tile:first-child {
+        margin-left: 0;
+        margin-top: auto;
+    }
+
+    .call-filmstrip > .call-participant-tile:last-child {
+        margin-right: 0;
+        margin-bottom: auto;
     }
 
     .call-control-bar-wrapper {
@@ -1287,107 +1392,3 @@ this will be where that lives.
 }
 #+end_src
 
-
-
-***** Functions
-
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
-(defn custom-call-stage []
-  (let [room ((.-useMaybeRoomContext lk))]
-    (react/useEffect
-     (fn []
-       (when room
-         (rtc/set-room! room)
-         (sync-local-media-state! room)
-         (let [room-events             (.-RoomEvent lkc)
-               track-muted             (.-TrackMuted room-events)
-               track-unmuted           (.-TrackUnmuted room-events)
-               local-track-published   (.-LocalTrackPublished room-events)
-               local-track-unpublished (.-LocalTrackUnpublished room-events)
-               sync-handler            (fn [& _] (sync-local-media-state! room))]
-
-           (.on room track-muted sync-handler)
-           (.on room track-unmuted sync-handler)
-           (.on room local-track-published sync-handler)
-           (.on room local-track-unpublished sync-handler)
-
-           (-> (p/let [_ (rtc/set-e2ee-enabled! true)]
-                 (js/console.log "[CRYPTO] LiveKit E2EE enabled"))
-               (p/catch (fn [err]
-                          (js/console.error "[CRYPTO] Failed enabling LiveKit E2EE" err))))
-
-           (fn []
-             (.off room track-muted sync-handler)
-             (.off room track-unmuted sync-handler)
-             (.off room local-track-published sync-handler)
-             (.off room local-track-unpublished sync-handler)
-             (when (= room (rtc/current-room))
-               (rtc/clear-room!))))))
-     #js [room])
-    nil))
-
-
-(defn active-call-grid-inner []
-  (let [tracks ((.-useTracks lk) track-sources)]
-    [:div.call-grid-container
-     [:div.call-grid-layout-wrapper
-      [:> GridLayout {:tracks tracks :className "call-grid-layout"}
-       [:> ParticipantTile]]]
-
-     [:div.call-control-bar-wrapper
-      [:> ControlBar {:variation "minimal"
-                      :controls {:microphone true
-                                 :camera true
-                                 :screenShare true
-                                 :leave true}}]]]))
-
-
-(defn active-call-grid []
-  (let [[room set-room!] (react/useState @rtc/!room)
-        tr               @(rf/subscribe [:i18n/tr])]
-    (react/useEffect
-     (fn []
-       (let [watch-id (keyword (gensym "room-sync"))]
-         (add-watch rtc/!room watch-id
-                    (fn [_ _ _ new-room]
-                      (set-room! new-room)))
-         (set-room! @rtc/!room)
-         (fn []
-           (remove-watch rtc/!room watch-id))))
-     #js [])
-
-    (if room
-      [:> (.-Provider RoomContext) {:value room}
-       [:f> active-call-grid-inner]]
-      [:div.call-grid-loading
-       (tr [:container.call/bridging-context])])))
-
-
-(defn ^:ui call-view [room-id]
-  (let [call-state   @(rf/subscribe [:call/state])
-        room-meta    @(rf/subscribe [:rooms/active-metadata])
-        tr           @(rf/subscribe [:i18n/tr])
-        display-name (or (:name room-meta) room-id)
-        status       (:status call-state)]
-
-    [:div.call-view-host
-     [room-header {:display-name display-name :active-id room-id :compact? false}]
-
-     [:div.call-video-area
-      (cond
-        (= status :requesting-token)
-        [:div.call-token-negotiation
-         (tr [:container.call/negotiating-token])]
-
-        (= status :connected)
-        [:f> active-call-grid]
-
-        :else
-        [:div.call-idle-container
-         [:div.call-idle-text (tr [:call/idle])]
-         [:button.call-start-button
-          {:on-click (fn [_]
-                       (rf/dispatch [:call/init-widget room-id])
-                       (js/setTimeout #(rf/dispatch [:call/start room-id]) 500))}
-          (tr [:container.call/start-join])]])]]))
-#+end_src
