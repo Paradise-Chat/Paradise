@@ -232,51 +232,41 @@ Most of the call re-frame events and subscriptions are listed here
 
 ****** Media Controls
 
-
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/events.cljs
+(rf/reg-event-fx
+ :call/set-microphone
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [enabled? (boolean enabled?)]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-microphone enabled?}
+       {:db (assoc-in db [:call :audio-enabled?] enabled?)}))))
 
 (rf/reg-event-fx
  :call/toggle-audio
  (fn [{:keys [db]} _]
-   {:livekit/set-microphone
-    (not
-     (get-in
-      db
-      [:call :audio-enabled?]
-      true))}))
-
+   (let [next-state (not (get-in db [:call :audio-enabled?] true))]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-microphone next-state}
+       {:db (assoc-in db [:call :audio-enabled?] next-state)}))))
 
 (rf/reg-event-fx
  :call/toggle-video
  (fn [{:keys [db]} _]
-   {:livekit/set-camera
-    (not
-     (get-in
-      db
-      [:call :video-enabled?]
-      false))}))
-
+   (let [next-state (not (get-in db [:call :video-enabled?] false))]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-camera next-state}
+       {:db (assoc-in db [:call :video-enabled?] next-state)}))))
 
 (rf/reg-event-fx
  :call/toggle-screen-share
  (fn [{:keys [db]} _]
-   {:livekit/set-screen-share
-    (not
-     (get-in
-      db
-      [:call :screen-sharing?]
-      false))}))
-
+   {:call.driver/set-screen-share
+    (not (get-in db [:call :screen-sharing?] false))}))
 
 (rf/reg-event-db
  :call/toggle-deafen
  (fn [db _]
-   (update-in
-    db
-    [:call :deafened?]
-    not)))
-
-
+   (update-in db [:call :deafened?] not)))
 #+end_src
 
 
@@ -287,186 +277,102 @@ Most of the call re-frame events and subscriptions are listed here
  :call/media-state-changed
  (fn [db [_ kind enabled?]]
    (case kind
-
-     :audio
-     (assoc-in
-      db
-      [:call :audio-enabled?]
-      enabled?)
-
-     :video
-     (assoc-in
-      db
-      [:call :video-enabled?]
-      enabled?)
-
-     :screen-sharing
-     (assoc-in
-      db
-      [:call :screen-sharing?]
-      enabled?)
-
+     :audio          (assoc-in db [:call :audio-enabled?] enabled?)
+     :video          (assoc-in db [:call :video-enabled?] enabled?)
+     :screen-sharing (assoc-in db [:call :screen-sharing?] enabled?)
      db)))
-
 
 (rf/reg-event-db
  :call/update-media-state
- (fn [db [_ {:keys [audio
-                    video
-                    screen-sharing]}]]
-
-   (cond-> db
-
-     (some? audio)
-     (assoc-in
-      [:call :audio-enabled?]
-      audio)
-
-     (some? video)
-     (assoc-in
-      [:call :video-enabled?]
-      video)
-
-     (some? screen-sharing)
-     (assoc-in
-      [:call :screen-sharing?]
-      screen-sharing))))
-
+ (fn [db [_ {:keys [audio video screen-sharing]}]]
+   (if (= (get-in db [:call :status]) :connected)
+     (cond-> db
+       (some? audio)          (assoc-in [:call :audio-enabled?] audio)
+       (some? video)          (assoc-in [:call :video-enabled?] video)
+       (some? screen-sharing) (assoc-in [:call :screen-sharing?] screen-sharing))
+     db)))
 
 (rf/reg-event-db
  :call/media-error
  (fn [db [_ device err]]
-   (assoc-in
-    db
-    [:call :media-error]
-    {:device device
-     :error err})))
+   (assoc-in db [:call :media-error] {:device device :error err})))
+
+(rf/reg-event-db
+ :call/e2ee-error
+ (fn [db [_ error]]
+   (assoc-in db [:call :e2ee-error] error)))
 #+end_src
 
 
 ****** Lifecycle
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/events.cljs
-(rf/reg-event-db
- :call/set-active-room
- (fn [db [_ room-id]]
-   (log/info
-    "Call: Setting active room to"
-    room-id)
-
-   (-> db
-       (assoc-in
-        [:call :active-room-id]
-        room-id)
-
-       (assoc-in
-        [:call :audio-enabled?]
-        true)
-
-       (assoc-in
-        [:call :video-enabled?]
-        false)
-
-       (assoc-in
-        [:call :screen-sharing?]
-        false)
-
-       (assoc-in
-        [:call :disconnecting?]
-        false)
-
-       (assoc-in
-        [:call :media-error]
-        nil)
-
-       (assoc-in
-        [:call :e2ee-error]
-        nil))))
-
-
-(rf/reg-event-db
- :call/set-active
- (fn [db [_ active?]]
-   (assoc-in
-    db
-    [:call :is-active?]
-    active?)))
-
-
 (rf/reg-event-fx
  :call/hangup
  (fn [{:keys [db]} [_ opts]]
    (let [opts         (or opts {})
-         room-id      (or (:room-id opts)
-                          (get-in db [:call :active-room-id]))
+         room-id      (or (:room-id opts) (get-in db [:call :active-room-id]))
          skip-native? (get opts :skip-native? false)]
-
      (when (and room-id (not skip-native?))
        (native/end-call! room-id))
-
-       (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
-                                 :arguments {:room-id room-id}})
-
-     {:livekit/disconnect true})))
-
-
+     (mesh/do-with-thread! :engine-pool
+                           {:handler :call/leave-sfu
+                            :arguments {:room-id room-id}})
+     {:db (assoc-in db [:call :disconnecting?] true)
+      :call.driver/disconnect true})))
 
 (rf/reg-event-fx
- :call/livekit-disconnected
+ :call/driver-disconnected
  (fn [{:keys [db]} [_ reason]]
    (let [room-id        (get-in db [:call :active-room-id])
          disconnecting? (get-in db [:call :disconnecting?] false)]
-
-     (log/info "LiveKit disconnected:" reason)
+     (log/info "Call driver disconnected:" reason)
      (when (and room-id (not disconnecting?))
        (native/end-call! room-id)
-         (mesh/do-with-thread! :engine-pool {:handler :call/leave-sfu
-                                             :arguments {:room-id room-id}}))
-
-     {:db       (-> db
-                    (assoc-in [:call :active-room-id] nil)
-                    (assoc-in [:call :is-active?] false)
-                    (assoc-in [:call :livekit-url] nil)
-                    (assoc-in [:call :livekit-token] nil)
-                    (assoc-in [:call :e2ee-keys] nil)
-                    (assoc-in [:call :status] :idle))
+       (mesh/do-with-thread! :engine-pool
+                             {:handler :call/leave-sfu
+                              :arguments {:room-id room-id}}))
+     {:db (-> db
+              (assoc-in [:call :active-room-id] nil)
+              (assoc-in [:call :is-active?] false)
+              (assoc-in [:call :status] :idle))
       :dispatch [:call/teardown]})))
-
 
 (rf/reg-event-fx
  :call/teardown
  (fn [{:keys [db]} _]
    (rtc/reset-session!)
+   {:db (-> db
+            (assoc-in [:call :active-room-id] nil)
+            (assoc-in [:call :is-active?] false)
+            (assoc-in [:call :disconnecting?] false)
+            (assoc-in [:call :screen-sharing?] false)
+            (assoc-in [:call :participants] [])
+            (assoc-in [:call :unwatched-ids] #{})
+            (assoc-in [:call :focused-id] nil)
+            (assoc-in [:call :immersive?] false)
+            (assoc-in [:call :pip-tucked?] false)
+            (assoc-in [:call :media-error] nil)
+            (assoc-in [:call :e2ee-error] nil)
+            (assoc :main-focus :timeline))}))
 
-   {:db
-    (-> db
-        (assoc-in
-         [:call :active-room-id]
-         nil)
+(rf/reg-event-db
+ :call/set-active-room
+ (fn [db [_ room-id]]
+   (log/info "Call: Setting active room to" room-id)
+   (-> db
+       (assoc-in [:call :active-room-id] room-id)
+       (update-in [:call :audio-enabled?] #(if (some? %) % true))
+       (update-in [:call :video-enabled?] #(if (some? %) % false))
+       (assoc-in [:call :screen-sharing?] false)
+       (assoc-in [:call :disconnecting?] false)
+       (assoc-in [:call :media-error] nil)
+       (assoc-in [:call :e2ee-error] nil))))
 
-        (assoc-in
-         [:call :is-active?]
-         false)
-
-        (assoc-in
-         [:call :disconnecting?]
-         false)
-
-        (assoc-in
-         [:call :screen-sharing?]
-         false)
-
-        (assoc-in
-         [:call :media-error]
-         nil)
-
-        (assoc-in
-         [:call :e2ee-error]
-         nil)
-
-        (assoc
-         :main-focus
-         :timeline))}))
+(rf/reg-event-db
+ :call/set-active
+ (fn [db [_ active?]]
+   (assoc-in db [:call :is-active?] active?)))
 #+end_src
 
 
@@ -476,10 +382,87 @@ Most of the call re-frame events and subscriptions are listed here
 (rf/reg-event-db
  :call/toggle-chat
  (fn [db _]
-   (update-in
-    db
-    [:call :chat-open?]
-    not)))
+   (update-in db [:call :chat-open?] not)))
+
+(rf/reg-event-db
+ :call/set-stage-mounted
+ (fn [db [_ mounted?]]
+   (-> db
+       (assoc-in [:call :stage-mounted?] (boolean mounted?))
+       (cond-> (not mounted?)
+         (assoc-in [:call :immersive?] false)))))
+
+(rf/reg-event-db
+ :call/toggle-immersive
+ (fn [db _]
+   (update-in db [:call :immersive?] not)))
+
+(rf/reg-event-db
+ :call/set-focused-id
+ (fn [db [_ tile-id]]
+   (assoc-in db [:call :focused-id] tile-id)))
+
+(rf/reg-event-db
+ :call/stop-watching
+ (fn [db [_ tile-id-or-ids]]
+   (let [ids        (if (coll? tile-id-or-ids)
+                      (set tile-id-or-ids)
+                      #{tile-id-or-ids})
+         focused-id (get-in db [:call :focused-id])]
+     (cond-> (update-in db [:call :unwatched-ids] (fnil into #{}) ids)
+       (contains? ids focused-id)
+       (assoc-in [:call :focused-id] :grid)))))
+
+(rf/reg-event-db
+ :call/watch-stream
+ (fn [db [_ tile-id]]
+   (-> db
+       (update-in [:call :unwatched-ids] (fnil disj #{}) tile-id)
+       (assoc-in [:call :focused-id] tile-id))))
+
+(rf/reg-event-db
+ :call/prune-unwatched
+ (fn [db [_ valid-ids]]
+   (update-in db [:call :unwatched-ids]
+              (fn [current]
+                (set (keep (set valid-ids) (or current #{})))))))
+
+(rf/reg-event-db
+ :call/set-pip-corner
+ (fn [db [_ corner]]
+   (assoc-in db [:call :pip-corner] corner)))
+
+(rf/reg-event-db
+ :call/set-pip-tucked
+ (fn [db [_ tucked?]]
+   (assoc-in db [:call :pip-tucked?] (boolean tucked?))))
+
+(rf/reg-event-db
+ :call/set-room-participants
+ (fn [db [_ room-id participants]]
+   (assoc-in db [:call :lobbies room-id] (vec participants))))
+
+(rf/reg-event-db
+ :call/set-volume
+ (fn [db [_ volume-key volume]]
+   (let [clamped (-> (js/Number volume) (max 0) (min 100) js/Math.round)]
+     (-> db
+         (assoc-in [:call :volumes volume-key] clamped)
+         (cond-> (pos? clamped)
+           (update-in [:call :local-mutes] (fnil disj #{}) volume-key))))))
+
+(rf/reg-event-db
+ :call/toggle-local-mute
+ (fn [db [_ volume-key]]
+   (let [muted? (contains? (get-in db [:call :local-mutes] #{}) volume-key)]
+     (if muted?
+       (update-in db [:call :local-mutes] (fnil disj #{}) volume-key)
+       (update-in db [:call :local-mutes] (fnil conj #{}) volume-key)))))
+
+(rf/reg-event-db
+ :call/set-speaking-ids
+ (fn [db [_ speaking-ids]]
+   (assoc-in db [:call :speaking-ids] (or speaking-ids #{}))))
 #+end_src
 
 
@@ -492,81 +475,139 @@ Most of the call re-frame events and subscriptions are listed here
  (fn [db _]
    (:call db)))
 
+(rf/reg-sub
+ :call/status
+ (fn [db _]
+   (get-in db [:call :status] :idle)))
+
+(rf/reg-sub
+ :call/participants
+ (fn [db _]
+   (get-in db [:call :participants] [])))
 
 (rf/reg-sub
  :call/active-room
  (fn [db _]
-   (get-in
-    db
-    [:call :active-room-id])))
-
+   (get-in db [:call :active-room-id])))
 
 (rf/reg-sub
  :call/is-active?
  (fn [db _]
-   (get-in
-    db
-    [:call :is-active?]
-    false)))
-
+   (get-in db [:call :is-active?] false)))
 
 (rf/reg-sub
  :call/audio-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:call :audio-enabled?]
-    true)))
-
+   (get-in db [:call :audio-enabled?] true)))
 
 (rf/reg-sub
  :call/video-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:call :video-enabled?]
-    false)))
-
+   (get-in db [:call :video-enabled?] false)))
 
 (rf/reg-sub
  :call/deafened?
  (fn [db _]
-   (get-in
-    db
-    [:call :deafened?]
-    false)))
-
+   (get-in db [:call :deafened?] false)))
 
 (rf/reg-sub
  :call/screen-sharing?
  (fn [db _]
-   (get-in
-    db
-    [:call :screen-sharing?]
-    false)))
-
+   (get-in db [:call :screen-sharing?] false)))
 
 (rf/reg-sub
  :call/chat-open?
  (fn [db _]
-   (get-in
-    db
-    [:call :chat-open?]
-    false)))
-
+   (get-in db [:call :chat-open?] false)))
 
 (rf/reg-sub
  :call/media-error
  (fn [db _]
-   (get-in
-    db
-    [:call :media-error])))
-
+   (get-in db [:call :media-error])))
 
 (rf/reg-sub
  :call/e2ee-error
  (fn [db _]
-   (get-in
-    db
-    [:call :e2ee-error])))
+   (get-in db [:call :e2ee-error])))
+
+(rf/reg-sub
+ :call/stage-mounted?
+ (fn [db _]
+   (get-in db [:call :stage-mounted?] false)))
+
+(rf/reg-sub
+ :call/unwatched-ids
+ (fn [db _]
+   (get-in db [:call :unwatched-ids] #{})))
+
+(rf/reg-sub
+ :call/focused-id
+ (fn [db _]
+   (get-in db [:call :focused-id])))
+
+(rf/reg-sub
+ :call/immersive?
+ (fn [db _]
+   (get-in db [:call :immersive?] false)))
+
+(rf/reg-sub
+ :call/pip-corner
+ (fn [db _]
+   (get-in db [:call :pip-corner] "bottom-right")))
+
+(rf/reg-sub
+ :call/pip-tucked?
+ (fn [db _]
+   (get-in db [:call :pip-tucked?] false)))
+
+(rf/reg-sub
+ :call/room-participants
+ :<- [:rooms/unfiltered-indexed-map]
+ :<- [:rooms/active-metadata]
+ :<- [:call/state]
+ (fn [[rooms-map active-meta call-state] [_ room-id]]
+   (let [raw-room (when (and rooms-map room-id)
+                    (get rooms-map room-id))
+         r        (if (map? raw-room)
+                    raw-room
+                    (when raw-room
+                      (js->clj raw-room :keywordize-keys true)))
+         raw-list (or (:activeRoomCallParticipants r)
+                      (:call-participants r)
+                      (:callParticipants r)
+                      (when raw-room
+                        (aget raw-room "activeRoomCallParticipants"))
+                      (:activeRoomCallParticipants active-meta)
+                      (:call-participants active-meta)
+                      (get-in call-state [:lobbies room-id])
+                      [])]
+     (js->clj raw-list :keywordize-keys true))))
+
+(rf/reg-sub
+ :call/volumes
+ (fn [db _]
+   (get-in db [:call :volumes] {})))
+
+(rf/reg-sub
+ :call/local-mutes
+ (fn [db _]
+   (get-in db [:call :local-mutes] #{})))
+
+(rf/reg-sub
+ :call/participant-volume
+ :<- [:call/volumes]
+ (fn [volumes [_ volume-key]]
+   (get volumes volume-key 100)))
+
+(rf/reg-sub
+ :call/participant-muted?
+ :<- [:call/local-mutes]
+ (fn [local-mutes [_ volume-key]]
+   (contains? local-mutes volume-key)))
+
+(rf/reg-sub
+ :call/speaking-ids
+ (fn [db _]
+   (get-in db [:call :speaking-ids] #{})))
 #+end_src
+
