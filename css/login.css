@@ -1,3 +1,10 @@
+:root {
+  --bg-secondary: #313338;
+  --bg-input: #1e1f22;
+  --bg-tertiary: #2b2d31;
+  --blurple: #5865f2;
+}
+
 .auth-page-container {
   display: flex;
   align-items: center;
@@ -6,14 +13,13 @@
   background-color: var(--bg-tertiary);
 }
 
-
 .auth-card {
   width: 100%;
   max-width: 480px;
   padding: 32px;
   background-color: var(--bg-secondary);
   border-radius: 8px;
-  box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
 }
 
 .auth-header h2 {
@@ -28,6 +34,45 @@
   margin-bottom: 20px;
 }
 
+.auth-error-message {
+  color: var(--text-danger);
+  font-size: 14px;
+  margin-bottom: 16px;
+  text-align: left;
+}
+
+.account-chooser-item {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.avatar-placeholder {
+  margin-right: 12px;
+}
+
+.account-id {
+  font-weight: bold;
+}
+
+.account-server {
+  font-size: 0.8em;
+  color: gray;
+}
+
+.divider {
+  text-align: center;
+  margin: 16px 0;
+  color: gray;
+}
+
+.field-group {
+  margin-bottom: 20px;
+}
 
 .field-label {
   display: block;
@@ -36,94 +81,75 @@
   text-transform: uppercase;
   color: var(--header-secondary);
   margin-bottom: 8px;
+  letter-spacing: 0.02em;
 }
 
 .field-input {
   width: 100%;
-  padding: 10px;
-  border-radius: 3px;
+  padding: 10px 12px;
   background-color: var(--bg-input);
-  color: var(--text-normal);
-  border: none;
+  color: #dbdee1;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  transition: border-color 0.2s ease;
+  outline: none;
 }
 
 .field-input:focus {
-  outline: 2px solid var(--blurple);
-}
-
-.auth-error-message {
-  color: var(--text-danger);
-  font-size: 14px;
-  margin-bottom: 16px;
-  text-align: left;
-}
-
-
-
-.field-input {
-    width: 100%;
-    padding: 10px 12px;
-    background-color: var(--bg-input);
-    color: #dbdee1;
-    border: 1px solid rgba(0, 0, 0, 0.3);
-    border-radius: 4px;
-    transition: border-color 0.2s ease;
-    outline: none;
-}
-
-:root {
-    --bg-secondary: #313338;
-    --bg-input: #1e1f22;
-    --bg-tertiary: #2b2d31;
-    --blurple: #5865f2;
-}
-
-.field-input:focus {
-    border-color: var(--blurple);
-    background-color: var(--bg-input-focus, var(--bg-input));
+  border-color: var(--blurple);
+  background-color: var(--bg-input-focus, var(--bg-input));
 }
 
 .btn-primary {
-    background-color: var(--blurple);
-    color: white;
-    padding: 12px;
-    font-weight: 500;
-    font-size: 16px;
-    border-radius: 3px;
-    border: none;
-    cursor: pointer;
-    transition: background-color 0.1s ease;
+  background-color: var(--blurple);
+  color: white;
+  padding: 12px;
+  font-weight: 500;
+  font-size: 16px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
 }
 
 .btn-primary:hover:not(:disabled) {
-    background-color: var(--blurple-hover);
+  background-color: var(--blurple-hover);
 }
 
-
 .btn-primary:active:not(:disabled) {
-    transform: translateY(1px);
+  transform: translateY(1px);
 }
 
 .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-
-.field-group {
-    margin-bottom: 20px;
+.btn-secondary {
+  padding: 12px;
+  border-radius: 8px;
 }
 
-.field-label {
-    display: block;
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: var(--header-secondary);
-    margin-bottom: 8px;
-    letter-spacing: 0.02em;
+.engine-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
+.engine-btn {
+  flex: 1 1 auto;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.engine-btn:not(.btn-primary) {
+  border: 1px solid var(--border);
+  background-color: transparent;
+  color: inherit;
+}
 
 .boot-container {
   position: fixed;
@@ -169,7 +195,6 @@
   text-transform: uppercase;
   letter-spacing: 1px;
 }
-
 
 @keyframes logo-pulse {
   0% { transform: scale(0.95); opacity: 0.8; }
