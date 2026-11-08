@@ -425,6 +425,8 @@ We need to be able to convert timestamps to date otherwise people might not be t
 ***** Readers
 
 
+******* TODO Update this to use TR
+
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
 (defn join-names [names]
   (let [cnt (count names)]
