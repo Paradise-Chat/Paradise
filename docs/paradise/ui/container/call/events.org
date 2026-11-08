@@ -1,4 +1,3 @@
-
 ** Call Events
 
 
@@ -12,10 +11,8 @@ Most of the call re-frame events and subscriptions are listed here
 (ns paradise.ui.container.call.events
   (:require
    [re-frame.core :as rf]
-   [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
    [cljs.core.async :refer [go <!]]
-   [paradise.shared.client.state :as state]
    [promesa.core :as p]
    [taoensso.timbre :as log]
    [paradise.ui.container.call.runtime :as rtc]
