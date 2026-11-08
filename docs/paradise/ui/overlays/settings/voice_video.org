@@ -12,7 +12,6 @@ In addition to that, it provides input/output selections and testing.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/voice_video.cljs
 (ns paradise.ui.overlays.settings.voice-video
   (:require
-   ["livekit-client" :as lkc]
    [paradise.shared.client.session-store :as store]
    [paradise.ui.container.call.runtime :as call-rtc]
    [promesa.core :as p]
@@ -32,8 +31,7 @@ In addition to that, it provides input/output selections and testing.
 (def call-device-storage-keys
   {:audioinput  "call_audio_input"
    :videoinput  "call_video_input"
-   :audiooutput "call_audio_output"
-   })
+   :audiooutput "call_audio_output"})
 
 (re-frame/reg-event-db
  :settings/hydrate-audio-input
@@ -50,168 +48,100 @@ In addition to that, it provides input/output selections and testing.
  (fn [db [_ device-id]]
    (assoc-in db [:settings :call-devices :audiooutput] device-id)))
 
-
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :settings/hydrate-noise-suppression
- (fn [db [_ enabled?]]
-   (call-rtc/set-noise-suppression-enabled! enabled?)
-
-   (assoc-in
-    db
-    [:settings :noise-suppression-enabled?]
-    enabled?)))
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [enabled? (if (nil? enabled?) true (boolean enabled?))]
+     {:db (assoc-in db [:settings :noise-suppression-enabled?] enabled?)
+      :call.audio/set-noise-suppression enabled?})))
 
 (re-frame/reg-event-fx
  :settings/hydrate-voice-threshold
  (fn [{:keys [db]} [_ threshold]]
-   (let [threshold
-         (if (and (number? threshold)
-                  (<= 0 threshold 1))
-           threshold
-           0.12)]
-
-     (call-rtc/set-voice-threshold!
-      threshold)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :voice-threshold]
-       threshold)})))
-
+   (let [threshold (if (and (number? threshold)
+                            (<= 0 threshold 1))
+                     threshold
+                     0.12)]
+     {:db (assoc-in db [:settings :voice-threshold] threshold)
+      :call.audio/set-voice-threshold threshold})))
 #+end_src
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/voice_video.cljs
-
 (re-frame/reg-event-fx
  :settings/set-noise-suppression
  (fn [{:keys [db]} [_ enabled?]]
    (let [enabled? (boolean enabled?)]
-
-     (store/set-setting!
-      "call_noise_suppression"
-      enabled?)
-
-     (call-rtc/set-noise-suppression-enabled!
-      enabled?)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :noise-suppression-enabled?]
-       enabled?)})))
+     (store/set-setting! "call_noise_suppression" enabled?)
+     {:db (assoc-in db [:settings :noise-suppression-enabled?] enabled?)
+      :call.audio/set-noise-suppression enabled?})))
 
 (re-frame/reg-sub
  :settings/noise-suppression-enabled?
  (fn [db _]
-   (get-in
-    db
-    [:settings :noise-suppression-enabled?]
-    true)))
-
-
-
+   (get-in db [:settings :noise-suppression-enabled?] true)))
 
 (re-frame/reg-event-fx
  :settings/set-voice-threshold
  (fn [{:keys [db]} [_ threshold]]
-   (let [threshold
-         (max 0.0
-              (min 1.0 threshold))]
-
-     (store/set-setting!
-      "call_voice_threshold"
-      threshold)
-
-     (call-rtc/set-voice-threshold!
-      threshold)
-
-     {:db
-      (assoc-in
-       db
-       [:settings :voice-threshold]
-       threshold)})))
-
+   (let [threshold (max 0.0 (min 1.0 threshold))]
+     (store/set-setting! "call_voice_threshold" threshold)
+     {:db (assoc-in db [:settings :voice-threshold] threshold)
+      :call.audio/set-voice-threshold threshold})))
 
 (re-frame/reg-sub
  :settings/voice-threshold
  (fn [db _]
-   (get-in
-    db
-    [:settings :voice-threshold]
-    0.12)))
-
+   (get-in db [:settings :voice-threshold] 0.12)))
 
 (re-frame/reg-event-fx
  :settings/set-call-device
  (fn [{:keys [db]} [_ kind device-id]]
    (let [storage-key (get call-device-storage-keys kind)
-         final-id    (when (seq device-id) device-id)]
+         final-id    (when (seq device-id) device-id)
+         connected?  (= (get-in db [:call :status]) :connected)]
      (when storage-key
        (store/set-setting! storage-key final-id))
-
-     (when (and final-id (call-rtc/driver-active?))
-       (-> (call-rtc/switch-device! (name kind) final-id)
-           (p/catch
-            (fn [err]
-              (log/warn err "Failed to switch active call device" kind final-id)))))
-
-     {:db (assoc-in db [:settings :call-devices kind] final-id)})))
+     (cond-> {:db (assoc-in db [:settings :call-devices kind] final-id)}
+       (and connected? final-id)
+       (assoc :call.driver/switch-device {:kind kind :device-id final-id})))))
 
 (re-frame/reg-event-fx
  :settings/apply-call-devices
  (fn [{:keys [db]} _]
-   (when (call-rtc/driver-active?)
-     (doseq [[kind device-id] (get-in db [:settings :call-devices])
-             :when (seq device-id)]
-       (-> (call-rtc/switch-device! (name kind) device-id)
-           (p/catch
-            (fn [err]
-              (log/warn err "Failed to apply preferred call device" kind device-id))))))
-   {}))
+   (if (= (get-in db [:call :status]) :connected)
+     {:call.driver/switch-devices (get-in db [:settings :call-devices])}
+     {})))
 
 (re-frame/reg-sub
  :settings/call-device
  (fn [db [_ kind]]
    (get-in db [:settings :call-devices kind])))
 
-
-
 (defn load-call-devices!
   [!devices !error]
-  (-> (p/let [audio-inputs  (.getLocalDevices (.-Room lkc) "audioinput" false)
-              video-inputs  (.getLocalDevices (.-Room lkc) "videoinput" false)
-              audio-outputs (.getLocalDevices (.-Room lkc) "audiooutput" false)]
-        (reset! !devices
-                {:audioinput  (vec (array-seq audio-inputs))
-                 :videoinput  (vec (array-seq video-inputs))
-                 :audiooutput (vec (array-seq audio-outputs))})
-        (reset! !error nil))
-      (p/catch
-       (fn [err]
-         (log/warn err "Failed to enumerate media devices")
-         (reset! !error err)))))
-
-(defn- live-microphone-enabled? []
-  (call-rtc/live-microphone-enabled?))
-
+  (if-let [media-devices (some-> js/navigator .-mediaDevices)]
+    (-> (.enumerateDevices media-devices)
+        (p/then
+         (fn [device-list]
+           (let [all-devices (array-seq device-list)]
+             (reset! !devices
+                     {:audioinput  (vec (filter #(= (.-kind %) "audioinput") all-devices))
+                      :videoinput  (vec (filter #(= (.-kind %) "videoinput") all-devices))
+                      :audiooutput (vec (filter #(= (.-kind %) "audiooutput") all-devices))})
+             (reset! !error nil))))
+        (p/catch
+         (fn [err]
+           (log/warn err "Failed to enumerate media devices")
+           (reset! !error err))))
+    (p/resolved nil)))
 
 (defn- restore-live-microphone!
   [!restore-live-mic?]
-  (let [restore? @!restore-live-mic?]
+  (when @!restore-live-mic?
     (reset! !restore-live-mic? false)
-
-    (if restore?
-      (-> (call-rtc/set-microphone-enabled! true)
-          (p/catch
-           (fn [err]
-             (log/warn
-              err
-              "Failed to restore live microphone after mic test")
-             nil)))
-      (p/resolved nil))))
-
+    (re-frame/dispatch [:call/set-microphone true]))
+  (p/resolved nil))
 
 (defn stop-mic-test!
   [!track
@@ -239,13 +169,12 @@ In addition to that, it provides input/output selections and testing.
         (.removeChild parent audio-el))
 
       (catch :default err
-        (log/debug
-         err
-         "Failed to remove mic monitor element")))
+        (log/debug err "Failed to remove mic monitor element")))
 
     (reset! !audio-el nil))
 
-  (let [track @!track
+  (let [track         @!track
+        processor     @!processor
         audio-context @!audio-context]
 
     (reset! !track nil)
@@ -253,37 +182,28 @@ In addition to that, it provides input/output selections and testing.
     (reset! !audio-context nil)
 
     (-> (p/let [_
-                (if track
-                  (-> (.stopProcessor track false)
+                (if-let [destroy (and processor (aget processor "destroy"))]
+                  (-> (destroy)
                       (p/catch
                        (fn [err]
-                         (log/debug
-                          err
-                          "Failed to stop mic test processor"))))
+                         (log/debug err "Failed to destroy mic test processor"))))
                   (p/resolved nil))
 
                 _
                 (do
                   (when track
                     (try
-                      (.detach track)
                       (.stop track)
-
                       (catch :default err
-                        (log/debug
-                         err
-                         "Failed to stop mic test track")))))
+                        (log/debug err "Failed to stop mic test track")))))
 
                 _
                 (if (and audio-context
-                         (not= "closed"
-                               (.-state audio-context)))
+                         (not= "closed" (.-state audio-context)))
                   (-> (.close audio-context)
                       (p/catch
                        (fn [err]
-                         (log/debug
-                          err
-                          "Failed to close mic test AudioContext"))))
+                         (log/debug err "Failed to close mic test AudioContext"))))
                   (p/resolved nil))
 
                 _
@@ -293,28 +213,20 @@ In addition to that, it provides input/output selections and testing.
 
                 _
                 (if restore-live?
-                  (restore-live-microphone!
-                   !restore-live-mic?)
+                  (restore-live-microphone! !restore-live-mic?)
                   (p/resolved nil))]
-
           nil)
-
         (p/catch
          (fn [err]
-           (log/debug
-            err
-            "Mic test cleanup failed")
-
+           (log/debug err "Mic test cleanup failed")
            (reset! !level 0)
-
            (if restore-live?
-             (restore-live-microphone!
-              !restore-live-mic?)
+             (restore-live-microphone! !restore-live-mic?)
              (p/resolved nil)))))))
-
 
 (defn start-mic-test!
   [device-id
+   live-mic-active?
    !track
    !audio-el
    !processor
@@ -329,9 +241,7 @@ In addition to that, it provides input/output selections and testing.
    !devices]
 
   (let [restarting? @!testing?
-        live-mic-was-enabled?
-        (and (not restarting?)
-             (live-microphone-enabled?))]
+        live-mic-was-enabled? (and (not restarting?) live-mic-active?)]
 
     (-> (p/let [_
                 (stop-mic-test!
@@ -348,15 +258,10 @@ In addition to that, it provides input/output selections and testing.
                 _
                 (do
                   (reset! !error nil)
-
                   (when-not restarting?
-                    (reset! !restore-live-mic?
-                            (boolean live-mic-was-enabled?))))
-
-                _
-                (if live-mic-was-enabled?
-                  (call-rtc/set-microphone-enabled! false)
-                  (p/resolved nil))
+                    (reset! !restore-live-mic? (boolean live-mic-was-enabled?)))
+                  (when live-mic-was-enabled?
+                    (re-frame/dispatch [:call/set-microphone false])))
 
                 processor
                 (call-rtc/create-test-audio-processor)
@@ -364,117 +269,83 @@ In addition to that, it provides input/output selections and testing.
                 audio-context
                 (js/AudioContext.)
 
-                opts
+                constraints
                 (clj->js
-                 (cond->
-                  {:echoCancellation true
-
-                   :noiseSuppression false
-
-                   :autoGainControl true
-                   :channelCount 1
-                   :sampleRate 48000}
-
-                  (seq device-id)
-                  (assoc :deviceId device-id)))
+                 {:audio (cond-> {:echoCancellation true
+                                  :noiseSuppression false
+                                  :autoGainControl true
+                                  :channelCount 1
+                                  :sampleRate 48000}
+                           (seq device-id)
+                           (assoc :deviceId {:exact device-id}))
+                  :video false})
 
                 _
                 (do
                   (reset! !processor processor)
                   (reset! !audio-context audio-context)
 
-                  (when-let [set-threshold
-                             (aget processor "setThreshold")]
-                    (set-threshold
-                     @!threshold))
+                  (when-let [set-threshold (aget processor "setThreshold")]
+                    (set-threshold @!threshold))
 
-                  (when-let [set-suppression
-                             (aget processor
-                                   "setNoiseSuppressionEnabled")]
-                    (set-suppression
-                     @!noise-suppression)))
+                  (when-let [set-suppression (aget processor "setNoiseSuppressionEnabled")]
+                    (set-suppression @!noise-suppression)))
 
                 _
-                (if (= "suspended"
-                       (.-state audio-context))
+                (if (= "suspended" (.-state audio-context))
                   (.resume audio-context)
                   (p/resolved nil))
 
-                track
-                ((.-createLocalAudioTrack lkc)
-                 opts)
+                stream
+                (.getUserMedia js/navigator.mediaDevices constraints)
+
+                raw-track
+                (aget (.getAudioTracks stream) 0)
 
                 _
-                (do
-                  (reset! !track track)
-
-                  (.setAudioContext
-                   track
-                   audio-context))
+                (reset! !track raw-track)
 
                 _
-                (.setProcessor
-                 track
-                 processor)]
+                (.init processor #js {:audioContext audio-context
+                                      :track        raw-track})]
 
           (reset! !testing? true)
 
-          (let [audio-el (.attach track)]
-
+          (let [output-track (or (.-processedTrack processor) raw-track)
+                audio-el     (js/document.createElement "audio")]
             (reset! !audio-el audio-el)
-
+            (set! (.-srcObject audio-el) (js/MediaStream. #js [output-track]))
             (set! (.-autoplay audio-el) true)
             (set! (.-muted audio-el) false)
             (set! (.-volume audio-el) 1)
             (set! (.. audio-el -style -display) "none")
-
-            (.appendChild
-             (.-body js/document)
-             audio-el)
+            (.appendChild (.-body js/document) audio-el)
 
             (-> (.play audio-el)
                 (p/catch
                  (fn [err]
-                   (log/warn
-                    err
-                    "Mic test playback failed"))))
+                   (log/warn err "Mic test playback failed"))))
 
             (letfn [(tick []
                       (when @!testing?
-                        (when-let [set-threshold
-                                   (aget processor "setThreshold")]
-                          (set-threshold
-                           @!threshold))
+                        (when-let [set-threshold (aget processor "setThreshold")]
+                          (set-threshold @!threshold))
 
-                        (when-let [set-suppression
-                                   (aget processor
-                                         "setNoiseSuppressionEnabled")]
-                          (set-suppression
-                           @!noise-suppression))
+                        (when-let [set-suppression (aget processor "setNoiseSuppressionEnabled")]
+                          (set-suppression @!noise-suppression))
 
-                        (when-let [get-level
-                                   (aget processor "getLevel")]
-                          (reset! !level
-                                  (get-level)))
+                        (when-let [get-level (aget processor "getLevel")]
+                          (reset! !level (get-level)))
 
-                        (reset! !raf-id
-                                (js/requestAnimationFrame
-                                 tick))))]
-
+                        (reset! !raf-id (js/requestAnimationFrame tick))))]
               (tick))
 
-            (load-call-devices!
-             !devices
-             !error)))
+            (load-call-devices! !devices !error)))
 
         (p/catch
          (fn [err]
-           (log/error
-            err
-            "Failed to start processed microphone test")
-
+           (log/error err "Failed to start processed microphone test")
            (reset! !error err)
-
            (stop-mic-test!
             !track
             !audio-el
@@ -486,41 +357,44 @@ In addition to that, it provides input/output selections and testing.
             !restore-live-mic?
             true))))))
 
-
 (defn stop-camera-preview!
-  [!track !previewing?]
+  [!track !video-el !previewing?]
   (reset! !previewing? false)
+  (when-let [video-el @!video-el]
+    (set! (.-srcObject video-el) nil))
   (when-let [track @!track]
     (try
-      (.detach track)
       (.stop track)
       (catch :default err
         (log/debug err "Camera preview track cleanup failed"))))
   (reset! !track nil))
 
-
 (defn start-camera-preview!
   [device-id !track !video-el !previewing? !error !devices]
-  (stop-camera-preview! !track !previewing?)
+  (stop-camera-preview! !track !video-el !previewing?)
   (reset! !error nil)
 
-  (let [opts (if (seq device-id)
-               #js {:deviceId device-id
-                    :resolution (.-hd720 (.-VideoPresets lkc))}
-               #js {:resolution (.-hd720 (.-VideoPresets lkc))})]
-    (-> (p/let [track ((.-createLocalVideoTrack lkc) opts)]
+  (let [constraints (clj->js
+                     {:video (cond-> {:width  {:ideal 1280}
+                                      :height {:ideal 720}}
+                               (seq device-id)
+                               (assoc :deviceId {:exact device-id}))
+                      :audio false})]
+    (-> (p/let [stream (.getUserMedia js/navigator.mediaDevices constraints)
+                track  (aget (.getVideoTracks stream) 0)]
           (reset! !track track)
           (reset! !previewing? true)
 
           (when-let [video-el @!video-el]
-            (.attach track video-el))
+            (set! (.-srcObject video-el) (js/MediaStream. #js [track]))
+            (-> (.play video-el) (p/catch (fn [_] nil))))
 
           (load-call-devices! !devices !error))
         (p/catch
          (fn [err]
            (log/warn err "Failed to start camera preview")
            (reset! !error err)
-           (stop-camera-preview! !track !previewing?))))))
+           (stop-camera-preview! !track !video-el !previewing?))))))
 
 (defn media-device-label
   [device fallback index]
@@ -545,65 +419,43 @@ In addition to that, it provides input/output selections and testing.
          (media-device-label device fallback-label idx)])
       devices))]])
 
-
 (defn- clamp01 [x]
-  (max 0.0
-       (min 1.0 x)))
-
+  (max 0.0 (min 1.0 x)))
 
 (defn- amplitude->meter
   [amplitude]
-  (let [db (* 20
-              (js/Math.log10
-               (max amplitude 0.00001)))
+  (let [db (* 20 (js/Math.log10 (max amplitude 0.00001)))
         min-db -60
         max-db -6]
-    (clamp01
-     (/ (- db min-db)
-        (- max-db min-db)))))
-
+    (clamp01 (/ (- db min-db) (- max-db min-db)))))
 
 (defn- meter->amplitude
   [position]
   (let [position (clamp01 position)
         min-db -60
         max-db -6
-        db (+ min-db
-              (* position
-                 (- max-db min-db)))]
-    (js/Math.pow
-     10
-     (/ db 20))))
-
+        db (+ min-db (* position (- max-db min-db)))]
+    (js/Math.pow 10 (/ db 20))))
 
 (defn- mic-level-meter
   [tr level testing? threshold on-threshold-change]
   (let [segments 24
         meter-level (amplitude->meter level)
         meter-threshold (amplitude->meter threshold)
-        active (int
-                (js/Math.round
-                 (* segments meter-level)))
+        active (int (js/Math.round (* segments meter-level)))
         threshold-pct (* 100 meter-threshold)
-        transmitting? (and testing?
-                           (>= level threshold))]
+        transmitting? (and testing? (>= level threshold))]
     [:div.settings-meter
      [:div.settings-meter-bars
       (for [idx (range segments)]
-        (let [active? (and testing?
-                           (< idx active))]
+        (let [active? (and testing? (< idx active))]
           ^{:key idx}
           [:div.settings-meter-segment
            {:class (cond
                      (not active?) nil
                      transmitting? "is-detected"
                      :else "is-below-threshold")
-            :style {:height (str
-                             (+ 5
-                                (* 0.45
-                                   (min idx
-                                        (- segments idx))))
-                             "px")}}]))
+            :style {:height (str (+ 5 (* 0.45 (min idx (- segments idx)))) "px")}}]))
 
       [:div.settings-meter-threshold
        {:style {:left (str threshold-pct "%")}}]
@@ -619,8 +471,7 @@ In addition to that, it provides input/output selections and testing.
         (fn [e]
           (on-threshold-change
            (meter->amplitude
-            (js/parseFloat
-             (.. e -target -value)))))}]]
+            (js/parseFloat (.. e -target -value)))))}]]
 
      [:div.settings-meter-meta
       [:span
@@ -635,11 +486,7 @@ In addition to that, it provides input/output selections and testing.
          (tr [:settings.voice-video.microphone/activation-threshold]))]
 
       [:span
-       (str
-        (js/Math.round
-         (* meter-threshold 100))
-        "%")]]]))
-
+       (str (js/Math.round (* meter-threshold 100)) "%")]]]))
 
 (defn- microphone-section
   [{:keys [tr
@@ -647,6 +494,7 @@ In addition to that, it provides input/output selections and testing.
            audio-input
            voice-threshold
            noise-suppression-enabled?
+           live-mic-active?
            !mic-track
            !mic-audio-el
            !mic-processor
@@ -676,13 +524,12 @@ In addition to that, it provides input/output selections and testing.
      :on-change
      (fn [device-id]
        (re-frame/dispatch
-        [:settings/set-call-device
-         :audioinput
-         device-id])
+        [:settings/set-call-device :audioinput device-id])
 
        (when @!mic-testing?
          (start-mic-test!
           device-id
+          live-mic-active?
           !mic-track
           !mic-audio-el
           !mic-processor
@@ -721,6 +568,7 @@ In addition to that, it provides input/output selections and testing.
 
           (start-mic-test!
            audio-input
+           live-mic-active?
            !mic-track
            !mic-audio-el
            !mic-processor
@@ -745,8 +593,7 @@ In addition to that, it provides input/output selections and testing.
     (fn [threshold]
       (reset! !voice-threshold threshold)
       (re-frame/dispatch
-       [:settings/set-voice-threshold
-        threshold]))]
+       [:settings/set-voice-threshold threshold]))]
 
    [:div.settings-row.toggle-row
     [:div.settings-row-text
@@ -764,11 +611,9 @@ In addition to that, it provides input/output selections and testing.
          (let [enabled? (.. e -target -checked)]
            (reset! !noise-suppression enabled?)
            (re-frame/dispatch
-            [:settings/set-noise-suppression
-             enabled?])))}]
+            [:settings/set-noise-suppression enabled?])))}]
      [:div.settings-toggle-track
       [:div.settings-toggle-knob]]]]])
-
 
 (defn- camera-section
   [{:keys [tr
@@ -796,9 +641,7 @@ In addition to that, it provides input/output selections and testing.
      :on-change
      (fn [device-id]
        (re-frame/dispatch
-        [:settings/set-call-device
-         :videoinput
-         device-id])
+        [:settings/set-call-device :videoinput device-id])
 
        (when @!previewing?
          (start-camera-preview!
@@ -815,10 +658,7 @@ In addition to that, it provides input/output selections and testing.
       :on-click
       (fn [_]
         (if @!previewing?
-          (stop-camera-preview!
-           !camera-track
-           !previewing?)
-
+          (stop-camera-preview! !camera-track !video-el !previewing?)
           (start-camera-preview!
            video-input
            !camera-track
@@ -832,8 +672,7 @@ In addition to that, it provides input/output selections and testing.
 
    [:div.settings-media-preview
     [:video.settings-media-preview-video
-     {:class (when @!previewing?
-               "is-active")
+     {:class (when @!previewing? "is-active")
       :ref #(reset! !video-el %)
       :auto-play true
       :plays-inline true
@@ -842,7 +681,6 @@ In addition to that, it provides input/output selections and testing.
     (when-not @!previewing?
       [:div.settings-media-preview-empty
        (tr [:settings.voice-video.camera/preview-off])])]])
-
 
 (defn- output-section
   [{:keys [tr
@@ -864,13 +702,10 @@ In addition to that, it provides input/output selections and testing.
      :default-label (tr [:settings.voice-video.devices/default])
      :on-change
      #(re-frame/dispatch
-       [:settings/set-call-device
-        :audiooutput
-        %])}]
+       [:settings/set-call-device :audiooutput %])}]
 
    [:p.settings-description
     (tr [:settings.voice-video.output/browser-support])]])
-
 
 (defn- media-error-banner
   [tr error]
@@ -879,108 +714,48 @@ In addition to that, it provides input/output selections and testing.
      [:div.settings-banner-title
       (tr [:settings.voice-video.error/title])]
      [:div.settings-banner-description
-      (or (.-message error)
-          (str error))]]))
-
+      (or (.-message error) (str error))]]))
 
 (defn ^:ui voice-video-tab []
   (r/with-let [!devices
-               (r/atom
-                {:audioinput []
-                 :videoinput []
-                 :audiooutput []})
+               (r/atom {:audioinput []
+                        :videoinput []
+                        :audiooutput []})
+               !error             (r/atom nil)
+               !mic-track         (atom nil)
+               !mic-audio-el      (atom nil)
+               !mic-processor     (atom nil)
+               !mic-audio-context (atom nil)
+               !mic-raf-id        (atom nil)
+               !mic-level         (r/atom 0)
+               !voice-threshold   (atom 0.12)
+               !noise-suppression (atom true)
+               !mic-testing?      (r/atom false)
+               !restore-live-mic? (atom false)
+               !camera-track      (atom nil)
+               !video-el          (atom nil)
+               !previewing?       (r/atom false)
+               _                  (load-call-devices! !devices !error)]
 
-               !error
-               (r/atom nil)
+    (let [tr                         @(re-frame/subscribe [:i18n/tr])
+          audio-input                @(re-frame/subscribe [:settings/call-device :audioinput])
+          video-input                @(re-frame/subscribe [:settings/call-device :videoinput])
+          audio-output               @(re-frame/subscribe [:settings/call-device :audiooutput])
+          voice-threshold            @(re-frame/subscribe [:settings/voice-threshold])
+          noise-suppression-enabled? @(re-frame/subscribe [:settings/noise-suppression-enabled?])
+          call-status                @(re-frame/subscribe [:call/status])
+          call-audio-enabled?        @(re-frame/subscribe [:call/audio-enabled?])
+          live-mic-active?           (and (= call-status :connected) call-audio-enabled?)
+          devices                    @!devices
+          error                      @!error]
 
-               !mic-track
-               (atom nil)
-
-               !mic-audio-el
-               (atom nil)
-
-               !mic-processor
-               (atom nil)
-
-               !mic-audio-context
-               (atom nil)
-
-               !mic-raf-id
-               (atom nil)
-
-               !mic-level
-               (r/atom 0)
-
-               !voice-threshold
-               (atom 0.12)
-
-               !noise-suppression
-               (atom true)
-
-               !mic-testing?
-               (r/atom false)
-
-               !restore-live-mic?
-               (atom false)
-
-               !camera-track
-               (atom nil)
-
-               !video-el
-               (atom nil)
-
-               !previewing?
-               (r/atom false)
-
-               _
-               (load-call-devices!
-                !devices
-                !error)]
-
-    (let [tr
-          @(re-frame/subscribe
-            [:i18n/tr])
-
-          audio-input
-          @(re-frame/subscribe
-            [:settings/call-device
-             :audioinput])
-
-          video-input
-          @(re-frame/subscribe
-            [:settings/call-device
-             :videoinput])
-
-          audio-output
-          @(re-frame/subscribe
-            [:settings/call-device
-             :audiooutput])
-
-          voice-threshold
-          @(re-frame/subscribe
-            [:settings/voice-threshold])
-
-          noise-suppression-enabled?
-          @(re-frame/subscribe
-            [:settings/noise-suppression-enabled?])
-
-          devices
-          @!devices
-
-          error
-          @!error]
-
-      (reset! !voice-threshold
-              voice-threshold)
-
-      (reset! !noise-suppression
-              noise-suppression-enabled?)
+      (reset! !voice-threshold voice-threshold)
+      (reset! !noise-suppression noise-suppression-enabled?)
 
       [:div.settings-tab-content
        [:div.settings-page-header
         [:h2.settings-heading
          (tr [:settings.voice-video/title])]
-
         [:p.settings-description
          (tr [:settings.voice-video/description])]]
 
@@ -990,6 +765,7 @@ In addition to that, it provides input/output selections and testing.
          :audio-input audio-input
          :voice-threshold voice-threshold
          :noise-suppression-enabled? noise-suppression-enabled?
+         :live-mic-active? live-mic-active?
          :!mic-track !mic-track
          :!mic-audio-el !mic-audio-el
          :!mic-processor !mic-processor
@@ -1018,9 +794,7 @@ In addition to that, it provides input/output selections and testing.
          :devices devices
          :audio-output audio-output}]
 
-       [media-error-banner
-        tr
-        error]])
+       [media-error-banner tr error]])
 
     (finally
       (stop-mic-test!
@@ -1036,6 +810,7 @@ In addition to that, it provides input/output selections and testing.
 
       (stop-camera-preview!
        !camera-track
+       !video-el
        !previewing?))))
 #+end_src
 
