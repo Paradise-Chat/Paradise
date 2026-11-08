@@ -12,14 +12,16 @@ this will be where that lives.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_view.cljs
 (ns paradise.ui.container.call.call-view
-  (:require [reagent.core :as r]
-            [re-frame.core :as rf]
-            [promesa.core :as p]
-            ["react" :as react]
-            ["livekit-client" :as lkc]
-            ["@livekit/components-react" :as lk]
-            [paradise.ui.container.call.runtime :as rtc]
-            [paradise.ui.container.reusable :refer [room-header]]))
+  (:require
+   [clojure.string :as str]
+   [re-frame.core :as rf]
+   ["react" :as react]
+   [promesa.core :as p]
+   [paradise.shared.utils.helpers :refer [format-call-participants]]
+   [paradise.ui.global :refer [avatar]]
+   [paradise.ui.container.call.runtime :as rtc]
+   [paradise.ui.container.call.call-container :as cc]
+   [paradise.ui.container.reusable :refer [room-header]]))
 #+end_src
 
 
