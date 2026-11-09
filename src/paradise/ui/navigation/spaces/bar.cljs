@@ -10,7 +10,6 @@
    [cljs.core.async :refer [go <!]]
    [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.global :refer [avatar]]))
 
 (re-frame/reg-event-db
@@ -171,7 +170,7 @@
                       rich-room)))
            child-refs))))
 
-(defui space-icon-item [item active-id]
+(defn ^:ui space-icon-item [item active-id]
   (let [{:keys [id name avatar-url is-dm?]} item
         stats (if is-dm? item @(re-frame/subscribe [:space/unread-stats id]))
         {:keys [unread? highlight? mentions msg-count]} stats
@@ -211,7 +210,7 @@
        (when (and badge-count (pos? badge-count))
          [:div.space-mention-badge badge-count])])))
 
-(defui virtualized-space-bar [spaces active-space-id]
+(defn ^:ui virtualized-space-bar [spaces active-space-id]
   (let [space-array (to-array spaces)]
     [:> Virtuoso
      {:style {:height "100%" :width "100%"}
@@ -225,7 +224,7 @@
 
 
 
-(defui spaces-sidebar []
+(defn ^:ui spaces-sidebar []
   (let [spaces        @(re-frame/subscribe [:spaces/all])
         active-id     @(re-frame/subscribe [:spaces/active-id])
         active-dms    @(re-frame/subscribe [:rooms/active-dm-pops])
