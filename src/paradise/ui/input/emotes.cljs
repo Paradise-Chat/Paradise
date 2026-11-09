@@ -129,7 +129,7 @@
 (defn ^:ui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
   (re-frame/dispatch [:sdk/fetch-all-emotes])
   (let [selected-pack-id (r/atom nil)
-        sticker-mode?    (r/atom false)
+        sticker-mode?    (r/atom true)
         search-query     (r/atom "")
         tr-sub           (re-frame/subscribe [:i18n/tr])]
     (fn [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
@@ -137,7 +137,13 @@
             custom-packs   @(re-frame/subscribe [:emoji/active-set])
             is-mobile?     @(re-frame/subscribe [:ui/mobile?])
             packs          (merge categorized-system-packs custom-packs)
-            sorted-ids     (sort-by #(get-in packs [% :system-priority] 999) (keys packs))
+            sorted-ids     (sort-by (fn [id]
+                                      (let [p (get packs id)]
+                                        [(if (:is-unicode? p) 1 0)
+                                         (if (:is-sticker-pack? p) 0 1)
+                                         (get p :system-priority 999)
+                                         (or (:name p) (str id))]))
+                                    (keys packs))
             active-id      (or @selected-pack-id (first sorted-ids))
             active-pack    (get packs active-id)
             q              (str/lower-case @search-query)
@@ -160,7 +166,7 @@
                                             (or (str/includes? (str/lower-case shortcode) q)
                                                 (and (:search-text item) (str/includes? (:search-text item) q)))))
                                   (take 150)))
-            render-cell    (fn [cell-key shortcode item unicode-pack? sticker-pack?]
+            render-cell    (fn [cell-key shortcode item unicode-pack? _sticker-pack?]
                              (let [uri     (or (:uri item) (:url item))
                                    payload {:id        (:id item)
                                             :shortcode shortcode
@@ -174,7 +180,7 @@
                                                unicode-pack?
                                                (on-insert-native (:unicode item))
 
-                                               (or @sticker-mode? sticker-pack?)
+                                               @sticker-mode?
                                                (on-send-sticker payload)
 
                                                :else
@@ -214,15 +220,27 @@
                                          [:span.pack-text-icon (subs pname 0 (min 2 (count pname)))])]))])
                                ^{:key "grid-area"}
                                [:div.emoji-grid-area
-                                [:div.emoji-search-bar {:style {:padding "8px 12px" :border "1px solid var(--border-color)"}}
+                                [:div.emoji-search-bar {:style {:padding "8px 12px" :border-bottom "1px solid var(--border-color)"}}
                                  [:input.form-input
                                   {:type        "text"
                                    :placeholder (tr [:composer.emotes/search-placeholder])
                                    :auto-focus  (not is-mobile?)
                                    :value       @search-query
                                    :on-change   #(reset! search-query (.. % -target -value))}]]
+                                [:div.emoji-pack-header
+                                 [:div.emoji-pack-title
+                                  (if is-searching?
+                                    (tr [:composer.emotes/search-results] "Search Results")
+                                    (or (:name active-pack) (tr [:composer.emotes/default-title])))]
+                                 [:div.emoji-mode-switch
+                                  [:button {:class    (when-not @sticker-mode? "active")
+                                            :on-click #(reset! sticker-mode? false)}
+                                   (tr [:composer.emotes/mode-inline])]
+                                  [:button {:class    (when @sticker-mode? "active")
+                                            :on-click #(reset! sticker-mode? true)}
+                                   (tr [:composer.emotes/mode-sticker])]]]
                                 (if is-searching?
-                                  [:div.emoji-grid {:style {:padding-top "8px"}}
+                                  [:div.emoji-grid
                                    (if (empty? search-results)
                                      [:div.emoji-empty-state (tr [:composer.emotes/no-results])]
                                      (for [[shortcode item] search-results]
@@ -231,25 +249,14 @@
                                                     item
                                                     (:is-unicode? item)
                                                     (:is-sticker-pack? item))))]
-                                  [:<>
-                                   [:div.emoji-pack-header
-                                    [:div.emoji-pack-title (or (:name active-pack) (tr [:composer.emotes/default-title]))]
-                                    (when-not (:is-unicode? active-pack)
-                                      [:div.emoji-mode-switch
-                                       [:button {:class    (when-not @sticker-mode? "active")
-                                                 :on-click #(reset! sticker-mode? false)}
-                                        (tr [:composer.emotes/mode-inline])]
-                                       [:button {:class    (when @sticker-mode? "active")
-                                                 :on-click #(reset! sticker-mode? true)}
-                                        (tr [:composer.emotes/mode-sticker])]])]
-                                   [:div.emoji-grid
-                                    (for [[raw-shortcode item] (get active-pack :images {})
-                                          :let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))]]
-                                      (render-cell shortcode
-                                                   shortcode
-                                                   item
-                                                   (:is-unicode? active-pack)
-                                                   (:is-sticker-pack? active-pack)))]])]])]]
+                                  [:div.emoji-grid
+                                   (for [[raw-shortcode item] (get active-pack :images {})
+                                         :let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))]]
+                                     (render-cell shortcode
+                                                  shortcode
+                                                  item
+                                                  (:is-unicode? active-pack)
+                                                  (:is-sticker-pack? active-pack)))])]])]]
         (if inline?
           [click-away-wrapper
            {:on-close on-close :z-index 19}
