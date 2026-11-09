@@ -210,7 +210,7 @@ We then initialize them as a 'pack'
 (defn ^:ui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
   (re-frame/dispatch [:sdk/fetch-all-emotes])
   (let [selected-pack-id (r/atom nil)
-        sticker-mode?    (r/atom false)
+        sticker-mode?    (r/atom true)
         search-query     (r/atom "")
         tr-sub           (re-frame/subscribe [:i18n/tr])]
     (fn [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
