@@ -81,19 +81,20 @@
  :msg/edit
  (fn [_ [_ room-id item text html]]
    (let [msg-tag     (get-in item [:content :inner :tag])
-         ffi-content (get-in item [:content :inner :content :ffi-content])]
+         ffi-content (clj->js (get-in item [:content :inner :content :ffi-content]))]
      (go
        (let [res (<! (mesh/do-with-thread! :engine-pool
-                                         {:handler :send-message
-                                          :arguments {:room-id room-id
-                                                      :text text
-                                                      :html html
-                                                      :context {:mode "edit"
-                                                                :target (:id item)
-                                                                :msg-tag msg-tag
-                                                                :ffi-content ffi-content}}}))]
+                                           {:handler :send-message
+                                            :arguments {:room-id room-id
+                                                        :text text
+                                                        :html html
+                                                        :context {:mode "edit"
+                                                                  :target (:id item)
+                                                                  :msg-tag msg-tag
+                                                                  :ffi-content ffi-content}}}))]
          (log/info "Edit dispatch result:" res))))
    {:dispatch [:input/clear-context room-id]}))
+
 
 (re-frame/reg-event-fx
  :room/mark-read
