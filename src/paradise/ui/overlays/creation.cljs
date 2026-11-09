@@ -4,10 +4,9 @@
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [clojure.string :as str]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.overlays.base :refer [modal-component popover-component]]))
 
-(defui create-room-content [{:keys [target-space-id]}]
+(defn ^:ui create-room-content [{:keys [target-space-id]}]
   (let [tr        @(re-frame/subscribe [:i18n/tr])
         close-fn  #(re-frame/dispatch [:ui/close-modal])]
     (r/with-let [room-name          (r/atom "")
@@ -83,7 +82,7 @@
            (tr [:creation.action/creating])
            (tr [:creation.action/create]))]]])))
 
-(defui create-space-content [{:keys [target-space-id]}]
+(defn ^:ui create-space-content [{:keys [target-space-id]}]
   (let [tr        @(re-frame/subscribe [:i18n/tr])
         close-fn  #(re-frame/dispatch [:ui/close-modal])]
     (r/with-let [space-name         (r/atom "")
