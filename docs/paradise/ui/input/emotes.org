@@ -218,7 +218,13 @@ We then initialize them as a 'pack'
             custom-packs   @(re-frame/subscribe [:emoji/active-set])
             is-mobile?     @(re-frame/subscribe [:ui/mobile?])
             packs          (merge categorized-system-packs custom-packs)
-            sorted-ids     (sort-by #(get-in packs [% :system-priority] 999) (keys packs))
+            sorted-ids     (sort-by (fn [id]
+                                      (let [p (get packs id)]
+                                        [(if (:is-unicode? p) 1 0)
+                                         (if (:is-sticker-pack? p) 0 1)
+                                         (get p :system-priority 999)
+                                         (or (:name p) (str id))]))
+                                    (keys packs))
             active-id      (or @selected-pack-id (first sorted-ids))
             active-pack    (get packs active-id)
             q              (str/lower-case @search-query)
