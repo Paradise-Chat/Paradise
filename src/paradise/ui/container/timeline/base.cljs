@@ -289,9 +289,15 @@
    (let [my-id         (:user-id profile)
          actual-events (filter #(not= (:type %) :virtual) events)
          latest-event  (last actual-events)
-         read-by       (or (:read-by (js->clj latest-event)) [])
-         others        (remove #(= % my-id) read-by)]
-     others)))
+         raw-read-by   (or (:read-by latest-event)
+                           (some-> (:worker-data latest-event)
+                                   (goog.object/get "read-by"))
+                           (some-> (:worker-data latest-event)
+                                   (goog.object/get "read_by")))
+         read-by       (if (array? raw-read-by)
+                         (vec raw-read-by)
+                         (or raw-read-by []))]
+     (remove #(= % my-id) read-by))))
 
 (defn status-indicator [active-room]
   (let [tr            @(re-frame/subscribe [:i18n/tr])
