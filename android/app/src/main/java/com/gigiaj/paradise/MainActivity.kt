@@ -14,6 +14,15 @@ class MainActivity : BridgeActivity() {
         
       //  handleCallIntent(intent)
     }
+
+    override fun onResume() {
+        super.onResume()
+        val notificationManager = getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        notificationManager.cancelAll()
+    }
+
+
+
 /*
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
