@@ -308,8 +308,20 @@ We then initialize them as a 'pack'
                                    :auto-focus  (not is-mobile?)
                                    :value       @search-query
                                    :on-change   #(reset! search-query (.. % -target -value))}]]
+                                [:div.emoji-pack-header
+                                 [:div.emoji-pack-title
+                                  (if is-searching?
+                                    (tr [:composer.emotes/search-results] "Search Results")
+                                    (or (:name active-pack) (tr [:composer.emotes/default-title])))]
+                                 [:div.emoji-mode-switch
+                                  [:button {:class    (when-not @sticker-mode? "active")
+                                            :on-click #(reset! sticker-mode? false)}
+                                   (tr [:composer.emotes/mode-inline])]
+                                  [:button {:class    (when @sticker-mode? "active")
+                                            :on-click #(reset! sticker-mode? true)}
+                                   (tr [:composer.emotes/mode-sticker])]]]
                                 (if is-searching?
-                                  [:div.emoji-grid {:style {:padding-top "8px"}}
+                                  [:div.emoji-grid
                                    (if (empty? search-results)
                                      [:div.emoji-empty-state (tr [:composer.emotes/no-results])]
                                      (for [[shortcode item] search-results]
