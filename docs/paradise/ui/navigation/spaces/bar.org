@@ -22,7 +22,6 @@ not (among many other indicators).
    [cljs.core.async :refer [go <!]]
    [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.global :refer [avatar]]))
 #+end_src
 
@@ -199,7 +198,7 @@ not (among many other indicators).
 ***** Icon
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
-(defui space-icon-item [item active-id]
+(defn ^:ui space-icon-item [item active-id]
   (let [{:keys [id name avatar-url is-dm?]} item
         stats (if is-dm? item @(re-frame/subscribe [:space/unread-stats id]))
         {:keys [unread? highlight? mentions msg-count]} stats
@@ -394,7 +393,7 @@ dispatch event. No extra imports. Just use what you need. Reframe is delightful
 at abstracting the excessive state management of React.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
-(defui virtualized-space-bar [spaces active-space-id]
+(defn ^:ui virtualized-space-bar [spaces active-space-id]
   (let [space-array (to-array spaces)]
     [:> Virtuoso
      {:style {:height "100%" :width "100%"}
@@ -500,7 +499,7 @@ Keeping with our goal of easily mutated to look how you want!
 
 ****** TODO Swap home icon out with SVG
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
-(defui spaces-sidebar []
+(defn ^:ui spaces-sidebar []
   (let [spaces        @(re-frame/subscribe [:spaces/all])
         active-id     @(re-frame/subscribe [:spaces/active-id])
         active-dms    @(re-frame/subscribe [:rooms/active-dm-pops])
