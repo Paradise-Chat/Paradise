@@ -3,10 +3,9 @@
             [reagent.core :as r]
             [paradise.ui.overlays.base :refer [modal-component]]
             [paradise.shared.utils.svg :as icons]
-            [paradise.shared.utils.macros :refer [defui]]
             ))
 
-(defui image-lightbox-content [{:keys [url]}]
+(defn ^:ui image-lightbox-content [{:keys [url]}]
   (r/with-let [!state           (r/atom {:scale 1 :last-scale 1 :x 0 :y 0 :last-x 0 :last-y 0 :start-dist 0})
                !active-pointers (atom {})
                tr               (re-frame/subscribe [:i18n/tr])
