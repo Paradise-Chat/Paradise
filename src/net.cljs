@@ -32,15 +32,15 @@
   ([] (await-auth 3000))
   ([timeout-ms]
    (p/create
-    (fn [resolve]
+    (fn [resolve-fn]
       (let [{:keys [token base-url headers auth-fn] :as ctx} @!auth-context]
         (if (or (and token base-url) headers auth-fn)
-          (resolve ctx)
+          (resolve-fn ctx)
           (let [watch-key (keyword (gensym "auth-watch"))
                 timer     (js/setTimeout
                            (fn []
                              (remove-watch !auth-context watch-key)
-                             (resolve @!auth-context))
+                             (resolve-fn @!auth-context))
                            timeout-ms)]
             (add-watch !auth-context watch-key
                        (fn [_ _ _ new-state]
@@ -49,7 +49,7 @@
                                    (:auth-fn new-state))
                            (js/clearTimeout timer)
                            (remove-watch !auth-context watch-key)
-                           (resolve new-state)))))))))))
+                           (resolve-fn new-state)))))))))))
 
 
 (defn fetch
