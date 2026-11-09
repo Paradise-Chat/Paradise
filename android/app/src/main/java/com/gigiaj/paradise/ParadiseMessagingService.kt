@@ -1,5 +1,6 @@
 package com.gigiaj.paradise
 
+import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -47,6 +48,13 @@ class ParadiseMessagingService : FirebaseMessagingService() {
         PushNotificationsPlugin.onNewToken(token)
     }
 
+    private fun isAppInForeground(): Boolean {
+        val appProcessInfo = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(appProcessInfo)
+        return appProcessInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
+
     private fun JSONObject.optCleanString(key: String): String? {
         if (isNull(key)) return null
         val v = optString(key, "").trim()
@@ -67,12 +75,18 @@ class ParadiseMessagingService : FirebaseMessagingService() {
         }
 
         val dedupKey = "$engine:$roomId:$eventId"
-        synchronized(seenEventIds) {
+            synchronized(seenEventIds) {
             if (!seenEventIds.add(dedupKey)) {
                 Log.d("ParadisePush", "Duplicate event ignored key=$dedupKey")
                 return
             }
         }
+
+        if (isAppInForeground()) {
+            Log.d("ParadisePush", "App is in foreground, suppressing notification for key=$dedupKey")
+            return
+        }
+
 
         val payloadJson = JSONObject()
         for ((k, v) in data) {
