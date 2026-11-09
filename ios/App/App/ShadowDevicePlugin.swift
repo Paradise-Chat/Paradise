@@ -132,27 +132,11 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
             return cleanSource
         }
 
-        let baseName = (cleanName as NSString).deletingPathExtension
-        let ext = (cleanName as NSString).pathExtension
-
-        let bundleCandidates: [URL?] = [
-            Bundle.main.url(forResource: baseName, withExtension: ext, subdirectory: "public"),
-            Bundle.main.url(forResource: baseName, withExtension: ext, subdirectory: "public/push-workers"),
-            Bundle.main.url(forResource: baseName, withExtension: ext)
-        ]
-
-        if let bundledUrl = bundleCandidates.compactMap({ $0 }).first,
-           let bundledSource = try? String(contentsOf: bundledUrl, encoding: .utf8) {
-            let cleanSource = stripSourceMap(bundledSource)
-            try? cleanSource.write(to: destUrl, atomically: true, encoding: .utf8)
-            return cleanSource
-        }
-
         if let existing = try? String(contentsOf: destUrl, encoding: .utf8), !existing.isEmpty {
             return existing
         }
 
-        throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not locate \(cleanName)"])
+        throw NSError(domain: "ShadowDevice", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not locate \(cleanName) in App Group"])
     }
 
     private func invokeWorkerFunction(
