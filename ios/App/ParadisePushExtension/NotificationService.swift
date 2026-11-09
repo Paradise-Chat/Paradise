@@ -99,7 +99,13 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        let payloadDict = request.content.userInfo as? [String: Any] ?? [:]
+        var payloadDict: [String: Any] = [:]
+        for (k, v) in request.content.userInfo {
+            if let keyStr = k as? String {
+                payloadDict[keyStr] = v
+            }
+        }
+
         let stateUrl = containerUrl.appendingPathComponent("shadow_state.json")
 
         guard let stateData = try? Data(contentsOf: stateUrl),
@@ -269,7 +275,17 @@ class NotificationService: UNNotificationServiceExtension {
             return (nil, "resolvePushNotification is undefined")
         }
 
-        guard let resultVal = resolveFn.call(withArguments: [payload, session]) else {
+        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+              let payloadJson = String(data: payloadData, encoding: .utf8),
+              let sessionData = try? JSONSerialization.data(withJSONObject: session),
+              let sessionJson = String(data: sessionData, encoding: .utf8) else {
+            return (nil, "Failed to serialize payload or session")
+        }
+
+        ctx.setObject(payloadJson, forKeyedSubscript: "__rawPayloadJson" as NSString)
+        ctx.setObject(sessionJson, forKeyedSubscript: "__rawSessionJson" as NSString)
+
+        guard let resultVal = ctx.evaluateScript("resolvePushNotification(JSON.parse(__rawPayloadJson), JSON.parse(__rawSessionJson))") else {
             return (nil, "resolvePushNotification returned nil")
         }
 
