@@ -82,6 +82,8 @@ jobs:
 
       - name: Build Web Application
         shell: bash
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
         run: |
           mkdir -p src-gen
           pnpm run release
