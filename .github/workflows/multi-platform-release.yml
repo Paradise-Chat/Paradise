@@ -1,0 +1,337 @@
+name: Release and Publish
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - package.json
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      repo_lc: ${{ steps.repo.outputs.repo_lc }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Version
+        id: version
+        run: |
+          VERSION=$(jq -r .version package.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Version Bump
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag v${{ steps.version.outputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Convert Repository Name to Lowercase
+        id: repo
+        run: |
+          echo "repo_lc=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+  build-electron:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact_glob: electron/dist/*.AppImage
+          - os: macos-latest
+            platform: macos
+            artifact_glob: electron/dist/*.dmg
+          - os: windows-latest
+            platform: windows
+            artifact_glob: electron/dist/*.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Build Electron Package
+        working-directory: electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          npm ci
+          npm pkg set "version=${{ needs.prepare.outputs.version }}"
+          npm run dist
+
+      - name: Upload Electron Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-${{ matrix.platform }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  build-ios:
+    needs: prepare
+    if: false
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Install Dependencies and Build Web Assets
+        run: |
+          npm ci
+          npm run build
+          npx cap sync ios
+
+      - name: Install Apple Certificate and Provisioning Profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles
+
+      - name: Archive and Export IPA
+        run: |
+          set -euo pipefail
+          xcodebuild -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            archive
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportOptionsPlist ios/App/ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export"
+
+      - name: Clean Up Keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+      - name: Upload iOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+
+  build-flatpak:
+    needs: prepare
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Install Flatpak Dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Upload Flatpak Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-release
+          path: paradise-${{ needs.prepare.outputs.version }}.flatpak
+          if-no-files-found: error
+
+  build-android:
+    needs: prepare
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+
+  publish-docker:
+    needs:
+      - prepare
+      - build-electron
+      - build-ios
+      - build-flatpak
+      - build-android
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.build-electron.result == 'success' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ needs.prepare.outputs.repo_lc }}:${{ needs.prepare.outputs.version }}
+            ghcr.io/${{ needs.prepare.outputs.repo_lc }}:latest
+
+  release:
+    needs:
+      - prepare
+      - build-electron
+      - publish-docker
+      - build-ios
+      - build-flatpak
+      - build-android
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.build-electron.result == 'success' &&
+      needs.publish-docker.result == 'success' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create and Push Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ needs.prepare.outputs.version }}"
+          git push origin "v${{ needs.prepare.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.prepare.outputs.version }}"
+          name: "Release v${{ needs.prepare.outputs.version }}"
+          generate_release_notes: true
+          files: release-assets/*
