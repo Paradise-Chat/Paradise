@@ -98,8 +98,8 @@ jobs:
             npm install
           fi
 
-      - name: Sync Capacitor Electron
-        run: pnpm exec cap sync @capacitor-community/electron
+      - name: Copy Web Assets to Electron
+        run: pnpm exec cap copy electron
 
       - name: Build Electron Package
         working-directory: electron
