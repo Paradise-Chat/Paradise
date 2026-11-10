@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, normalizePath } from "vite";
 import path from "path";
 import wasm from "vite-plugin-wasm";
 import commonjs from "vite-plugin-commonjs";
@@ -8,19 +8,19 @@ import { VitePWA } from "vite-plugin-pwa";
 const copyFiles = {
     targets: [
         {
-            src: path.resolve(__dirname, "build/config.edn"),
+            src: normalizePath(path.resolve(__dirname, "build/config.edn")),
             dest: ".",
         },
         {
-            src: path.resolve(__dirname, "build/rnnoise/*"),
+            src: normalizePath(path.resolve(__dirname, "build/rnnoise/*")),
             dest: "rnnoise",
         },
         {
-            src: path.resolve(__dirname, "build/i18n.edn"),
+            src: normalizePath(path.resolve(__dirname, "build/i18n.edn")),
             dest: ".",
         },
         {
-            src: path.resolve(__dirname, "build/css/*"),
+            src: normalizePath(path.resolve(__dirname, "build/css/*")),
             dest: "css",
         },
     ],
