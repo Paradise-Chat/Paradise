@@ -5,8 +5,6 @@
    [re-frame.core :as re-frame]
    [re-frame.db :as db]))
 
-(def storage-key "paradise.settings.keybinds")
-
 (defn- normalize-id [id]
   (if (keyword? id)
     (subs (str id) 1)
@@ -36,24 +34,58 @@
                     (methods keybind-spec))]
     (merge mm-entries @!registry)))
 
+
 (defn- get-shortcuts-bridge ^js []
   (.-paradiseShortcuts js/globalThis))
 
 (defn global-shortcuts-supported? []
   (some? (get-shortcuts-bridge)))
 
-(defn- load-stored-overrides []
-  (when (exists? js/localStorage)
-    (try
-      (when-let [raw (.getItem js/localStorage storage-key)]
-        (js->clj (js/JSON.parse raw) :keywordize-keys false))
-      (catch :default _ nil))))
 
-(defn- save-stored-overrides! [overrides]
-  (when (exists? js/localStorage)
-    (try
-      (.setItem js/localStorage storage-key (js/JSON.stringify (clj->js (or overrides {}))))
-      (catch :default _ nil))))
+(defn- normalize-overrides [raw]
+  (reduce-kv
+   (fn [acc k v]
+     (let [id (normalize-id k)]
+       (assoc acc id
+              (cond
+                (map? v)
+                (let [has-acc?  (or (contains? v :accelerator) (contains? v "accelerator"))
+                      has-glob? (or (contains? v :global?) (contains? v "global?"))]
+                  (cond-> {}
+                    has-acc?  (assoc :accelerator (if (contains? v :accelerator)
+                                                    (:accelerator v)
+                                                    (get v "accelerator")))
+                    has-glob? (assoc :global? (boolean (if (contains? v :global?)
+                                                         (:global? v)
+                                                         (get v "global?"))))))
+
+                (string? v)
+                {:accelerator v}
+
+                :else
+                {}))))
+   {}
+   (when (map? raw) raw)))
+
+(defn effective-keybind [entry overrides]
+  (let [ov (get overrides (:id entry))]
+    (cond
+      (map? ov)
+      (merge entry
+             {:accelerator (cond
+                             (contains? ov :accelerator) (:accelerator ov)
+                             (contains? ov "accelerator") (get ov "accelerator")
+                             :else (:accelerator entry))
+              :global?     (boolean (cond
+                                      (contains? ov :global?) (:global? ov)
+                                      (contains? ov "global?") (get ov "global?")
+                                      :else (:global? entry)))})
+
+      (string? ov)
+      (assoc entry :accelerator ov)
+
+      :else
+      entry)))
 
 (defn- normalize-key-token [k]
   (let [low (str/lower-case (str k))]
@@ -169,17 +201,14 @@
 (re-frame/reg-fx
  :keybinds/sync-electron
  (fn [overrides]
-   (save-stored-overrides! overrides)
    (sync-global-shortcuts! overrides)))
 
 (re-frame/reg-event-fx
- :settings/init-keybinds
- (fn [{:keys [db]} _]
-   (let [stored (or (load-stored-overrides)
-                    (get-in db [:settings :keybinds])
-                    {})]
-     {:db                     (assoc-in db [:settings :keybinds] stored)
-      :keybinds/sync-electron stored})))
+ :settings/hydrate-keybinds
+ (fn [{:keys [db]} [_ saved-overrides]]
+   (let [normalized (normalize-overrides saved-overrides)]
+     {:db (assoc-in db [:settings :keybinds] normalized)
+      :fx [[:keybinds/sync-electron normalized]]})))
 
 (re-frame/reg-event-fx
  :settings/set-keybind
@@ -187,24 +216,28 @@
    (let [id      (normalize-id action-id)
          base    (get (all-keybind-specs) id)
          current (effective-keybind base (get-in db [:settings :keybinds] {}))
-         updated {"accelerator" (if (some? accelerator) accelerator (:accelerator current))
-                  "global?"     (if (some? global?) (boolean global?) (boolean (:global? current)))}
+         updated {:accelerator (if (some? accelerator) accelerator (:accelerator current))
+                  :global?     (if (some? global?) (boolean global?) (boolean (:global? current)))}
          next-kb (assoc (get-in db [:settings :keybinds] {}) id updated)]
-     {:db                     (assoc-in db [:settings :keybinds] next-kb)
-      :keybinds/sync-electron next-kb})))
+     {:db (assoc-in db [:settings :keybinds] next-kb)
+      :fx [[:keybinds/sync-electron next-kb]
+           [:dispatch [:settings/save "keybinds" next-kb]]]})))
 
 (re-frame/reg-event-fx
  :settings/reset-keybind
  (fn [{:keys [db]} [_ action-id]]
    (let [next-kb (dissoc (get-in db [:settings :keybinds] {}) (normalize-id action-id))]
-     {:db                     (assoc-in db [:settings :keybinds] next-kb)
-      :keybinds/sync-electron next-kb})))
+     {:db (assoc-in db [:settings :keybinds] next-kb)
+      :fx [[:keybinds/sync-electron next-kb]
+           [:dispatch [:settings/save "keybinds" next-kb]]]})))
 
 (re-frame/reg-event-fx
  :settings/reset-all-keybinds
  (fn [{:keys [db]} _]
-   {:db                     (assoc-in db [:settings :keybinds] {})
-    :keybinds/sync-electron {}}))
+   {:db (assoc-in db [:settings :keybinds] {})
+    :fx [[:keybinds/sync-electron {}]
+         [:dispatch [:settings/save "keybinds" {}]]]}))
+
 
 (re-frame/reg-sub
  :settings/keybind-overrides
@@ -219,8 +252,10 @@
         (sort-by :id)
         (mapv #(effective-keybind % overrides)))))
 
+
 (defn global-key-listener []
-  (r/with-let [_            (re-frame/dispatch [:settings/init-keybinds])
+  (r/with-let [_            (when (exists? db/app-db)
+                              (sync-global-shortcuts! (get-in @db/app-db [:settings :keybinds] {})))
                unlisten-ipc (when-let [^js bridge (get-shortcuts-bridge)]
                               (.onTriggered bridge (fn [action-id]
                                                      (trigger-action! (str action-id)))))
