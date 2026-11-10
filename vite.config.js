@@ -7,17 +7,6 @@ import { VitePWA } from "vite-plugin-pwa";
 
 const copyFiles = {
     targets: [
-        //      {
-        //            src: path.resolve(
-        //        __dirname,
-        //          "node_modules/livekit-client/dist/livekit-client.e2ee.worker.mjs"
-        //        ),
-        //          dest: ".",
-        //        },
-        //        {
-        //            src: path.resolve(__dirname, "build/*.wasm"),
-        //            dest: ".",
-        //        },
         {
             src: path.resolve(__dirname, "build/config.edn"),
             dest: ".",
@@ -34,10 +23,6 @@ const copyFiles = {
             src: path.resolve(__dirname, "build/css/*"),
             dest: "css",
         },
-        //        {
-        //            src: "themes/*",
-        //            dest: "themes",
-        //        },
     ],
 };
 
