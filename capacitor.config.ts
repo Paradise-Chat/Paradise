@@ -7,8 +7,6 @@ const config: CapacitorConfig = {
     server: {
         // url: "http://192.168.3.33:8000",
         //        allowNavigation: ["192.168.3.33"],
-        androidScheme: "http",
-    },
         cleartext: true,
     },
     plugins: {
