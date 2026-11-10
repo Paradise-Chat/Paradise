@@ -46,7 +46,6 @@
         "@capacitor/keyboard": "^8.0.3",
         "@capacitor/push-notifications": "^8.0.3",
         "@chenglou/pretext": "^0.0.4",
-        "@element-hq/element-call-embedded": "npm:@gigia/element-call-embedded@0.20.3-denoise.4",
         "@livekit/components-react": "^2.9.23",
         "@livekit/components-styles": "^1.2.0",
         "@tiptap/core": "^3.20.0",
