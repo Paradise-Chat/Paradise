@@ -50,18 +50,18 @@ Not entirely important to read, but certainly interesting.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
 (def settings-registry
-  {"show_previews"          {:event :push/hydrate-previews-setting :default true     :stage :login}
-   "theme"                  {:event :ui/hydrate-theme              :default :default :stage :boot}
-   "custom_registries"      {:event :registry/hydrate-custom-urls  :default []       :stage :boot}
-   "disabled_plugin_urls"   {:event :plugins/hydrate-disabled-urls :default []       :stage :boot}
-   "plugin_urls"            {:event :plugins/hydrate-urls          :default []       :stage :boot}
-   "space_hierarchies"      {:event :space/hydrate-hierarchies     :default {}       :stage :login}
-   "call_audio_input"       {:event :settings/hydrate-audio-input  :default nil      :stage :boot}
-   "call_video_input"       {:event :settings/hydrate-video-input  :default nil      :stage :boot}
-   "call_audio_output"      {:event :settings/hydrate-audio-output :default nil      :stage :boot}
-   "call_voice_threshold"   {:event :settings/hydrate-voice-threshold :default 0.12  :stage :boot}
-   "call_noise_suppression" {:event :settings/hydrate-noise-suppression :default true :stage :boot}})
-
+  {"show_previews"          {:event :push/hydrate-previews-setting      :default true     :stage :login}
+   "theme"                  {:event :ui/hydrate-theme                   :default :default :stage :boot}
+   "custom_registries"      {:event :registry/hydrate-custom-urls       :default []       :stage :boot}
+   "disabled_plugin_urls"   {:event :plugins/hydrate-disabled-urls      :default []       :stage :boot}
+   "plugin_urls"            {:event :plugins/hydrate-urls               :default []       :stage :boot}
+   "space_hierarchies"      {:event :space/hydrate-hierarchies          :default {}       :stage :login}
+   "keybinds"               {:event :settings/hydrate-keybinds          :default {}       :stage :boot}
+   "call_audio_input"       {:event :settings/hydrate-audio-input       :default nil      :stage :boot}
+   "call_video_input"       {:event :settings/hydrate-video-input       :default nil      :stage :boot}
+   "call_audio_output"      {:event :settings/hydrate-audio-output      :default nil      :stage :boot}
+   "call_voice_threshold"   {:event :settings/hydrate-voice-threshold   :default 0.12     :stage :boot}
+   "call_noise_suppression" {:event :settings/hydrate-noise-suppression :default true     :stage :boot}})
 
 (re-frame/reg-event-fx
  :settings/load
