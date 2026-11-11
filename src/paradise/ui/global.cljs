@@ -6,7 +6,6 @@
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [reagent.core :as r]
-   [paradise.shared.utils.macros :refer [defui]]
    [paradise.ui.overlays.base :refer [modal-component popover-component context-menu-component]]
    [paradise.shared.utils.svg :as icons]
    [paradise.media.component :refer [media]]
