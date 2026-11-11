@@ -98,8 +98,9 @@ we can lean more on Eve.
 **** Imports
 
 #+begin_src clojurescript :tangle ../../../src/paradise/virtualizer/base.cljs
-(ns paradise.virtualizer.base
-  (:require [cljs-workers.worker :as worker]
+(ns ^:virtualizer/skip paradise.virtualizer.base
+  (:require [virtualizer.worker.dom-shim]
+            [cljs-workers.worker :as worker]
             [paradise.shared.sci-runner.virtualizer :as sci-runner]
             [taoensso.timbre :as log]
             [paradise.virtualizer.state :as state]
