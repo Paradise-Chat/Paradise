@@ -29,6 +29,9 @@ The naming scheme for this might shift in time.
    [paradise.shared.sci-runner.shared]
    ["@capacitor/core" :refer [Capacitor]]
    ["@capacitor/browser" :refer [Browser] :as browser]
+   ["react" :as react]
+   [paradise.shared.client.key-handler]
+   [paradise.ui.container.call.runtime]
    [clojure.string]
    [sci.configs.reagent.reagent :as sci-reagent]
    [sci.configs.re-frame.re-frame :as sci-re-frame]
@@ -91,6 +94,22 @@ The naming scheme for this might shift in time.
 (def virtualizer-namespaces
   {'capacitor.browser {'Browser Browser}
    'capacitor.core    {'Capacitor Capacitor}
+   'react             {'useState        react/useState
+                       'useEffect       react/useEffect
+                       'useLayoutEffect react/useLayoutEffect
+                       'useRef          react/useRef
+                       'useMemo         react/useMemo
+                       'useCallback     react/useCallback
+                       'createElement   react/createElement
+                       'Fragment        react/Fragment}
+
+   'paradise.shared.client.key-handler
+   (expose-ns paradise.shared.client.key-handler)
+
+   'paradise.ui.container.call.runtime
+   (merge (expose-ns paradise.ui.container.call.runtime)
+          {'!driver-instance paradise.ui.container.call.runtime/!driver-instance
+           '!participants    paradise.ui.container.call.runtime/!participants})
 
    'cljs-workers.worker {'register worker/register}
    'cljs-workers.core   {'do-with-pool! main/do-with-pool!}
