@@ -34,7 +34,8 @@
                       [build-hooks/copy-runtime-assets]]
         :output-dir "build"
         :asset-path "/"
-        :modules {:base {:entries []}
+        :modules {:base {:entries [virtualizer.registry
+                                   virtualizer.protocol]}
                   :main {:entries [paradise.shared.client.core]
                          :depends-on #{:base}
                          :exports {init paradise.shared.client.core/init}}
@@ -47,17 +48,17 @@
                   :engine {:entries [paradise.engine.core]
                            :web-worker true
                            :depends-on #{:base}}
-
-                  :virtualizer {:entries [paradise.virtualizer.base]
+                  :virtualizer {:entries [virtualizer.worker.dom-shim
+                                          paradise.virtualizer.base]
                                 :web-worker true
                                 :depends-on #{:base}}}
+
         :js-options
         {:js-provider :import
          :esm-js-shim false
          :loader {".css" :css}}
         :compiler-options
-        {:optimizations
-         :simple
+        {:optimizations :simple
          :pretty-print true
          :output-feature-set :es-next
          :warnings {:undeclared-ns false
