@@ -9,21 +9,21 @@
             (fn [props]
               ((:wrapper plugin) acc-comp props)))
           base-comp
-          (sort-by :priority wrappers)))
+          (sort-by #(get % :priority (get % :order 0)) wrappers)))
 
 (def memoized-wrapped-component (memoize build-wrapped-component))
 
 (defn plugin-slot [slot-id props & children]
-  (let [plugins   (state/get-slot slot-id)
+  (let [plugins   (sort-by #(get % :order 0) (get @registry/!slots slot-id []))
         wrappers  (filter :wrapper plugins)
         injectors (filter :component plugins)
-        base-comp (fn [] (into [:<>] children))]
+        base-comp (fn [_] (into [:<>] children))]
     [:<>
      (if (seq wrappers)
        [(memoized-wrapped-component base-comp wrappers) props]
        (into [:<>] children))
      (for [{:keys [id component]} injectors]
-       ^{:key id} [component props])]))
+       ^{:key (or id (hash component))} [component props])]))
 
 (re-frame/reg-event-db
  :plugin/register
