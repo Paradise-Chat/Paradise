@@ -119,7 +119,9 @@ we've made interop with the WASM bindings.
                                             :arguments {:room-id room-id}})
    {:db (-> db
             (update :timeline-subs dissoc room-id)
-            (update :timeline-data dissoc room-id))}))
+            (update :timeline-data dissoc room-id)
+            (assoc-in [:timeline/loading-more? room-id] false)
+            (assoc-in [:timeline/loading-forward? room-id] false))}))
 
 
 (re-frame/reg-sub
@@ -130,14 +132,18 @@ we've made interop with the WASM bindings.
 (re-frame/reg-event-fx
  :sdk/back-paginate
  (fn [{:keys [db]} [_ room-id]]
-   (let [loading-back?    (get-in db [:timeline/loading-more? room-id])]
+   (let [loading-back? (get-in db [:timeline/loading-more? room-id])]
      (if (and room-id (not loading-back?))
        (do
          (log/info "Triggering Worker Back Paginate for" room-id)
          (go
-           (let [res (<! (main/do-with-pool! @state/!engine-pool
-                                             {:handler :paginate-timeline
-                                              :arguments {:room-id room-id :direction :back :amount 25}}))]
+           (let [req-ch     (main/do-with-pool! @state/!engine-pool
+                                                {:handler   :paginate-timeline
+                                                 :arguments {:room-id room-id :direction :back :amount 25}})
+                 timeout-ch (cljs.core.async/timeout 15000)
+                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+             (when (= port timeout-ch)
+               (log/warn "Worker Back Paginate timed out for" room-id))
              (re-frame/dispatch [:sdk/pagination-complete room-id])))
          {:db (assoc-in db [:timeline/loading-more? room-id] true)})
        {}))))
@@ -150,11 +156,14 @@ we've made interop with the WASM bindings.
        (do
          (log/info "Triggering Worker Forward Paginate for" room-id)
          (go
-           (let [res (<! (main/do-with-pool! @state/!engine-pool
-                                             {:handler :paginate-timeline
-                                              :arguments {:room-id room-id :direction :forward :amount 25}}))]
-             (re-frame/dispatch [:sdk/forward-pagination-complete room-id])
-             ))
+           (let [req-ch     (main/do-with-pool! @state/!engine-pool
+                                                {:handler   :paginate-timeline
+                                                 :arguments {:room-id room-id :direction :forward :amount 25}})
+                 timeout-ch (cljs.core.async/timeout 15000)
+                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+             (when (= port timeout-ch)
+               (log/warn "Worker Forward Paginate timed out for" room-id))
+             (re-frame/dispatch [:sdk/forward-pagination-complete room-id])))
          {:db (assoc-in db [:timeline/loading-forward? room-id] true)})
        {}))))
 
@@ -255,7 +264,6 @@ we've made interop with the WASM bindings.
  :room/is-focused?
  (fn [db [_ room-id]]
    (some? (get-in db [:timeline/jump-target-id room-id]))))
-
 #+end_src
 
 
@@ -436,22 +444,19 @@ We also don't want to list our own name, so we remove that too.
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/base.cljs
-(def default-metrics {:font "16px sans-serif" :line-height 22.8})
+(def default-metrics {:font "15.2px Inter, sans-serif" :line-height 22.8})
+
 
 (defn pretext-timeline [room-id]
-  (let [on-load-older   #(re-frame/dispatch [:sdk/back-paginate room-id])
-        on-load-newer   #(re-frame/dispatch [:sdk/forward-paginate room-id])
-        on-jump-live    #(re-frame/dispatch [:room/jump-to-live-bottom room-id])
-        on-viewport-change #(mesh/do-with-thread! :virtualizer-pool
+  (let [on-viewport-change #(mesh/do-with-thread! :virtualizer-pool
                                                   {:handler :set-viewport
                                                    :arguments {:visible-ids %}})
-        on-scroll-state #(mesh/do-with-thread! :virtualizer-pool
-                                               {:handler :set-scrolling-state
-                                                :arguments {:scrolling? %}})
-        render-empty    (fn [] [timeline-empty-state room-id])
-        render-loading  (fn [] [timeline-loading-overlay])
-        render-sticks   (fn [ruler-ref-fn] [timeline-measuring-sticks ruler-ref-fn])
-        render-jump     (fn [do-jump! is-focused?] [timeline-jump-button do-jump! is-focused?])]
+        on-scroll-state    #(mesh/do-with-thread! :virtualizer-pool
+                                                  {:handler :set-scrolling-state
+                                                   :arguments {:scrolling? %}})
+        render-loading     (fn [] [timeline-loading-overlay])
+        render-sticks      (fn [ruler-ref-fn] [timeline-measuring-sticks ruler-ref-fn])
+        render-jump        (fn [do-jump! is-focused?] [timeline-jump-button do-jump! is-focused?])]
     (fn [room-id]
       (let [events           @(re-frame/subscribe [:timeline/events room-id])
             events-map       @(re-frame/subscribe [:timeline/events-map room-id])
@@ -469,9 +474,9 @@ We also don't want to list our own name, so we remove that too.
           :older-dead?              back-dead?
           :jump-target-id           jump-target
           :focus-mode?              focus-mode?
-          :on-load-older            on-load-older
-          :on-load-newer            on-load-newer
-          :on-jump-live             on-jump-live
+          :on-load-older            #(re-frame/dispatch [:sdk/back-paginate room-id])
+          :on-load-newer            #(re-frame/dispatch [:sdk/forward-paginate room-id])
+          :on-jump-live             #(re-frame/dispatch [:room/jump-to-live-bottom room-id])
           :on-viewport-change       on-viewport-change
           :on-scroll-state-change   on-scroll-state
           :on-layout-context-change (fn [w t m]
@@ -486,7 +491,7 @@ We also don't want to list our own name, so we remove that too.
           :wrapper-class            "timeline-wrapper"
           :scroll-container-class   "timeline-messages"
           :render-item              event-tile
-          :render-empty-state       render-empty
+          :render-empty-state       (fn [] [timeline-empty-state room-id])
           :render-jump-button       render-jump
           :render-loading-overlay   render-loading
           :render-measuring-sticks  render-sticks}]))))
