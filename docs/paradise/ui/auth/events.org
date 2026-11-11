@@ -108,30 +108,40 @@ Probably needs a better name (and logical grouping)
 (re-frame/reg-event-fx
  :auth/login-success
  (fn [{:keys [db]} [_ {:keys [user-id session-data credentials engine-id]}]]
-   (when session-data
+   (let [resolved-engine (or (some-> engine-id keyword)
+                             (:active-engine db)
+                             :matrix)
+         token (:token session-data)
+         server-url (:server-url session-data)]
+     (media/clear-media-cache!)
      (register-sw!)
-     (set-auth-context! (or (:token session-data) (:accessToken session-data))
-                        (:serverUrl session-data))
-     (store/set-setting! "last_active_user" user-id)
-     (store/set-setting! "last-active-engine" (name engine-id)))
-
-   (when engine-id
-     (engines/init-engine-streams! engine-id))
-
-   {:db (assoc db
-               :auth-status :logged-in
-               :active-user-id user-id
-               :rooms/data {}
-               :timeline/events []
-               :auth/session session-data)
-    :fx (cond-> [[:dispatch [:app/load-settings-by-stage :login]]
-                 [:dispatch [:app/restore-user-session user-id]]
-                 [:dispatch [:push/check-status]]]
-          (and credentials session-data)
-          (conj [:dispatch [:push/create-sleepy-shadow
-                            (merge credentials
-                                   session-data
-                                   {:userId user-id})]]))}))
+     (when (and token server-url)
+       (set-auth-context! token server-url))
+     (when user-id
+       (store/set-setting! "last_active_user" user-id))
+     (when resolved-engine
+       (store/set-setting! "last-active-engine" (name resolved-engine))
+       (binding/set-active-engine! resolved-engine)
+       (engines/init-engine-streams! resolved-engine))
+     {:db (assoc db
+                 :auth-status :logged-in
+                 :active-user-id user-id
+                 :active-engine resolved-engine
+                 :rooms/data {}
+                 :timeline/events []
+                 :auth/session session-data)
+      :fx (cond-> [[:dispatch [:engine/sync-media-session
+                               {:user-id    user-id
+                                :server-url server-url
+                                :token      token}]]
+                   [:dispatch [:app/load-settings-by-stage :login]]
+                   [:dispatch [:app/restore-user-session user-id]]
+                   [:dispatch [:push/check-status]]]
+            (and credentials session-data)
+            (conj [:dispatch [:push/create-sleepy-shadow
+                              (merge credentials
+                                     session-data
+                                     {:userId user-id})]]))})))
 
 
 (re-frame/reg-sub
