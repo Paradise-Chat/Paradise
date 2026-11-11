@@ -307,6 +307,23 @@ in particular.
 ***** Booting
 
 
+If the app has been running then we just need to update some contexts.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
+(re-frame/reg-event-fx
+ :engine/switch-account-boot
+ (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id]}]]
+   (let [engine-kw (keyword (or engine-id :matrix))]
+     (go
+       (<! (clear-worker-media-session! {:all? true}))
+       (when (not= engine-kw prev-engine-id)
+         (<! (register-engine engine-kw)))
+       (binding/set-active-engine! engine-kw)
+       (streams/init-engine-streams! engine-kw)
+       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw]))
+     {:db (assoc db :active-engine engine-kw)})))
+#+end_src
+
 
 If the app has just started we need to check the prior engine,
 user, rooms, etc and get all of that ready. Then pass off to
@@ -315,23 +332,22 @@ the standard boot strap.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (re-frame/reg-event-fx
  :app/cold-boot
- (fn [_ [_ target-user-id requested-engine]]
+ (fn [{:keys [db]} [_ target-user-id requested-engine]]
    (go
      (let [saved-engine (<p! (store/get-setting "last-active-engine"))
            engine-id    (when-let [e (or requested-engine saved-engine)]
                           (keyword e))]
-
        (when engine-id
          (<! (register-engine engine-id))
          (binding/set-active-engine! engine-id)
          (streams/init-engine-streams! engine-id))
-
        (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
-
        (if engine-id
          (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
          (re-frame/dispatch [:auth/set-status :logged-out]))))
-   {}))
+   (cond-> {}
+     requested-engine
+     (assoc :db (assoc db :active-engine (keyword requested-engine))))))
 #+end_src
 
 
