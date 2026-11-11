@@ -1,14 +1,19 @@
-(ns paradise.shared.client.registry
+(ns ^:virtualizer/skip paradise.shared.client.registry
   (:require [reagent.core :as r]
             [cljs-workers.mesh]
-            ))
+            [virtualizer.registry :as vreg]))
 
-(defonce !components (r/atom {}))
-(defonce !pure-fns (atom {}))
-(defonce !anon-fns (atom {}))
-(defonce !active-overrides (r/atom {}))
+(def !components vreg/!components)
+(def !pure-fns vreg/!pure-fns)
+(def !anon-fns vreg/!anon-fns)
+(def !active-overrides vreg/!active-overrides)
 (defonce !slots (r/atom {}))
 (defonce !live-callbacks (atom {}))
+
+(def resolve-anon-fn vreg/resolve-anon-fn)
+(def dehydrate vreg/dehydrate)
+(def register-override! vreg/register-override!)
+(def clear-overrides! vreg/clear-overrides!)
 
 (defn stash-lambdas [x]
   (cond
@@ -30,21 +35,15 @@
     (seq? x) (doall (map hydrate-lambdas x))
     :else x))
 
-(defn dehydrate [x]
-  (cond
-    (and (fn? x) (some? (.-$fn_ptr x)))
-    {:$fn_ptr (.-$fn_ptr x) :$env (dehydrate (.-$env x))}
-
-    (map? x)
-    (reduce-kv (fn [m k v] (assoc m k (dehydrate v))) {} x)
-
-    (sequential? x)
-    (map dehydrate x)
-
-    :else x))
-
-(defn reg-slot-item [slot-id component]
-  (swap! !slots update slot-id (fnil conj []) component))
+(defn reg-slot-item [slot-id item]
+  (swap! !slots update slot-id
+         (fn [items]
+           (let [existing (or items [])
+                 item-id  (:id item)]
+             (conj (if item-id
+                     (into [] (remove #(= (:id %) item-id) existing))
+                     existing)
+                   item)))))
 
 (defn get-slot [slot-id]
   (->> (get @!slots slot-id [])
@@ -57,7 +56,9 @@
     (swap! !active-overrides
            (fn [overrides]
              (into {} (remove (fn [[_ override-data]]
-                                (= (name (:plugin-id override-data)) target-str))
+                                (and (map? override-data)
+                                     (:plugin-id override-data)
+                                     (= (name (:plugin-id override-data)) target-str)))
                               overrides))))))
 
 (defn remove-plugin-slots! [target-plugin-id]
