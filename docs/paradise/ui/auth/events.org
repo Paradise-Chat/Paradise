@@ -44,6 +44,26 @@ Probably needs a better name (and logical grouping)
  :auth/error
  (fn [db _] (:login-error db)))
 
+(re-frame/reg-event-db
+ :auth/login-failure
+ (fn [db [_ error-msg]]
+   (assoc db :auth-status :logged-out
+          :login-error error-msg)))
+
+
+(re-frame/reg-sub
+ :auth/active-user-id
+ (fn [db _]
+   (:active-user-id db)))
+
+
+(re-frame/reg-event-fx
+ :auth/apply-hydrated-net-context
+ (fn [{:keys [db]} [_ {:keys [user-id base-url token]}]]
+   (when (and (= user-id (:active-user-id db)) base-url token)
+     (set-auth-context! token base-url))
+   {}))
+
 (re-frame/reg-event-fx
  :auth/start-login-flow
  (fn [{:keys [db]} _]
