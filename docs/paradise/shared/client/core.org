@@ -198,22 +198,23 @@ The protocol engine needs to be registered and the best place to land
 this method is here.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
-(defn register-engine [protocol-str]
-  (go
-    (let [media-ch  (mesh/do-with-thread! :media-pool
-                                          {:handler   :register-engine
-                                           :arguments {:engine-id protocol-str}})
-          engine-ch (mesh/do-with-thread! :engine-pool
-                                          {:handler   :register-engine
-                                           :arguments {:engine-id protocol-str}})
-          media-res (<! media-ch)
-          eng-res   (<! engine-ch)]
-      (if (and (= "success" (:status eng-res))
-               (= "success" (:status media-res)))
-        (js/console.log "Engine and media worker loaded successfully:" protocol-str)
-        (js/console.error "Failed to load engine:"
-                          {:engine (:msg eng-res)
-                           :media  (:msg media-res)})))))
+(defn register-engine [protocol-id]
+  (let [protocol-str (name protocol-id)]
+    (go
+      (let [media-ch  (mesh/do-with-thread! :media-pool
+                                            {:handler   :register-engine
+                                             :arguments {:engine-id protocol-str}})
+            engine-ch (mesh/do-with-thread! :engine-pool
+                                            {:handler   :register-engine
+                                             :arguments {:engine-id protocol-str}})
+            media-res (<! media-ch)
+            eng-res   (<! engine-ch)]
+        (if (and (= "success" (:status eng-res))
+                 (= "success" (:status media-res)))
+          (js/console.log "Engine and media worker loaded successfully:" protocol-str)
+          (js/console.error "Failed to load engine:"
+                            {:engine (:msg eng-res)
+                             :media  (:msg media-res)}))))))
 #+end_src
 
 then a quick reframe event for the login to also register them on protocol selection
