@@ -69,28 +69,19 @@ It is easier than the other one I poorly chose a name for.
 #+end_src
 
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/registry.cljs
-(defn dehydrate [x]
-  (cond
-    (and (fn? x) (some? (.-$fn_ptr x)))
-    {:$fn_ptr (.-$fn_ptr x) :$env (dehydrate (.-$env x))}
-
-    (map? x)
-    (reduce-kv (fn [m k v] (assoc m k (dehydrate v))) {} x)
-
-    (sequential? x)
-    (map dehydrate x)
-
-    :else x))
-#+end_src
-
-
 ***** From State
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/registry.cljs
-(defn reg-slot-item [slot-id component]
-  (swap! !slots update slot-id (fnil conj []) component))
+(defn reg-slot-item [slot-id item]
+  (swap! !slots update slot-id
+         (fn [items]
+           (let [existing (or items [])
+                 item-id  (:id item)]
+             (conj (if item-id
+                     (into [] (remove #(= (:id %) item-id) existing))
+                     existing)
+                   item)))))
 
 (defn get-slot [slot-id]
   (->> (get @!slots slot-id [])
@@ -103,7 +94,9 @@ It is easier than the other one I poorly chose a name for.
     (swap! !active-overrides
            (fn [overrides]
              (into {} (remove (fn [[_ override-data]]
-                                (= (name (:plugin-id override-data)) target-str))
+                                (and (map? override-data)
+                                     (:plugin-id override-data)
+                                     (= (name (:plugin-id override-data)) target-str)))
                               overrides))))))
 
 (defn remove-plugin-slots! [target-plugin-id]
