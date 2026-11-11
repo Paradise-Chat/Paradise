@@ -48,6 +48,10 @@ Not entirely important to read, but certainly interesting.
 
 ***** Registry
 
+******* TODO revise setting tabs and settings registry into base multi-method?
+May prove to be a better pattern to upkeep as we can reduce updates to this
+file.
+
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
 (def settings-registry
   {"show_previews"          {:event :push/hydrate-previews-setting      :default true     :stage :login}
