@@ -246,7 +246,67 @@ initialization for Matrix
 #+end_src
 
 
-***** Cold Boot
+
+***** Media Sync
+We need to inform the media session that the server we're connected to
+and need to resolve from has changed. This is relevant for multi-account
+in particular.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
+(defn sync-worker-media-session! [{:keys [user-id server-url token]}]
+  (go
+    (let [payload  {:user-id    user-id
+                    :server-url server-url
+                    :token      token}
+          media-ch (mesh/do-with-thread! :media-pool
+                                         {:handler   :set-media-session
+                                          :arguments payload})
+          eng-ch   (mesh/do-with-thread! :engine-pool
+                                         {:handler   :set-media-session
+                                          :arguments payload})
+          m-res    (<! media-ch)
+          e-res    (<! eng-ch)]
+      (or (when (= (:status m-res) "success") m-res)
+          (when (= (:status e-res) "success") e-res)))))
+
+(defn clear-worker-media-session! [opts]
+  (go
+    (let [payload  (or opts {:all? true})
+          media-ch (mesh/do-with-thread! :media-pool
+                                         {:handler   :clear-media-session
+                                          :arguments payload})
+          eng-ch   (mesh/do-with-thread! :engine-pool
+                                         {:handler   :clear-media-session
+                                          :arguments payload})]
+      (<! media-ch)
+      (<! eng-ch))))
+
+(re-frame/reg-event-fx
+ :engine/sync-media-session
+ (fn [_ [_ {:keys [user-id server-url token]}]]
+   (go
+     (when-let [res (<! (sync-worker-media-session!
+                         {:user-id    user-id
+                          :server-url server-url
+                          :token      token}))]
+       (when (and (or (nil? server-url) (nil? token))
+                  (:base-url res)
+                  (:token res))
+         (re-frame/dispatch [:auth/apply-hydrated-net-context res]))))
+   {}))
+
+(re-frame/reg-event-fx
+ :engine/clear-media-session
+ (fn [_ [_ opts]]
+   (clear-worker-media-session! opts)
+   {}))
+#+end_src
+
+
+
+***** Booting
+
+
 
 If the app has just started we need to check the prior engine,
 user, rooms, etc and get all of that ready. Then pass off to
