@@ -1,308 +1,34 @@
-(ns paradise.ui.container.timeline.hydrator
-  (:require [goog.object]
-            ["react" :as react]
+(ns ^:virtualizer/skip paradise.ui.container.timeline.hydrator
+  (:require [goog.object :as gobj]
             [reagent.core :as r]
+            [re-frame.core :as re-frame]
             [paradise.shared.client.state :refer [!ast-handoff]]
-            [re-frame.core :as re-frame]))
+            [virtualizer.client.hydrator :as vhydrator]))
 
-(defonce !shallow-cache #js {})
 (defonce !local-timeline-data (r/atom {}))
-(defonce !style-key-cache #js {})
-(defonce !prop-key-cache #js {"class" "className" "for" "htmlFor"})
-(defonce !kw-cache #js {})
-(defonce !kebab-cache #js {})
-(defonce !gen-fn-cache #js {})
-(defonce !tag-cache #js {})
-(defonce !void-elements #js {"br" true "hr" true "img" true "input" true "meta" true "link" true "area" true "base" true "col" true "embed" true "param" true "source" true "track" true "wbr" true "BR" true "HR" true "IMG" true "INPUT" true})
-(defonce !react-tree-cache #js {})
 
-(defn format-style-key [k]
-  (if-some [cached (goog.object/get !style-key-cache k)]
-    cached
-    (let [res (.replace k #"-(\w)" (fn [_ m] (.toUpperCase m)))]
-      (goog.object/set !style-key-cache k res)
-      res)))
-
-(defn format-style [style-val]
-  (cond
-    (string? style-val)
-    (let [parts (.split style-val ";")
-          len   (.-length parts)
-          obj   #js {}]
-      (loop [i 0]
-        (when (< i len)
-          (let [rule (.trim (aget parts i))]
-            (when (> (.-length rule) 0)
-              (let [idx (.indexOf rule ":")]
-                (when (> idx -1)
-                  (let [k (.trim (.substring rule 0 idx))
-                        v (.trim (.substring rule (inc idx)))]
-                    (goog.object/set obj (format-style-key k) v))))))
-        (recur (inc i))))
-      obj)
-    (object? style-val)
-    (let [keys-arr (js/Object.keys style-val)
-          len      (.-length keys-arr)
-          obj      #js {}]
-      (loop [i 0]
-        (when (< i len)
-          (let [k (aget keys-arr i)
-                v (goog.object/get style-val k)]
-            (goog.object/set obj (format-style-key k) v)
-            (recur (inc i)))))
-      obj)
-    :else style-val))
-
-(defn format-class [c]
-  (cond
-    (string? c) c
-    (js/Array.isArray c) (.join c " ")
-    :else (str c)))
-
-(defn format-prop-key [k-str]
-  (if-some [cached (goog.object/get !prop-key-cache k-str)]
-    cached
-    (let [res (if (.startsWith k-str "on-")
-                (let [parts (.split k-str "-")
-                      len   (.-length parts)]
-                  (loop [i 1, s (aget parts 0)]
-                    (if (< i len)
-                      (let [p (aget parts i)
-                            capitalized (if (> (.-length p) 0)
-                                          (str (.toUpperCase (.charAt p 0)) (.substring p 1))
-                                          p)]
-                        (recur (inc i) (str s capitalized)))
-                      s)))
-                k-str)]
-      (goog.object/set !prop-key-cache k-str res)
-      res)))
-
-(defn fast-camel->kebab [s]
-  (if-some [cached (goog.object/get !kebab-cache s)]
-    cached
-    (let [res (clojure.string/lower-case (clojure.string/replace (name s) #"([a-z])([A-Z])" "$1-$2"))]
-      (goog.object/set !kebab-cache s res)
-      res)))
-
-(defn fast-keyword [k]
-  (if-some [cached (goog.object/get !kw-cache k)] cached (let [kw (keyword k)] (goog.object/set !kw-cache k kw) kw)))
-
-(defn get-gen-fn [raw-ptr]
-  (let [k (if (string? raw-ptr) raw-ptr (str raw-ptr))]
-    (if-some [cached (goog.object/get !gen-fn-cache k)]
-      cached
-      (let [clean-n (if (.startsWith k ":fn/") (.substring k 4)
-                      (if (.startsWith k "fn/") (.substring k 3)
-                        (if (.startsWith k ":") (.substring k 1) k)))
-            kw-ptr  (keyword "fn" clean-n)
-            gen-fn  (get @paradise.shared.client.registry/!anon-fns kw-ptr)]
-        (goog.object/set !gen-fn-cache k gen-fn)
-        gen-fn))))
-
-(defn fast-env-hydrate [raw-env]
-  (let [m (transient {}) keys-arr (js/Object.keys raw-env) len (.-length keys-arr)]
-    (loop [i 0]
-      (when (< i len)
-        (let [k (aget keys-arr i)]
-          (assoc! m (fast-keyword k) (goog.object/get raw-env k))
-          (recur (inc i)))))
-    (persistent! m)))
-
-(defn hydrate-by-paths! [js-ast paths-array]
-  (let [paths-len (.-length paths-array)]
-    (loop [i 0]
-      (when (< i paths-len)
-        (let [path     (aget paths-array i)
-              path-len (.-length path)]
-          (loop [node js-ast
-                 depth 0]
-            (if (= depth (dec path-len))
-              (let [target-key (aget path depth)
-                    raw-lambda (goog.object/get node target-key)
-                    ptr        (or (goog.object/get raw-lambda "$fn_ptr") (goog.object/get raw-lambda "$fn-ptr"))
-                    gen-fn     (get-gen-fn ptr)]
-                (if gen-fn
-                  (let [raw-env (or (goog.object/get raw-lambda "$env") #js {})
-                        env     (fast-env-hydrate raw-env)]
-                    (goog.object/set node target-key (gen-fn env)))
-                  (do
-                    (js/console.error "UI Hydration missing for lambda:" ptr)
-                    (goog.object/set node target-key (fn [& _] (js/console.warn "Triggered dead lambda:" ptr))))))
-              (recur (goog.object/get node (aget path depth))
-                     (inc depth)))))
-        (recur (inc i)))))
-  js-ast)
-
-(defn fast-js->clj [x]
-  (if-not x x
-    (cond
-      (or (string? x) (number? x) (boolean? x) (fn? x)) x
-      (js/Array.isArray x)
-      (let [len (.-length x) arr (js/Array. len)]
-        (loop [i 0]
-          (if (< i len)
-            (do (aset arr i (fast-js->clj (aget x i))) (recur (inc i)))
-            (vec arr))))
-      (identical? (type x) js/Object)
-      (let [keys-arr (js/Object.keys x) len (.-length keys-arr)]
-        (loop [i 0, m (transient {})]
-          (if (< i len)
-            (let [raw-k (aget keys-arr i)
-                  kebab-k (fast-camel->kebab raw-k)
-                  val (fast-js->clj (goog.object/get x raw-k))]
-              (recur (inc i) (assoc! m (fast-keyword kebab-k) val)))
-            (persistent! m))))
-      :else x)))
-
-(defn fast-js->clj-dmp [x]
-  (if-not x x
-    (cond
-      (or (string? x) (number? x) (boolean? x) (fn? x) (keyword? x) (symbol? x) (instance? js/Date x)) x
-
-      (array? x)
-      (let [len (.-length x) arr (js/Array. len)]
-        (loop [i 0]
-          (if (< i len)
-            (do (aset arr i (fast-js->clj-dmp (aget x i))) (recur (inc i)))
-            (vec arr))))
-
-      (and (identical? (js* "typeof ~{}" x) "object")
-           (not (coll? x))
-           (not (array? x)))
-      (let [keys-arr (js/Object.keys x) len (.-length keys-arr)]
-        (loop [i 0, m (transient {})]
-          (if (< i len)
-            (let [raw-k   (aget keys-arr i)
-                  clean-k (if (string? raw-k)
-                            (.replace raw-k #"^(?:\uFDD0'|:)+" "")
-                            raw-k)
-                  kebab-k (fast-camel->kebab clean-k)
-                  val     (fast-js->clj-dmp (goog.object/get x raw-k))]
-              (recur (inc i) (assoc! m (fast-keyword raw-k) #_(fast-keyword kebab-k) val)))
-            (persistent! m))))
-
-      (vector? x)
-      (mapv fast-js->clj-dmp x)
-
-      (map? x)
-      (reduce-kv (fn [m k v] (assoc m k (fast-js->clj-dmp v))) {} x)
-
-      (coll? x)
-      (map fast-js->clj-dmp x)
-
-      :else x)))
-
+(def get-cached-react-tree vhydrator/get-cached-react-tree)
+(def hydrate-by-paths! vhydrator/hydrate-by-paths!)
+(def pojo->react vhydrator/pojo->react)
+(def fast-js->clj-dmp vhydrator/fast-js->clj)
 
 (def sanitize-js-dispatch
   (re-frame/->interceptor
    :id :sanitize-js-dispatch
    :before (fn [context]
-             (update-in context [:coeffects :event] paradise.ui.container.timeline.hydrator/fast-js->clj-dmp))))
+             (update-in context [:coeffects :event] fast-js->clj-dmp))))
 
 (re-frame/reg-global-interceptor sanitize-js-dispatch)
-
-(defn resolve-react-type [type-str]
-  (if-some [cached (goog.object/get !tag-cache type-str)]
-    (if (keyword? cached)
-      (or (:fn (get @paradise.shared.client.registry/!active-overrides cached)) (get @paradise.shared.client.registry/!components cached) "div")
-      cached)
-    (cond
-      (identical? type-str "<>") (do (goog.object/set !tag-cache type-str react/Fragment) react/Fragment)
-      (.includes type-str " ")   (do (goog.object/set !tag-cache type-str type-str) type-str)
-      (.startsWith type-str "comp:")
-      (let [kw (fast-keyword (subs type-str 5))]
-        (goog.object/set !tag-cache type-str kw)
-        (or (:fn (get @paradise.shared.client.registry/!active-overrides kw)) (get @paradise.shared.client.registry/!components kw) "div"))
-      :else (do (goog.object/set !tag-cache type-str type-str) type-str))))
-
-(defn pojo->react [node]
-  (if-not node nil
-    (cond
-      (or (string? node) (number? node) (boolean? node)) node
-      (js/Array.isArray node)
-      (let [len (.-length node) arr (js/Array. len)]
-        (loop [i 0]
-          (when (< i len)
-            (aset arr i (pojo->react (aget node i)))
-            (recur (inc i))))
-        arr)
-
-      (object? node)
-      (let [type-val   (goog.object/get node "type")
-            raw-props  (goog.object/get node "props")
-            kids       (goog.object/get node "children")
-            react-type (resolve-react-type type-val)]
-
-        (if (fn? react-type)
-          (let [clj-props (when raw-props (fast-js->clj raw-props))
-                base-arr  (js/Array. react-type)]
-            (when clj-props (.push base-arr clj-props))
-            (when kids
-              (if (js/Array.isArray kids)
-                (loop [i 0 len (.-length kids)]
-                  (when (< i len)
-                    (.push base-arr (pojo->react (aget kids i)))
-                    (recur (inc i) len)))
-                (.push base-arr (pojo->react kids))))
-            (reagent.core/as-element (vec base-arr)))
-
-          (let [args #js [react-type raw-props]]
-            (when (and kids (not (goog.object/get !void-elements (if (string? react-type) react-type ""))))
-              (if (js/Array.isArray kids)
-                (loop [i 0 len (.-length kids)]
-                  (when (< i len)
-                    (.push args (pojo->react (aget kids i)))
-                    (recur (inc i) len)))
-                (.push args (pojo->react kids))))
-            (.apply react/createElement nil args))))
-      :else node)))
 
 (re-frame/reg-event-fx
  :timeline/process-virtualized-data
  (fn [{:keys [db]} [_ room-id source]]
    (try
      (when-let [{:keys [ast-nodes paths]} (get @!ast-handoff room-id)]
-       (hydrate-by-paths! ast-nodes paths)
-       (let [len      (.-length ast-nodes)
-             compiled (js/Array. len)
-             cache    (or !shallow-cache #js {})]
-         (loop [i 0]
-           (when (< i len)
-             (let [layout-node (aget ast-nodes i)
-                   id          (goog.object/get layout-node "id")
-                   cached-wrap (aget cache id)
-                   final-node
-                   (if (and cached-wrap (identical? layout-node (.-rawNode cached-wrap)))
-                     (.-wrapped cached-wrap)
-                     (let [pojo (goog.object/get layout-node "worker-data")
-                           wrapped {:id          id
-                                    :raw         (goog.object/get layout-node "raw")
-                                    :type        (goog.object/get layout-node "type")
-                                    :ts          (goog.object/get layout-node "ts")
-                                    :bottom      (goog.object/get layout-node "bottom")
-                                    :height      (goog.object/get layout-node "height")
-                                    :unread?     (goog.object/get layout-node "unread?")
-                                    :read-by     (goog.object/get layout-node "read-by")
-                                    :worker-data pojo}]
-                       (aset cache id #js {:rawNode layout-node :wrapped wrapped})
-                       wrapped))]
-               (aset compiled i final-node)
-               (recur (inc i)))))
-         (swap! !local-timeline-data assoc-in [room-id (keyword source)] (vec compiled))
+       (let [compiled (vhydrator/hydrate-stream-batch! ast-nodes paths)]
+         (swap! !local-timeline-data assoc-in [room-id (keyword source)] compiled)
          (swap! !ast-handoff dissoc room-id)))
      {:db (assoc db :last-worker-paint (js/Date.now))}
-   (catch :default e
-     (js/console.error "Error within Timeline Handler:" e)
-     {:db db}))))
-
-(defn get-cached-react-tree [id pojo]
-  (let [cache       (or !react-tree-cache #js {})
-        cache-entry (aget cache id)
-        ast-version (goog.object/get pojo "ast-version")]
-
-    (if (and cache-entry (identical? ast-version (.-version cache-entry)))
-      (.-tree cache-entry)
-
-      (let [new-tree (pojo->react pojo)]
-        (aset cache id #js {:version ast-version :tree new-tree})
-        new-tree))))
+     (catch :default e
+       (js/console.error "Error within Timeline Handler:" e)
+       {:db db}))))
