@@ -4,10 +4,12 @@
    [re-frame.core :as rf]
    ["react" :as react]
    [promesa.core :as p]
+   [paradise.shared.plugins :as plugins]
    [paradise.ui.overlays.tray :refer [tray-section]]
    [paradise.shared.client.key-handler :refer [keybind-spec]]
    [paradise.ui.container.call.events]
    [paradise.ui.container.call.runtime :as rtc]))
+
 
 (defn- clean-user-id [raw-id]
   (when (and raw-id (not (str/blank? (str raw-id))))
@@ -313,7 +315,15 @@
                                 (not-empty room-name)
                                 "Active Call")
               pip-supported (boolean (.-pictureInPictureEnabled js/document))
-              handle-width  28]
+              handle-width  28
+              slot-props    {:tile          featured-tile
+                             :tile-ref      player-ref
+                             :video-ref     video-ref
+                             :screen-share? screen-share?
+                             :show-video?   true
+                             :spotlight?    false
+                             :tucked?       tucked?
+                             :vol-key       vol-key}]
           [:div.call-mini-player
            {:ref   player-ref
             :class [(str "snap-" corner)
@@ -410,6 +420,7 @@
             {:track     (:video-track featured-tile)
              :mirror?   (and (:local? featured-tile) (= (:source featured-tile) "camera"))
              :video-ref video-ref}]
+           [plugins/plugin-slot :call/mini-player-overlay slot-props]
            [:div.call-mini-edge-handle
             [:span.call-mini-edge-pill]]
            [:div.call-mini-top-bar
@@ -421,11 +432,12 @@
                             (.stopPropagation e)
                             (toggle-video-pip (.-current video-ref)))}
                "Pop Out"])
+            [plugins/plugin-slot :call/mini-player-actions slot-props]
             [:button.call-tile-action-btn.is-danger
-             {:on-click (fn [e]
-                          (.stopPropagation e)
-                          (rf/dispatch [:call/stop-watching (mapv :id watched-tiles)]))}
-             "Stop Watching"]]
+              {:on-click (fn [e]
+                           (.stopPropagation e)
+                           (rf/dispatch [:call/stop-watching (mapv :id watched-tiles)]))}
+              "Stop Watching"]]
            [:button.call-mini-bottom-bar
             {:type     "button"
              :title    (if room-name (str "Jump to " room-name) "Jump to call")
@@ -474,6 +486,15 @@
                                   :volume           vol
                                   :muted?           muted?
                                   :output-device-id output-device-id}]))]
+     [plugins/plugin-slot
+      :call/background-services
+      {:participants     participants
+       :stage-mounted?   stage-mounted?
+       :audio-enabled?   audio-enabled?
+       :deafened?        deafened?
+       :output-device-id output-device-id
+       :volumes          volumes
+       :local-mutes      local-mutes}]
      (when (not stage-mounted?)
        [:f> persistent-mini-player])]))
 
