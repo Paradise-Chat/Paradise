@@ -129,11 +129,15 @@ Web worker threads have no DOM and so Re-frame will complaining
 **** TODO Maybe move to re-frame.db directly?
 
 #+begin_src clojurescript :tangle ../../../src/paradise/virtualizer/base.cljs
-
-
 (re-frame.loggers/set-loggers! {:warn (fn [& _])})
 #+end_src
 
+
+**** Initialize DOM shims
+
+#+begin_src clojurescript :tangle ../../../src/paradise/virtualizer/base.cljs
+(ast/install-dom-shims!)
+#+end_src
 
 
 **** Cache and Constants
