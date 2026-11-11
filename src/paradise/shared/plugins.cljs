@@ -1,10 +1,8 @@
 (ns paradise.shared.plugins
   (:require
    [re-frame.core :as re-frame]
-   [reagent.core :as r]
-   [paradise.shared.client.state :as state]
-   [paradise.shared.utils.svg :as icons]
-   [clojure.string :as str]))
+   [paradise.shared.client.registry :as registry]
+   ))
 
 (defn build-wrapped-component [base-comp wrappers]
   (reduce (fn [acc-comp plugin]
