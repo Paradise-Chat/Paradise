@@ -9,6 +9,7 @@
     --chat-header-h: 19px;
     --chat-system-event-h: 42px;
     --chat-reaction-row-h: 24px;
+    --chat-virtual-divider-h: 49px;
     --chat-media-margin: 0px;
     --chat-edited-label-h: 16px;
     --chat-reply-banner-h: 32.4px;
@@ -42,6 +43,7 @@
 
 .body.formatted {
     display: contents;
+    white-space: normal;
 }
 
 .body.formatted a {
@@ -133,16 +135,49 @@
     min-height: 0;
 }
 
+.timeline-body pre {
+    margin: 0;
+    padding: calc(var(--chat-code-padding) / 2) 12px;
+    background-color: #2d2d2d;
+    border-radius: 6px;
+    font: var(--chat-code-font);
+    font-weight: var(--chat-code-font-weight);
+    line-height: var(--chat-code-line-height);
+    overflow-x: auto;
+}
+
+.timeline-body pre code {
+    padding: 0;
+    background: transparent;
+    font: inherit;
+    line-height: inherit;
+}
+
 .timeline-body {
     min-width: 0;
     max-width: 100%;
     font: var(--chat-body-font);
     line-height: var(--chat-body-line-height);
     color: var(--text-main);
-    white-space: pre-wrap;
     overflow-wrap: break-word;
     word-break: normal;
 }
+
+.body {
+    color: #dbdee1;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    word-break: normal;
+    display: inline;
+    max-width: 100%;
+}
+
+.body.formatted {
+    display: contents;
+    white-space: normal;
+}
+
 
 .spinner-wrapper {
     min-height: 60px;
@@ -150,6 +185,15 @@
     align-items: center;
     justify-content: center;
     padding-bottom: 20px;
+}
+
+.timeline-wrapper > .spinner-wrapper {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    pointer-events: none;
 }
 
 .timeline-loading-overlay {
@@ -164,6 +208,7 @@
 
 .timeline-loading-spinner-container {
     background: var(--bg-color, white);
+
     padding: 8px;
     border-radius: 50%;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
@@ -190,6 +235,7 @@
 
 .new-messages-separator,
 .timeline-date-separator {
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -311,6 +357,7 @@
 
 .timeline-edited-label {
     font-size: 0.7rem;
+    line-height: 1;
     color: var(--text-muted, #888);
     font-style: italic;
     padding-left: 5px;
@@ -553,6 +600,7 @@
     align-items: center;
     gap: 6px;
     height: var(--chat-reaction-row-h);
+    box-sizing: border-box;
     padding: 0 8px;
     background: #2b2d31;
     border: 1px solid transparent;
