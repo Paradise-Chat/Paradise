@@ -15,6 +15,7 @@
    [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
    [promesa.core]
+   ["react" :as react]
    ["@capacitor/core" :refer [Capacitor]]
    ["@capacitor/browser" :refer [Browser] :as browser]
    [paradise.shared.sci-runner.shared]
@@ -26,6 +27,8 @@
    [paradise.ui.container.call.call-container]
    [paradise.ui.container.call.call-view]
    [paradise.ui.container.call.events]
+   [paradise.ui.container.call.runtime]
+   [paradise.ui.container.call.native]
    [paradise.ui.container.members]
    [paradise.ui.container.pins]
    [paradise.ui.container.reusable]
@@ -46,6 +49,7 @@
    [paradise.ui.overlays.lightbox]
    [paradise.ui.overlays.notifications]
    [paradise.ui.overlays.profiles]
+   [paradise.shared.client.key-handler]
    [paradise.ui.overlays.quick-switcher]
    [paradise.ui.overlays.reactions]
    [paradise.ui.overlays.settings.base]
@@ -69,7 +73,14 @@
 (def ui-namespaces
   {'capacitor.browser {'Browser Browser}
    'capacitor.core    {'Capacitor Capacitor}
-
+   'react             {'useState        react/useState
+                       'useEffect       react/useEffect
+                       'useLayoutEffect react/useLayoutEffect
+                       'useRef          react/useRef
+                       'useMemo         react/useMemo
+                       'useCallback     react/useCallback
+                       'createElement   react/createElement
+                       'Fragment        react/Fragment}
    'paradise.shared.sci-runner.ui (expose-ns paradise.shared.sci-runner.ui)
    'taoensso.timbre {'info  log-info-macro
                      'warn  log-warn-macro
@@ -119,6 +130,14 @@
                                       'get-slot registry/get-slot}
    'paradise.shared.client.state {'!config state/!config
                                   '!engine-pool state/!engine-pool}
+
+   'paradise.shared.client.key-handler
+   (expose-ns paradise.shared.client.key-handler)
+
+   'paradise.ui.container.call.runtime
+   (merge (expose-ns paradise.ui.container.call.runtime)
+          {'!driver-instance paradise.ui.container.call.runtime/!driver-instance
+           '!participants    paradise.ui.container.call.runtime/!participants})
 
    'cljs-workers.mesh   {'do-with-thread! mesh/do-with-thread!}
    'cljs-workers.core {'do-with-pool! main/do-with-pool!}})
