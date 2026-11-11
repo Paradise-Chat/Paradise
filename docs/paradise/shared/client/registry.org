@@ -28,12 +28,17 @@ It is easier than the other one I poorly chose a name for.
 ***** Defs
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/registry.cljs
-(defonce !components (r/atom {}))
-(defonce !pure-fns (atom {}))
-(defonce !anon-fns (atom {}))
-(defonce !active-overrides (r/atom {}))
+(def !components vreg/!components)
+(def !pure-fns vreg/!pure-fns)
+(def !anon-fns vreg/!anon-fns)
+(def !active-overrides vreg/!active-overrides)
 (defonce !slots (r/atom {}))
 (defonce !live-callbacks (atom {}))
+
+(def resolve-anon-fn vreg/resolve-anon-fn)
+(def dehydrate vreg/dehydrate)
+(def register-override! vreg/register-override!)
+(def clear-overrides! vreg/clear-overrides!)
 #+end_src
 
 
