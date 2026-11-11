@@ -6,6 +6,12 @@
 This is an injected dependency across all files. It serves to provide
 function context to all threads as much as they need, at least.
 
+
+****** TODO We should likely change the name of this at some point.
+
+It is easier than the other one I poorly chose a name for.
+
+
 **** Imports
 
 
