@@ -1,4 +1,3 @@
-
 (ns paradise.media.core
   (:require [cljs.core.async :refer [go <!]]
             [cljs-workers.worker :as worker]
