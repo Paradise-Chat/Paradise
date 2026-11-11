@@ -22,6 +22,7 @@ to their call spec then Paradise can just 'work' for their calls.
    [re-frame.core :as rf]
    ["react" :as react]
    [promesa.core :as p]
+   [paradise.shared.plugins :as plugins]
    [paradise.ui.overlays.tray :refer [tray-section]]
    [paradise.shared.client.key-handler :refer [keybind-spec]]
    [paradise.ui.container.call.events]
