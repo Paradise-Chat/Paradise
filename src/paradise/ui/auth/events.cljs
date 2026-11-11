@@ -3,8 +3,10 @@
             [clojure.string :as str]
             [reagent.core :as r]
             [paradise.shared.client.state :as state]
+            [paradise.media.component :as media]
             [cljs-workers.core :as main]
             [cljs-workers.mesh :as mesh]
+            [cljs.core.async.interop :refer-macros [<p!]]
             [cljs.core.async :refer [go <!]]
             [paradise.binding.streams :as engines]
             [paradise.binding.core :as binding]
@@ -28,66 +30,11 @@
  :auth/error
  (fn [db _] (:login-error db)))
 
-(re-frame/reg-event-fx
- :auth/start-login-flow
- (fn [{:keys [db]} _]
-   {:db (assoc db :auth-status :logged-out
-               :settings/open? false
-               :login-error nil)
-    :fx [[:dispatch [:settings/close]]
-         [:dispatch [:settings/load-accounts]]]}))
-
-
-
-(re-frame/reg-event-fx
- :auth/login
- (fn [{:keys [db]} [_ engine-id auth-payload]]
-   (binding/set-active-engine! engine-id)
-   (if-let [pool @state/!engine-pool]
-     (go
-       (try
-         (let [res (<! (main/do-with-pool! pool {:handler :login
-                                                 :arguments auth-payload}))
-               status-kw (keyword (:status res))]
-           (if (= status-kw :success)
-             (re-frame/dispatch [:auth/login-success
-                                 (assoc res :credentials auth-payload
-                                        :engine-id engine-id)])
-             (re-frame/dispatch [:auth/login-failure (:msg res)])))
-         (catch :default e
-           (re-frame/dispatch [:auth/login-failure (str e)]))))
-     (log/error "Cannot login: Engine pool not initialized"))
-
-   {:db (assoc db :auth-status :authenticating
-               :login-error nil)}))
-
-(re-frame/reg-event-fx
- :auth/login-success
- (fn [{:keys [db]} [_ {:keys [user-id session-data credentials engine-id]}]]
-   (when session-data
-     (register-sw!)
-     (set-auth-context! (or (:token session-data) (:accessToken session-data))
-                        (:serverUrl session-data))
-     (store/set-setting! "last_active_user" user-id)
-     (store/set-setting! "last-active-engine" (name engine-id)))
-
-   (when engine-id
-     (engines/init-engine-streams! engine-id))
-
-   {:db (assoc db
-               :auth-status :logged-in
-               :active-user-id user-id
-               :rooms/data {}
-               :timeline/events []
-               :auth/session session-data)
-    :fx (cond-> [[:dispatch [:app/load-settings-by-stage :login]]
-                 [:dispatch [:app/restore-user-session user-id]]
-                 [:dispatch [:push/check-status]]]
-          (and credentials session-data)
-          (conj [:dispatch [:push/create-sleepy-shadow
-                            (merge credentials
-                                   session-data
-                                   {:userId user-id})]]))}))
+(re-frame/reg-event-db
+ :auth/login-failure
+ (fn [db [_ error-msg]]
+   (assoc db :auth-status :logged-out
+          :login-error error-msg)))
 
 
 (re-frame/reg-sub
@@ -95,23 +42,150 @@
  (fn [db _]
    (:active-user-id db)))
 
+
+(re-frame/reg-event-fx
+ :auth/apply-hydrated-net-context
+ (fn [{:keys [db]} [_ {:keys [user-id base-url token]}]]
+   (when (and (= user-id (:active-user-id db)) base-url token)
+     (set-auth-context! token base-url))
+   {}))
+
+(re-frame/reg-event-fx
+ :auth/start-login-flow
+ (fn [{:keys [db]} _]
+   (let [call-active? (get-in db [:call :is-active?] false)]
+     (set-auth-context! nil nil)
+     (media/clear-media-cache!)
+     {:db (assoc db
+                 :auth-status :logged-out
+                 :settings/open? false
+                 :login-error nil)
+      :fx (cond-> [[:dispatch [:settings/close]]
+                   [:dispatch [:engine/clear-media-session {:all? false}]]
+                   [:dispatch [:settings/load-accounts]]]
+            call-active?
+            (conj [:dispatch [:call/hangup]]))})))
+
+(re-frame/reg-event-fx
+ :auth/login
+ (fn [{:keys [db]} [_ engine-id auth-payload]]
+   (let [engine-kw (keyword engine-id)]
+     (binding/set-active-engine! engine-kw)
+     (if-let [pool @state/!engine-pool]
+       (go
+         (try
+           (let [res       (<! (main/do-with-pool! pool {:handler   :login
+                                                         :arguments auth-payload}))
+                 status-kw (keyword (:status res))]
+             (if (= status-kw :success)
+               (re-frame/dispatch [:auth/login-success
+                                   (assoc res
+                                          :credentials auth-payload
+                                          :engine-id engine-kw)])
+               (re-frame/dispatch [:auth/login-failure (:msg res)])))
+           (catch :default e
+             (re-frame/dispatch [:auth/login-failure (str e)]))))
+       (log/error "Cannot login: Engine pool not initialized"))
+     {:db (assoc db
+                 :auth-status :authenticating
+                 :active-engine engine-kw
+                 :login-error nil)})))
+
+(re-frame/reg-event-fx
+ :auth/login-success
+ (fn [{:keys [db]} [_ {:keys [user-id session-data credentials engine-id]}]]
+   (let [resolved-engine (or (some-> engine-id keyword)
+                             (:active-engine db)
+                             :matrix)
+         token (:token session-data)
+         server-url (:server-url session-data)]
+     (media/clear-media-cache!)
+     (register-sw!)
+     (when (and token server-url)
+       (set-auth-context! token server-url))
+     (when user-id
+       (store/set-setting! "last_active_user" user-id))
+     (when resolved-engine
+       (store/set-setting! "last-active-engine" (name resolved-engine))
+       (binding/set-active-engine! resolved-engine)
+       (engines/init-engine-streams! resolved-engine))
+     {:db (assoc db
+                 :auth-status :logged-in
+                 :active-user-id user-id
+                 :active-engine resolved-engine
+                 :rooms/data {}
+                 :timeline/events []
+                 :auth/session session-data)
+      :fx (cond-> [[:dispatch [:engine/sync-media-session
+                               {:user-id    user-id
+                                :server-url server-url
+                                :token      token}]]
+                   [:dispatch [:app/load-settings-by-stage :login]]
+                   [:dispatch [:app/restore-user-session user-id]]
+                   [:dispatch [:push/check-status]]]
+            (and credentials session-data)
+            (conj [:dispatch [:push/create-sleepy-shadow
+                              (merge credentials
+                                     session-data
+                                     {:userId user-id})]]))})))
+
+
 (re-frame/reg-event-fx
  :auth/switch-account
+ (fn [{:keys [db]} [_ target-user-id target-engine]]
+   (let [same-logged-in? (and (= (:auth-status db) :logged-in)
+                              (= target-user-id (:active-user-id db)))
+         call-active?    (get-in db [:call :is-active?] false)
+         prev-engine     (:active-engine db)]
+     (if same-logged-in?
+       {:db (assoc db :settings/open? false)
+        :fx [[:dispatch [:settings/close]]]}
+       (do
+         (set-auth-context! nil nil)
+         (media/clear-media-cache!)
+         (go
+           (let [saved-eng (<p! (-> (store/get-setting "last-active-engine")
+                                    (.catch (fn [_] nil))))
+                 engine-kw (or (some-> target-engine keyword)
+                               prev-engine
+                               (some-> saved-eng keyword)
+                               :matrix)]
+             (<p! (store/set-setting! "last_active_user" target-user-id))
+             (<p! (store/set-setting! "last-active-engine" (name engine-kw)))
+             (re-frame/dispatch [:engine/switch-account-boot
+                                 {:target-user-id target-user-id
+                                  :engine-id      engine-kw
+                                  :prev-engine-id prev-engine}])))
+         {:db (assoc db
+                     :auth-status :checking
+                     :settings/open? false
+                     :active-user-id nil
+                     :auth/session nil
+                     :rooms/data {}
+                     :timeline/events [])
+          :fx (cond-> [[:dispatch [:settings/close]]]
+                call-active?
+                (conj [:dispatch [:call/hangup]]))})))))
+
+(re-frame/reg-event-fx
+ :session/nuke-single-account
  (fn [{:keys [db]} [_ target-user-id]]
-   (store/set-setting! "last_active_user" target-user-id)
-   {:db (assoc db :auth-status :checking
-                  :settings/open? false
-                  :active-user-id nil
-                  :rooms/data {}
-                  :timeline/events [])
-    :fx [[:dispatch [:app/bootstrap target-user-id (:active-engine db)]]]}))
+   (let [is-active? (= target-user-id (:active-user-id db))]
+     (when is-active?
+       (set-auth-context! nil nil)
+       (media/clear-media-cache!))
+     (merge
+      {:session/wipe-settings true
+       :fx [[:dispatch [:engine/clear-media-session {:user-id target-user-id}]]
+            [:dispatch [:settings/load-accounts]]]}
+      (when is-active?
+        {:db (assoc db
+                    :auth-status :logged-out
+                    :active-user-id nil
+                    :auth/session nil
+                    :rooms/data {}
+                    :timeline/events [])})))))
 
-
-(re-frame/reg-event-db
- :auth/login-failure
- (fn [db [_ error-msg]]
-   (assoc db :auth-status :logged-out
-             :login-error error-msg)))
 
 (re-frame/reg-fx
  :session/delete-from-store
@@ -126,18 +200,7 @@
      (set! (.-onblocked req) #(log/warn "Wiping paradise-settings was BLOCKED by an open connection.")))))
 
 
-(re-frame/reg-event-fx
- :session/nuke-single-account
- (fn [{:keys [db]} [_ target-user-id]]
-   (let [is-active? (= target-user-id (:active-user-id db))]
-     (merge
-      {:session/wipe-settings true
-       :fx [[:dispatch [:settings/load-accounts]]]}
-      (when is-active?
-        {:db (assoc db :auth-status :logged-out
-                       :active-user-id nil
-                       :rooms/data {}
-                       :timeline/events [])})))))
+
 
 (re-frame/reg-fx
  :session/wipe-settings
