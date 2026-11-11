@@ -186,6 +186,26 @@ Probably needs a better name (and logical grouping)
 **** Logout
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/auth/events.cljs
+(re-frame/reg-event-fx
+ :session/nuke-single-account
+ (fn [{:keys [db]} [_ target-user-id]]
+   (let [is-active? (= target-user-id (:active-user-id db))]
+     (when is-active?
+       (set-auth-context! nil nil)
+       (media/clear-media-cache!))
+     (merge
+      {:session/wipe-settings true
+       :fx [[:dispatch [:engine/clear-media-session {:user-id target-user-id}]]
+            [:dispatch [:settings/load-accounts]]]}
+      (when is-active?
+        {:db (assoc db
+                    :auth-status :logged-out
+                    :active-user-id nil
+                    :auth/session nil
+                    :rooms/data {}
+                    :timeline/events [])})))))
+
+
 (re-frame/reg-fx
  :session/delete-from-store
  (fn [user-id]
@@ -199,19 +219,6 @@ Probably needs a better name (and logical grouping)
      (set! (.-onblocked req) #(log/warn "Wiping paradise-settings was BLOCKED by an open connection.")))))
 
 
-(re-frame/reg-event-fx
- :session/nuke-single-account
- (fn [{:keys [db]} [_ target-user-id]]
-   (let [is-active? (= target-user-id (:active-user-id db))]
-     (merge
-      {:session/wipe-settings true
-       :fx [[:dispatch [:settings/load-accounts]]]}
-      (when is-active?
-        {:db (assoc db :auth-status :logged-out
-                       :active-user-id nil
-                       :rooms/data {}
-                       :timeline/events [])})))))
-
 (re-frame/reg-fx
  :session/wipe-settings
  (fn [_]
@@ -219,7 +226,6 @@ Probably needs a better name (and logical grouping)
      (set! (.-onsuccess req) #(log/info "Successfully wiped paradise-settings database."))
      (set! (.-onerror req) #(log/error "Failed to wipe paradise-settings."))
      (set! (.-onblocked req) #(log/warn "Wiping paradise-settings was BLOCKED.")))))
-
 
 (re-frame/reg-event-fx
  :sdk/logout
