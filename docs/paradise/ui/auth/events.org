@@ -67,13 +67,18 @@ Probably needs a better name (and logical grouping)
 (re-frame/reg-event-fx
  :auth/start-login-flow
  (fn [{:keys [db]} _]
-   {:db (assoc db :auth-status :logged-out
-               :settings/open? false
-               :login-error nil)
-    :fx [[:dispatch [:settings/close]]
-         [:dispatch [:settings/load-accounts]]]}))
-
-
+   (let [call-active? (get-in db [:call :is-active?] false)]
+     (set-auth-context! nil nil)
+     (media/clear-media-cache!)
+     {:db (assoc db
+                 :auth-status :logged-out
+                 :settings/open? false
+                 :login-error nil)
+      :fx (cond-> [[:dispatch [:settings/close]]
+                   [:dispatch [:engine/clear-media-session {:all? false}]]
+                   [:dispatch [:settings/load-accounts]]]
+            call-active?
+            (conj [:dispatch [:call/hangup]]))})))
 
 (re-frame/reg-event-fx
  :auth/login
