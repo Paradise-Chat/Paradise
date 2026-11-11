@@ -16,10 +16,10 @@ It is easier than the other one I poorly chose a name for.
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/registry.cljs
-(ns paradise.shared.client.registry
+(ns ^:virtualizer/skip paradise.shared.client.registry
   (:require [reagent.core :as r]
             [cljs-workers.mesh]
-            ))
+            [virtualizer.registry :as vreg]))
 #+end_src
 
 
