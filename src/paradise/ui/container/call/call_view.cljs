@@ -4,6 +4,7 @@
    [re-frame.core :as rf]
    ["react" :as react]
    [promesa.core :as p]
+   [paradise.shared.plugins :as plugins]
    [paradise.shared.utils.helpers :refer [format-call-participants]]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.container.call.runtime :as rtc]
@@ -107,7 +108,19 @@
         user-vol      @(rf/subscribe [:call/participant-volume vol-key])
         speaking-ids  @(rf/subscribe [:call/speaking-ids])
         is-speaking?  (and (not screen-share?)
-                           (cc/participant-speaking? tile speaking-ids))]
+                           (cc/participant-speaking? tile speaking-ids))
+        slot-props    {:tile          tile
+                       :tile-ref      tile-ref
+                       :video-ref     video-ref
+                       :lookup-id     lookup-id
+                       :resolved-name resolved-name
+                       :screen-share? screen-share?
+                       :has-video?    has-video?
+                       :show-video?   show-video?
+                       :spotlight?    spotlight?
+                       :unwatched?    unwatched?
+                       :is-speaking?  is-speaking?
+                       :vol-key       vol-key}]
     [:div.call-participant-tile
      {:ref      tile-ref
       :on-click (fn [e]
@@ -145,6 +158,7 @@
                   :name resolved-name
                   :url  resolved-url
                   :size (if spotlight? 96 64)}]]])
+     [plugins/plugin-slot :call/tile-overlay slot-props]
      [:div.call-tile-actions
       {:on-click        #(.stopPropagation %)
        :on-pointer-down #(.stopPropagation %)}
@@ -163,6 +177,7 @@
         [:button.call-tile-action-btn
          {:on-click #(toggle-fullscreen (.-current tile-ref))}
          "Full"])
+      [plugins/plugin-slot :call/tile-actions slot-props]
       (when (and show-video? (not local?) on-stop-watching)
         [:button.call-tile-action-btn.is-danger
          {:on-click #(on-stop-watching id)}
@@ -174,7 +189,8 @@
       (when (and screen-share? show-video?)
         [:span.call-mini-live-badge "LIVE"])
       (when (or audio-muted? (and (not local?) (or local-muted? (zero? user-vol))))
-        [:span.call-tile-muted-badge "Muted"])]]))
+        [:span.call-tile-muted-badge "Muted"])
+      [plugins/plugin-slot :call/tile-badges slot-props]]]))
 
 (defn screen-share-audio-picker []
   (let [[supported? set-supported!] (react/useState false)
@@ -286,6 +302,12 @@
         (if screen-sharing? "Stop Share" "Share Screen")]
        (when screen-sharing?
          [:f> screen-share-audio-picker])]
+      [plugins/plugin-slot
+       :call/control-bar
+       {:audio-enabled?  audio-enabled?
+        :video-enabled?  video-enabled?
+        :screen-sharing? screen-sharing?
+        :deafened?       deafened?}]
       [:button.call-control-btn
        {:class    (when deafened? "is-muted")
         :on-click #(rf/dispatch [:call/toggle-deafen])}
@@ -428,6 +450,13 @@
            :disabled busy?
            :on-click #(rf/dispatch [:call/toggle-video])}
           (if video-enabled? "Camera On" "Camera Off")]
+         [plugins/plugin-slot
+          :call/lobby-actions
+          {:room-id        room-id
+           :busy?          busy?
+           :has-active?    has-active?
+           :audio-enabled? audio-enabled?
+           :video-enabled? video-enabled?}]
          [:button.call-start-button
           {:disabled busy?
            :on-click (fn [_]
@@ -517,6 +546,13 @@
                :on-select        handle-focus
                :on-stop-watching handle-stop
                :on-watch         handle-watch}])])]
+       [plugins/plugin-slot
+        :call/stage-overlay
+        {:room-id        room-id
+         :participants   participants
+         :spotlight-tile spotlight-tile
+         :focused-id     focused-id
+         :immersive?     immersive?}]
        [call-control-bar]])))
 
 (defn ^:ui call-view [room-id]
