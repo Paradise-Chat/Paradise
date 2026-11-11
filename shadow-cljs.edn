@@ -2,7 +2,30 @@
  :builds
  {:app {:target :esm
         :npm-deps false
-        :build-hooks [[lambda-lifter/hook]
+        :build-hooks [[virtualizer.lifter/hook
+                       {:src-dir         "src"
+                        :out-dir         "src-gen"
+                        :registry-ns     virtualizer.registry
+                        :skip-namespaces #{virtualizer.registry
+                                           virtualizer.protocol
+                                           virtualizer.core
+                                           virtualizer.scroll
+                                           virtualizer.metrics
+                                           virtualizer.layout
+                                           virtualizer.client.hydrator
+                                           virtualizer.worker.ast
+                                           virtualizer.worker.engine
+                                           virtualizer.worker.pretext
+                                           paradise.shared.utils.macros
+                                           paradise.shared.client.registry
+                                           paradise.shared.client.state
+                                           paradise.shared.client.core
+                                           paradise.virtualizer.base
+                                           paradise.virtualizer.spec
+                                           paradise.virtualizer.parsing
+                                           paradise.ui.container.timeline.hydrator
+                                           re-frame.db
+                                           net}}]
                       [build-hooks/include-root-files]
                       [build-hooks/include-themes]
                       [build-hooks/stamp-version]
