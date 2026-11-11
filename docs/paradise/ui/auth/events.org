@@ -83,24 +83,27 @@ Probably needs a better name (and logical grouping)
 (re-frame/reg-event-fx
  :auth/login
  (fn [{:keys [db]} [_ engine-id auth-payload]]
-   (binding/set-active-engine! engine-id)
-   (if-let [pool @state/!engine-pool]
-     (go
-       (try
-         (let [res (<! (main/do-with-pool! pool {:handler :login
-                                                 :arguments auth-payload}))
-               status-kw (keyword (:status res))]
-           (if (= status-kw :success)
-             (re-frame/dispatch [:auth/login-success
-                                 (assoc res :credentials auth-payload
-                                        :engine-id engine-id)])
-             (re-frame/dispatch [:auth/login-failure (:msg res)])))
-         (catch :default e
-           (re-frame/dispatch [:auth/login-failure (str e)]))))
-     (log/error "Cannot login: Engine pool not initialized"))
-
-   {:db (assoc db :auth-status :authenticating
-               :login-error nil)}))
+   (let [engine-kw (keyword engine-id)]
+     (binding/set-active-engine! engine-kw)
+     (if-let [pool @state/!engine-pool]
+       (go
+         (try
+           (let [res       (<! (main/do-with-pool! pool {:handler   :login
+                                                         :arguments auth-payload}))
+                 status-kw (keyword (:status res))]
+             (if (= status-kw :success)
+               (re-frame/dispatch [:auth/login-success
+                                   (assoc res
+                                          :credentials auth-payload
+                                          :engine-id engine-kw)])
+               (re-frame/dispatch [:auth/login-failure (:msg res)])))
+           (catch :default e
+             (re-frame/dispatch [:auth/login-failure (str e)]))))
+       (log/error "Cannot login: Engine pool not initialized"))
+     {:db (assoc db
+                 :auth-status :authenticating
+                 :active-engine engine-kw
+                 :login-error nil)})))
 
 (re-frame/reg-event-fx
  :auth/login-success
