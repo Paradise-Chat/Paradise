@@ -108,14 +108,16 @@ we can lean more on Eve.
             [cognitect.transit :as t]
             [editscript.core :as e]
             [editscript.edit :as edit]
-            [goog.object]
             [paradise.ui.container.timeline.base]
             [paradise.ui.navigation.rooms.room-list]
             [paradise.ui.app]
-            [paradise.ui.container.timeline.item :refer [event-tile-render]]
+            [paradise.ui.container.timeline.item]
             [paradise.ui.container.members]
-            [paradise.virtualizer.parsing :as parsing]
-            [paradise.virtualizer.measurements :as measurements]))
+            [virtualizer.protocol :as proto]
+            [virtualizer.worker.ast :as ast]
+            [virtualizer.worker.pretext :as pretext]
+            [virtualizer.worker.engine :as engine]
+            [paradise.virtualizer.spec :as spec]))
 #+end_src
 
 
