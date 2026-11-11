@@ -136,28 +136,31 @@
            (log/error "Fatal bootstrap error:" e))))
    {}))
 
-(defn register-engine [protocol-str]
-  (go
-    (let [media-ch  (mesh/do-with-thread! :media-pool
-                                          {:handler   :register-engine
-                                           :arguments {:engine-id protocol-str}})
-          engine-ch (mesh/do-with-thread! :engine-pool
-                                          {:handler   :register-engine
-                                           :arguments {:engine-id protocol-str}})
-          media-res (<! media-ch)
-          eng-res   (<! engine-ch)]
-      (if (and (= "success" (:status eng-res))
-               (= "success" (:status media-res)))
-        (js/console.log "Engine and media worker loaded successfully:" protocol-str)
-        (js/console.error "Failed to load engine:"
-                          {:engine (:msg eng-res)
-                           :media  (:msg media-res)})))))
+(defn register-engine [protocol-id]
+  (let [protocol-str (name protocol-id)]
+    (go
+      (let [media-ch  (mesh/do-with-thread! :media-pool
+                                            {:handler   :register-engine
+                                             :arguments {:engine-id protocol-str}})
+            engine-ch (mesh/do-with-thread! :engine-pool
+                                            {:handler   :register-engine
+                                             :arguments {:engine-id protocol-str}})
+            media-res (<! media-ch)
+            eng-res   (<! engine-ch)]
+        (if (and (= "success" (:status eng-res))
+                 (= "success" (:status media-res)))
+          (js/console.log "Engine and media worker loaded successfully:" protocol-str)
+          (js/console.error "Failed to load engine:"
+                            {:engine (:msg eng-res)
+                             :media  (:msg media-res)}))))))
+
 
 (re-frame/reg-event-fx
  :engine/load-protocol
  (fn [_ [_ protocol-str]]
    (register-engine protocol-str)
    {}))
+
 
 (re-frame/reg-event-fx
  :sdk/start-sync
@@ -171,25 +174,85 @@
    {}))
 
 
+(defn sync-worker-media-session! [{:keys [user-id server-url token]}]
+  (go
+    (let [payload  {:user-id    user-id
+                    :server-url server-url
+                    :token      token}
+          media-ch (mesh/do-with-thread! :media-pool
+                                         {:handler   :set-media-session
+                                          :arguments payload})
+          eng-ch   (mesh/do-with-thread! :engine-pool
+                                         {:handler   :set-media-session
+                                          :arguments payload})
+          m-res    (<! media-ch)
+          e-res    (<! eng-ch)]
+      (or (when (= (:status m-res) "success") m-res)
+          (when (= (:status e-res) "success") e-res)))))
+
+(defn clear-worker-media-session! [opts]
+  (go
+    (let [payload  (or opts {:all? true})
+          media-ch (mesh/do-with-thread! :media-pool
+                                         {:handler   :clear-media-session
+                                          :arguments payload})
+          eng-ch   (mesh/do-with-thread! :engine-pool
+                                         {:handler   :clear-media-session
+                                          :arguments payload})]
+      (<! media-ch)
+      (<! eng-ch))))
+
+(re-frame/reg-event-fx
+ :engine/sync-media-session
+ (fn [_ [_ {:keys [user-id server-url token]}]]
+   (go
+     (when-let [res (<! (sync-worker-media-session!
+                         {:user-id    user-id
+                          :server-url server-url
+                          :token      token}))]
+       (when (and (or (nil? server-url) (nil? token))
+                  (:base-url res)
+                  (:token res))
+         (re-frame/dispatch [:auth/apply-hydrated-net-context res]))))
+   {}))
+
+(re-frame/reg-event-fx
+ :engine/clear-media-session
+ (fn [_ [_ opts]]
+   (clear-worker-media-session! opts)
+   {}))
+
+(re-frame/reg-event-fx
+ :engine/switch-account-boot
+ (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id]}]]
+   (let [engine-kw (keyword (or engine-id :matrix))]
+     (go
+       (<! (clear-worker-media-session! {:all? true}))
+       (when (not= engine-kw prev-engine-id)
+         (<! (register-engine engine-kw)))
+       (binding/set-active-engine! engine-kw)
+       (streams/init-engine-streams! engine-kw)
+       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw]))
+     {:db (assoc db :active-engine engine-kw)})))
+
 (re-frame/reg-event-fx
  :app/cold-boot
- (fn [_ [_ target-user-id requested-engine]]
+ (fn [{:keys [db]} [_ target-user-id requested-engine]]
    (go
      (let [saved-engine (<p! (store/get-setting "last-active-engine"))
            engine-id    (when-let [e (or requested-engine saved-engine)]
                           (keyword e))]
-
        (when engine-id
          (<! (register-engine engine-id))
          (binding/set-active-engine! engine-id)
          (streams/init-engine-streams! engine-id))
-
        (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
-
        (if engine-id
          (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
          (re-frame/dispatch [:auth/set-status :logged-out]))))
-   {}))
+   (cond-> {}
+     requested-engine
+     (assoc :db (assoc db :active-engine (keyword requested-engine))))))
 
 (re-frame/reg-event-fx
  :sdk/ignite-session
