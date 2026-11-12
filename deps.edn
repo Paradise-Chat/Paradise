@@ -10,7 +10,7 @@
         com.taoensso/tempura {:mvn/version "1.5.4"}
         re-frame/re-frame {:mvn/version "1.4.4"}
         paradise/virtualizer {:git/url "https://github.com/Paradise-Chat/Virtualizer.git"
-                              :git/sha "1889fc24a16d85a7f6e69b834207a124cf84fbcc"}
+                                :git/sha "e8ec8b5d88971ce27cd4d79adf7b4b47e3806cc7"}
         jtk-dvlp/cljs-workers {:git/url "https://github.com/Paradise-Chat/cljs-workers.git"
                                :git/sha "9d52ca9097702ae640836b9b299a5720f312868a"}
         org.babashka/sci {:mvn/version "0.12.51"}
