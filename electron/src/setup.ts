@@ -16,19 +16,22 @@ import {
     Menu,
     MenuItem,
     nativeImage,
-    Tray,
+    net,
     session,
+    shell,
+    Tray,
 } from "electron";
 import electronIsDev from "electron-is-dev";
 import electronServe from "electron-serve";
 import windowStateKeeper from "electron-window-state";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 const SINK_NAME = "paradise_share";
 const EXEC_OPTS = { maxBuffer: 10 * 1024 * 1024 };
+const HTTP_URL_FILTER = { urls: ["http://*/*", "https://*/*"] };
 
 interface AudioAppCandidate {
     label: string;
@@ -46,10 +49,314 @@ export interface DynamicTrayItem {
     enabled?: boolean;
 }
 
+export interface ProxyRequestOptions {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    responseType?: "text" | "json" | "base64";
+}
+
+export interface PrepareStreamOptions {
+    urlOrHost: string;
+    requestHeaders?: Record<string, string>;
+}
+
 let pipewireInterval: NodeJS.Timeout | null = null;
 let baselineSourceOutputIds = new Set<number>();
 let selectedAudioTarget: AudioAppCandidate | "ALL" | "NONE" = "NONE";
 let isScreenShareActive = false;
+
+const streamHeaderRules = new Map<string, Record<string, string>>();
+let proxyIpcInitialized = false;
+let activeCustomScheme: string | undefined;
+let webRequestInstalled = false;
+let activeAuthWindow: BrowserWindow | null = null;
+let lastMainWebContentsId: number | null = null;
+
+function extractHostname(urlOrHost: string): string | null {
+    const trimmed = String(urlOrHost || "").trim();
+    if (!trimmed) return null;
+    try {
+        if (trimmed.includes("://")) {
+            return new URL(trimmed).hostname.toLowerCase();
+        }
+        return trimmed.split("/")[0].split(":")[0].toLowerCase();
+    } catch {
+        return null;
+    }
+}
+
+function stripHeaderCaseInsensitive(
+    headers: Record<string, string | string[]>,
+    targetKey: string
+): void {
+    const lower = targetKey.toLowerCase();
+    for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === lower) {
+            delete headers[key];
+        }
+    }
+}
+
+export function setupParadiseProxyIpc(): void {
+    if (proxyIpcInitialized) return;
+    proxyIpcInitialized = true;
+
+    ipcMain.handle(
+        "paradise-proxy:prepare-stream",
+        (_event, opts: PrepareStreamOptions) => {
+            const host = extractHostname(opts?.urlOrHost);
+            if (!host) return false;
+            streamHeaderRules.set(host, opts?.requestHeaders ?? {});
+            return true;
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:clear-stream",
+        (_event, urlOrHost?: string) => {
+            if (!urlOrHost) {
+                streamHeaderRules.clear();
+                return true;
+            }
+            const host = extractHostname(urlOrHost);
+            if (host) streamHeaderRules.delete(host);
+            return true;
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:request",
+        async (_event, opts: ProxyRequestOptions) => {
+            const parsed = new URL(opts.url);
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+                throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+            }
+
+            const method = (opts.method ?? "GET").toUpperCase();
+            const canHaveBody = method !== "GET" && method !== "HEAD";
+
+            const res = await net.fetch(opts.url, {
+                method,
+                headers: opts.headers ?? {},
+                body: canHaveBody && opts.body ? opts.body : undefined,
+                redirect: "follow",
+                credentials: "omit",
+            });
+
+            const responseHeaders: Record<string, string> = {};
+            res.headers.forEach((value, key) => {
+                responseHeaders[key.toLowerCase()] = value;
+            });
+
+            const mode = opts.responseType ?? "text";
+            let data: unknown;
+            if (mode === "base64") {
+                const buf = Buffer.from(await res.arrayBuffer());
+                data = buf.toString("base64");
+            } else if (mode === "json") {
+                data = await res.json();
+            } else {
+                data = await res.text();
+            }
+
+            return {
+                ok: res.ok,
+                status: res.status,
+                url: res.url,
+                headers: responseHeaders,
+                data,
+            };
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:open-auth-window",
+        async (
+            event,
+            opts: { url: string; title?: string; external?: boolean }
+        ) => {
+            const parsed = new URL(String(opts?.url || ""));
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+                throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+            }
+
+            if (opts?.external) {
+                await shell.openExternal(parsed.toString());
+                return { ok: true, mode: "external" };
+            }
+
+            const parentWin =
+                BrowserWindow.fromWebContents(event.sender) ?? undefined;
+            if (parentWin && !parentWin.isDestroyed()) {
+                lastMainWebContentsId = parentWin.webContents.id;
+            }
+
+            if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+                activeAuthWindow.setTitle(opts?.title || "Sign In");
+                activeAuthWindow
+                    .loadURL(parsed.toString())
+                    .catch((err) =>
+                        console.warn("[paradise-auth] loadURL warning:", err)
+                    );
+                activeAuthWindow.show();
+                activeAuthWindow.focus();
+                return { ok: true, mode: "window" };
+            }
+
+            activeAuthWindow = new BrowserWindow({
+                width: 520,
+                height: 760,
+                parent:
+                    parentWin && !parentWin.isDestroyed()
+                        ? parentWin
+                        : undefined,
+                modal: false,
+                show: true,
+                autoHideMenuBar: true,
+                title: opts?.title || "Sign In",
+                backgroundColor: "#1e1f22",
+                webPreferences: {
+                    nodeIntegration: false,
+                    contextIsolation: true,
+                    sandbox: true,
+                    partition: "persist:paradise-auth",
+                },
+            });
+
+            activeAuthWindow.webContents.setWindowOpenHandler(({ url }) => {
+                if (/^https?:\/\//i.test(url)) {
+                    shell.openExternal(url).catch(() => {});
+                }
+                return { action: "deny" };
+            });
+
+            activeAuthWindow.on("closed", () => {
+                activeAuthWindow = null;
+            });
+
+            activeAuthWindow
+                .loadURL(parsed.toString())
+                .catch((err) =>
+                    console.warn("[paradise-auth] loadURL warning:", err)
+                );
+            activeAuthWindow.show();
+            activeAuthWindow.focus();
+            return { ok: true, mode: "window" };
+        }
+    );
+
+    ipcMain.handle("paradise-proxy:close-auth-window", async (event) => {
+        if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+            activeAuthWindow.close();
+            activeAuthWindow = null;
+        }
+        const callerWin =
+            BrowserWindow.fromWebContents(event.sender) ??
+            (lastMainWebContentsId !== null
+                ? BrowserWindow.getAllWindows().find(
+                      (w) =>
+                          !w.isDestroyed() &&
+                          w.webContents.id === lastMainWebContentsId
+                  )
+                : undefined);
+        if (callerWin && !callerWin.isDestroyed()) {
+            callerWin.show();
+            callerWin.focus();
+        }
+        return { ok: true };
+    });
+
+    ipcMain.handle(
+        "paradise-proxy:open-external",
+        async (_event, rawUrl: string) => {
+            const parsed = new URL(String(rawUrl || ""));
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+                throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+            }
+            await shell.openExternal(parsed.toString());
+            return { ok: true };
+        }
+    );
+}
+
+export function installStreamCorsWebRequest(customScheme?: string): void {
+    if (customScheme) {
+        activeCustomScheme = customScheme;
+    }
+    webRequestInstalled = true;
+
+    session.defaultSession.webRequest.onBeforeSendHeaders(
+        HTTP_URL_FILTER,
+        (details, callback) => {
+            const host = extractHostname(details.url);
+            const customHeaders = host ? streamHeaderRules.get(host) : undefined;
+            if (!customHeaders || Object.keys(customHeaders).length === 0) {
+                callback({ requestHeaders: details.requestHeaders });
+                return;
+            }
+
+            const nextHeaders: Record<string, string> = {
+                ...details.requestHeaders,
+            };
+            for (const [key, value] of Object.entries(customHeaders)) {
+                for (const existing of Object.keys(nextHeaders)) {
+                    if (existing.toLowerCase() === key.toLowerCase()) {
+                        delete nextHeaders[existing];
+                    }
+                }
+                nextHeaders[key] = value;
+            }
+
+            callback({ requestHeaders: nextHeaders });
+        }
+    );
+
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+        const headers: Record<string, string | string[]> = {
+            ...(details.responseHeaders ?? {}),
+        };
+
+        const isHttp =
+            details.url.startsWith("http://") ||
+            details.url.startsWith("https://");
+        const host = isHttp ? extractHostname(details.url) : null;
+        const isPreparedHost = host ? streamHeaderRules.has(host) : false;
+        const isMediaStream =
+            isHttp && (details.resourceType === "media" || isPreparedHost);
+
+        if (isMediaStream) {
+            stripHeaderCaseInsensitive(headers, "access-control-allow-origin");
+            stripHeaderCaseInsensitive(headers, "access-control-allow-headers");
+            stripHeaderCaseInsensitive(headers, "access-control-allow-methods");
+            stripHeaderCaseInsensitive(headers, "access-control-expose-headers");
+            stripHeaderCaseInsensitive(headers, "cross-origin-resource-policy");
+
+            headers["Access-Control-Allow-Origin"] = ["*"];
+            headers["Access-Control-Allow-Methods"] = ["GET, HEAD, OPTIONS"];
+            headers["Access-Control-Allow-Headers"] = ["*"];
+            headers["Access-Control-Expose-Headers"] = [
+                "Content-Length, Content-Range, Accept-Ranges",
+            ];
+            headers["Cross-Origin-Resource-Policy"] = ["cross-origin"];
+        } else if (activeCustomScheme) {
+            headers["Content-Security-Policy"] = [
+                `default-src ${activeCustomScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
+                    `script-src ${activeCustomScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
+                    `style-src ${activeCustomScheme}://* 'self' 'unsafe-inline' http: https: data: blob:; ` +
+                    `font-src ${activeCustomScheme}://* 'self' http: https: data: blob:; ` +
+                    `connect-src ${activeCustomScheme}://* 'self' http: https: ws: wss: data: blob:; ` +
+                    `img-src ${activeCustomScheme}://* 'self' http: https: data: blob:; ` +
+                    `media-src ${activeCustomScheme}://* 'self' http: https: data: blob:; ` +
+                    `worker-src ${activeCustomScheme}://* 'self' http: https: data: blob:; ` +
+                    `frame-src ${activeCustomScheme}://* 'self' http: https: data: blob:;`,
+            ];
+        }
+
+        callback({ responseHeaders: headers });
+    });
+}
 
 function getProcessParentPid(pid: number): number {
     try {
@@ -571,13 +878,28 @@ export class ElectronCapacitorApp {
             this.AppMenuBarMenuTemplate = appMenuBarMenuTemplate;
         }
 
+        const webAppDir = join(app.getAppPath(), "app");
+        if (!existsSync(join(webAppDir, "index.html"))) {
+            console.error(
+                `[Paradise] Missing web bundle at ${join(webAppDir, "index.html")}`
+            );
+        }
+
         this.loadWebApp = electronServe({
-            directory: join(app.getAppPath(), "app"),
+            directory: webAppDir,
             scheme: this.customScheme,
         });
     }
 
     private async loadMainWindow(thisRef: any) {
+        try {
+            await session.defaultSession.clearCache();
+            await session.defaultSession.clearStorageData({
+                storages: ["serviceworkers", "cachestorage"],
+            });
+        } catch (err) {
+            console.warn("[Paradise] Failed to clear stale web cache:", err);
+        }
         await thisRef.loadWebApp(thisRef.MainWindow);
     }
 
@@ -675,6 +997,13 @@ export class ElectronCapacitorApp {
             "preload.js"
         );
 
+        setupCapacitorElectronPlugins();
+        setupDisplayMedia();
+        setupParadiseProxyIpc();
+        if (!webRequestInstalled) {
+            installStreamCorsWebRequest();
+        }
+
         this.MainWindow = new BrowserWindow({
             icon,
             show: false,
@@ -688,6 +1017,7 @@ export class ElectronCapacitorApp {
             webPreferences: {
                 nodeIntegration: true,
                 contextIsolation: true,
+                sandbox: false,
                 preload: preloadPath,
             },
         });
@@ -742,7 +1072,6 @@ export class ElectronCapacitorApp {
                 this.MainWindow.webContents.toggleDevTools();
             }
         });
-
 
         this.mainWindowState.manage(this.MainWindow);
 
@@ -824,6 +1153,38 @@ export class ElectronCapacitorApp {
             Menu.setApplicationMenu(null);
         }
 
+        this.MainWindow.webContents.setWindowOpenHandler((details) => {
+            if (details.frameName === "paradise-cast-stage") {
+                return {
+                    action: "allow",
+                    overrideBrowserWindowOptions: {
+                        width: 1280,
+                        height: 720,
+                        frame: true,
+                        titleBarStyle: "default",
+                        autoHideMenuBar: true,
+                        backgroundColor: "#000000",
+                        title: "Paradise Cast",
+                    },
+                };
+            }
+            if (!details.url.includes(this.customScheme)) {
+                return { action: "deny" };
+            } else {
+                return { action: "allow" };
+            }
+        });
+
+        this.MainWindow.webContents.on("will-navigate", (event, _newURL) => {
+            if (
+                !this.MainWindow.webContents
+                    .getURL()
+                    .includes(this.customScheme)
+            ) {
+                event.preventDefault();
+            }
+        });
+
         if (this.CapacitorFileConfig.electron?.splashScreenEnabled) {
             this.SplashScreen = new CapacitorSplashScreen({
                 imageFilePath: join(
@@ -839,26 +1200,6 @@ export class ElectronCapacitorApp {
         } else {
             this.loadMainWindow(this);
         }
-
-        this.MainWindow.webContents.setWindowOpenHandler((details) => {
-            if (!details.url.includes(this.customScheme)) {
-                return { action: "deny" };
-            } else {
-                return { action: "allow" };
-            }
-        });
-        this.MainWindow.webContents.on("will-navigate", (event, _newURL) => {
-            if (
-                !this.MainWindow.webContents
-                    .getURL()
-                    .includes(this.customScheme)
-            ) {
-                event.preventDefault();
-            }
-        });
-
-        setupCapacitorElectronPlugins();
-        setupDisplayMedia();
 
         this.MainWindow.webContents.on("dom-ready", () => {
             if (this.CapacitorFileConfig.electron?.splashScreenEnabled) {
@@ -881,23 +1222,6 @@ export class ElectronCapacitorApp {
 }
 
 export function setupContentSecurityPolicy(customScheme: string): void {
-    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-        callback({
-            responseHeaders: {
-                ...details.responseHeaders,
-                "Content-Security-Policy": [
-                    `default-src ${customScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
-                        `script-src ${customScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
-                        `style-src ${customScheme}://* 'self' 'unsafe-inline' http: https: data: blob:; ` +
-                        `font-src ${customScheme}://* 'self' http: https: data: blob:; ` +
-                        `connect-src ${customScheme}://* 'self' http: https: ws: wss: data: blob:; ` +
-                        `img-src ${customScheme}://* 'self' http: https: data: blob:; ` +
-                        `media-src ${customScheme}://* 'self' http: https: data: blob:; ` +
-                        `worker-src ${customScheme}://* 'self' http: https: data: blob:; ` +
-                        `frame-src ${customScheme}://* 'self' http: https: data: blob:;`,
-                ],
-            },
-        });
-    });
+    installStreamCorsWebRequest(customScheme);
 }
 

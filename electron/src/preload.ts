@@ -1,12 +1,9 @@
-require('./rt/electron-rt');
+require("./rt/electron-rt");
 //////////////////////////////
 // User Defined Preload scripts below
-console.log('User Preload!');
-
+console.log("User Preload!");
 
 import { contextBridge, ipcRenderer } from "electron";
-
-
 
 contextBridge.exposeInMainWorld("paradiseAudio", {
     isSupported: () => ipcRenderer.invoke("paradise:audio-isolation-supported"),
@@ -15,8 +12,6 @@ contextBridge.exposeInMainWorld("paradiseAudio", {
     setTarget: (target: any) =>
         ipcRenderer.invoke("paradise:set-audio-target", target),
 });
-
-
 
 contextBridge.exposeInMainWorld("paradiseTray", {
     setMenu: (items: any[]) =>
@@ -31,7 +26,6 @@ contextBridge.exposeInMainWorld("paradiseTray", {
     },
 });
 
-
 contextBridge.exposeInMainWorld("paradiseShortcuts", {
     setBindings: (bindings: any[]) =>
         ipcRenderer.invoke("paradise:set-global-shortcuts", bindings),
@@ -42,9 +36,6 @@ contextBridge.exposeInMainWorld("paradiseShortcuts", {
             ipcRenderer.removeListener("paradise:shortcut-triggered", listener);
     },
 });
-
-
-
 
 contextBridge.exposeInMainWorld("paradiseWindow", {
     platform: process.platform,
@@ -61,3 +52,19 @@ contextBridge.exposeInMainWorld("paradiseWindow", {
             ipcRenderer.removeListener("paradise:window-maximized", listener);
     },
 });
+
+contextBridge.exposeInMainWorld("paradiseProxy", {
+    isSupported: () => Promise.resolve(true),
+    request: (opts: any) => ipcRenderer.invoke("paradise-proxy:request", opts),
+    prepareStream: (opts: any) =>
+        ipcRenderer.invoke("paradise-proxy:prepare-stream", opts),
+    clearStream: (urlOrHost?: string) =>
+        ipcRenderer.invoke("paradise-proxy:clear-stream", urlOrHost),
+    openAuthWindow: (opts: any) =>
+        ipcRenderer.invoke("paradise-proxy:open-auth-window", opts),
+    closeAuthWindow: () =>
+        ipcRenderer.invoke("paradise-proxy:close-auth-window"),
+    openExternal: (url: string) =>
+        ipcRenderer.invoke("paradise-proxy:open-external", url),
+});
+
