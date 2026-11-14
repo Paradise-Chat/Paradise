@@ -16,6 +16,7 @@ we've made interop with the WASM bindings.
 (ns paradise.ui.container.timeline.base
   (:require [re-frame.core :as re-frame]
             [taoensso.timbre :as log]
+            [clojure.core.async :refer [timeout alts!]]
             [clojure.string :as str]
             [re-frame.db :as db]
             [cljs-workers.core :as main]
@@ -40,8 +41,6 @@ we've made interop with the WASM bindings.
             [paradise.ui.input.base :refer [message-input]]))
 
 #+end_src
-
-
 
 
 **** Reframe event and subscriptions
@@ -140,8 +139,8 @@ we've made interop with the WASM bindings.
            (let [req-ch     (main/do-with-pool! @state/!engine-pool
                                                 {:handler   :paginate-timeline
                                                  :arguments {:room-id room-id :direction :back :amount 25}})
-                 timeout-ch (cljs.core.async/timeout 15000)
-                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+                 timeout-ch (timeout 15000)
+                 [_ port]   (alts! [req-ch timeout-ch])]
              (when (= port timeout-ch)
                (log/warn "Worker Back Paginate timed out for" room-id))
              (re-frame/dispatch [:sdk/pagination-complete room-id])))
@@ -159,8 +158,8 @@ we've made interop with the WASM bindings.
            (let [req-ch     (main/do-with-pool! @state/!engine-pool
                                                 {:handler   :paginate-timeline
                                                  :arguments {:room-id room-id :direction :forward :amount 25}})
-                 timeout-ch (cljs.core.async/timeout 15000)
-                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+                 timeout-ch (timeout 15000)
+                 [_ port]   (alts! [req-ch timeout-ch])]
              (when (= port timeout-ch)
                (log/warn "Worker Forward Paginate timed out for" room-id))
              (re-frame/dispatch [:sdk/forward-pagination-complete room-id])))
