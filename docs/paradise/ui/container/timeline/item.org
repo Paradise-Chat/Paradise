@@ -446,6 +446,62 @@ read receipts. This prevents any sort of spamming to the home server.
 #+end_src
 
 
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
+(defn ^:ui gallery-cell [entry all-items]
+  [:div.gallery-grid-cell
+   {:style (:cell-style entry)}
+   [:div.message-image-placeholder
+    [:div.spinner]]
+   (if (or (:display-uri entry) (:display-map entry))
+     [media
+      {:uri        (:display-uri entry)
+       :source-map (:display-map entry)
+       :tag-type   "img"
+       :alt        (or (:caption entry) (:filename entry) "media")
+       :mime-type  (:display-mime entry)
+       :room-id    (:room_id entry)
+       :event-id   (:event-id entry)
+       :width      (:crop-size entry)
+       :height     (:crop-size entry)
+       :method     (:crop-method entry)
+       :on-click   (fn [e]
+                     (.stopPropagation e)
+                     (let [live-blob-url (.-src (.-currentTarget e))]
+                       (re-frame/dispatch
+                        [:ui/open-modal :image-lightbox
+                         {:url            live-blob-url
+                          :index          (:idx entry)
+                          :items          all-items
+                          :room-id        (:room_id entry)
+                          :backdrop-props {:class "lightbox-backdrop"}
+                          :window-props   {:style {:background "transparent"
+                                                   :box-shadow "none"}}}])))}]
+     [:div.gallery-video-fallback])
+   (when (:video? entry)
+     [:div.gallery-video-badge
+      [:span.gallery-play-pill "Play"]])
+   (when (pos? (:overflow-count entry))
+     [:div.gallery-overflow-mask
+      (str "+" (:overflow-count entry))])])
+
+(defn ^:ui gallery-message [_event content]
+  (let [all-items (:items content)]
+    [:div.gallery-attachment-container
+     [:div.media-gallery-grid
+      {:style (:grid-style content)}
+      (for [entry (:visible-items content)]
+        ^{:key (:internal-id entry)}
+        [gallery-cell entry all-items])]
+     (when (seq (:caption content))
+       [:div.media-caption
+        [message-text content]])]))
+#+end_src
+
+
+
+
+
 Could be a bit more generic given the insight gleamed
 working on deferred rendered components.
 
@@ -848,12 +904,12 @@ library itself some context of deferred components...
        "Image"   [image-message event content-map]
        "Video"   [video-message event content-map]
        "Sticker" [sticker-message event content-map]
+       "Gallery" [gallery-message event content-map]
        "File"    [file-message event content-map tr]
        [:span.body (tr [:container.timeline.status/unsupported] [msg-type-tag])])
      (when is-edited?
        [:span.timeline-edited-label (tr [:container.timeline.status/edited])])
      [message-link-preview msg-type-tag raw-body]]))
-
 
 (defn ^:ui timeline-body [item content active-room is-editing-this?]
   (let [{:keys [tag inner in-reply-to]} content
