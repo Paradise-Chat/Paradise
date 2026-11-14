@@ -724,93 +724,246 @@ also likely not be selectable (as the fallback will be literal text).
 
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
+(defonce !swipe-drag-data
+  (atom {:start-x         nil
+         :start-y         nil
+         :owner           nil
+         :action          nil
+         :fg-node         nil
+         :bg-node         nil
+         :reply-node      nil
+         :edit-node       nil
+         :sidebar-start-x nil
+         :sidebar-start-y nil
+         :sidebar-dx      0
+         :sidebar-target  nil}))
 
-(defonce !swipe-drag-data (atom {:start-x nil :action nil :fg-node nil :bg-node nil :reply-node nil :edit-node nil}))
+(defmulti handle-swipe!
+  (fn [kind _phase _ctx] kind))
 
+(defmethod handle-swipe! :message
+  [_ phase {:keys [e can-edit? edit-threshold reply-threshold on-action]}]
+  (case phase
+    :down
+    (when (and (or (nil? (.-button e)) (zero? (.-button e)))
+               (not (some-> (.-target e) (.closest "input, textarea, [contenteditable]"))))
+      (swap! !swipe-drag-data assoc
+             :start-x    (.-clientX e)
+             :start-y    (.-clientY e)
+             :owner      nil
+             :action     nil
+             :fg-node    (.-currentTarget e)
+             :bg-node    nil
+             :reply-node nil
+             :edit-node  nil))
+
+    :move
+    (let [{:keys [start-x start-y owner fg-node reply-node edit-node]} @!swipe-drag-data]
+      (when (and start-x fg-node (or (nil? owner) (= owner :message)))
+        (let [dx        (- (.-clientX e) start-x)
+              dy        (- (.-clientY e) (or start-y 0))
+              pull-dist (- dx)
+              claimed?  (or (= owner :message)
+                            (and (> pull-dist 6)
+                                 (> pull-dist (js/Math.abs dy))))]
+          (when claimed?
+            (let [first-claim? (nil? owner)
+                  wrapper      (when first-claim? (.-parentNode fg-node))
+                  bg           (if first-claim?
+                                 (when wrapper (.querySelector wrapper ".swipe-action-bg"))
+                                 (:bg-node @!swipe-drag-data))
+                  reply-el     (if first-claim?
+                                 (when bg (.querySelector bg ".reply-action"))
+                                 reply-node)
+                  edit-el      (if first-claim?
+                                 (when bg (.querySelector bg ".edit-action"))
+                                 edit-node)
+                  bounded-dx   (max 0 (min pull-dist 180))
+                  new-action   (cond
+                                 (and can-edit? (> bounded-dx edit-threshold)) :edit
+                                 (> bounded-dx reply-threshold)                :reply
+                                 :else                                         nil)]
+              (when first-claim?
+                (try
+                  (.setPointerCapture fg-node (.-pointerId e))
+                  (catch :default _ nil))
+                (set! (.-transition (.-style fg-node)) "none")
+                (set! (.-userSelect (.-style fg-node)) "none")
+                (when bg (set! (.-opacity (.-style bg)) "1")))
+              (swap! !swipe-drag-data assoc
+                     :owner      :message
+                     :action     new-action
+                     :bg-node    bg
+                     :reply-node reply-el
+                     :edit-node  edit-el)
+              (set! (.-transform (.-style fg-node)) (str "translateX(-" bounded-dx "px)"))
+              (when reply-el
+                (set! (.-display (.-style reply-el)) (if (= new-action :reply) "flex" "none")))
+              (when edit-el
+                (set! (.-display (.-style edit-el)) (if (= new-action :edit) "flex" "none"))))))))
+
+    :up
+    (let [{:keys [start-x owner action fg-node bg-node]} @!swipe-drag-data
+          cancelled? (= (.-type e) "pointercancel")]
+      (when start-x
+        (when (= owner :message)
+          (try
+            (.releasePointerCapture fg-node (.-pointerId e))
+            (catch :default _ nil))
+          (when (and (not cancelled?) action (fn? on-action))
+            (on-action action))
+          (when fg-node
+            (set! (.-transform (.-style fg-node)) "translateX(0px)")
+            (set! (.-transition (.-style fg-node)) "transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)")
+            (set! (.-userSelect (.-style fg-node)) "auto"))
+          (when bg-node
+            (set! (.-opacity (.-style bg-node)) "0")))
+        (swap! !swipe-drag-data assoc
+               :start-x    nil
+               :start-y    nil
+               :owner      (if (= owner :message) :consumed owner)
+               :action     nil
+               :fg-node    nil
+               :bg-node    nil
+               :reply-node nil
+               :edit-node  nil)))))
+
+(defmethod handle-swipe! :sidebar
+  [_ phase {:keys [e sidebar-open? on-toggle]}]
+  (case phase
+    :down
+    (when (or (nil? (.-button e)) (zero? (.-button e)))
+      (swap! !swipe-drag-data assoc
+             :owner           nil
+             :sidebar-start-x (.-clientX e)
+             :sidebar-start-y (.-clientY e)
+             :sidebar-dx      0
+             :sidebar-target  (.-currentTarget e)))
+
+    :move
+    (let [{:keys [owner sidebar-start-x sidebar-start-y sidebar-target]} @!swipe-drag-data]
+      (when (and sidebar-start-x (or (nil? owner) (= owner :sidebar)))
+        (let [dx       (- (.-clientX e) sidebar-start-x)
+              dy       (- (.-clientY e) (or sidebar-start-y 0))
+              claimed? (or (= owner :sidebar)
+                           (and (> (js/Math.abs dx) (* 1.5 (js/Math.abs dy)))
+                                (if sidebar-open?
+                                  (< dx -10)
+                                  (> dx 10))))]
+          (when claimed?
+            (when (nil? owner)
+              (when sidebar-target
+                (try
+                  (.setPointerCapture sidebar-target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner :sidebar))
+            (swap! !swipe-drag-data assoc :sidebar-dx dx)))))
+
+    :up
+    (let [{:keys [owner sidebar-start-x sidebar-dx sidebar-target]} @!swipe-drag-data
+          cancelled? (= (.-type e) "pointercancel")]
+      (when sidebar-start-x
+        (when (= owner :sidebar)
+          (when sidebar-target
+            (try
+              (.releasePointerCapture sidebar-target (.-pointerId e))
+              (catch :default _ nil)))
+          (when (and (not cancelled?) (fn? on-toggle))
+            (cond
+              (and (not sidebar-open?) (> sidebar-dx 60))
+              (on-toggle true)
+
+              (and sidebar-open? (< sidebar-dx -60))
+              (on-toggle false)))))
+      (swap! !swipe-drag-data assoc
+             :owner           nil
+             :sidebar-start-x nil
+             :sidebar-start-y nil
+             :sidebar-dx      0
+             :sidebar-target  nil))))
+
+(defmethod handle-swipe! :default
+  [kind phase {:keys [e !drag-state on-start on-move on-end can-claim?]}]
+  (case phase
+    :down
+    (when (or (nil? (.-button e)) (zero? (.-button e)))
+      (when-not (:fg-node @!swipe-drag-data)
+        (swap! !swipe-drag-data assoc :owner nil))
+      (let [x (.-clientX e)
+            y (.-clientY e)]
+        (when !drag-state
+          (reset! !drag-state {:start-x x :start-y y :dx 0 :target (.-currentTarget e)}))
+        (when (fn? on-start) (on-start x))))
+
+    :move
+    (let [{:keys [start-x start-y target]} (when !drag-state @!drag-state)
+          owner                            (:owner @!swipe-drag-data)]
+      (cond
+        (and owner (not= owner kind))
+        (when !drag-state
+          (reset! !drag-state {:start-x nil :start-y nil :dx 0 :target nil}))
+
+        start-x
+        (let [dx       (- (.-clientX e) start-x)
+              dy       (- (.-clientY e) (or start-y 0))
+              claimed? (or (= owner kind)
+                           (if (fn? can-claim?)
+                             (can-claim? dx dy)
+                             (and (> (js/Math.abs dx) 6)
+                                  (> (js/Math.abs dx) (js/Math.abs dy)))))]
+          (when claimed?
+            (when (nil? owner)
+              (when target
+                (try
+                  (.setPointerCapture target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner kind))
+            (when !drag-state
+              (swap! !drag-state assoc :dx dx))
+            (when (fn? on-move) (on-move dx))))))
+
+    :up
+    (let [{:keys [start-x dx target]} (when !drag-state @!drag-state)
+          owner                       (:owner @!swipe-drag-data)
+          cancelled?                  (= (.-type e) "pointercancel")]
+      (when start-x
+        (when (= owner kind)
+          (when target
+            (try
+              (.releasePointerCapture target (.-pointerId e))
+              (catch :default _ nil)))
+          (when (and (not cancelled?) (fn? on-end))
+            (on-end dx))))
+      (when !drag-state
+        (reset! !drag-state {:start-x nil :start-y nil :dx 0 :target nil}))
+      (swap! !swipe-drag-data assoc :owner nil))))
 
 (defn make-swipe-handlers
-  "Abstracts pointer event tracking for horizontal swipes.
-   Safe for main-thread Reagent components.
-   !drag-state should be an atom containing {:start-x nil :dx 0}."
-  [!drag-state {:keys [on-start on-move on-end]}]
-  (let [handle-ptr-down
-        (fn [e]
-          (when (= (.-button e) 0)
-            (.setPointerCapture (.-target e) (.-pointerId e))
-            (let [x (.-clientX e)]
-              (reset! !drag-state {:start-x x :dx 0})
-              (when (fn? on-start) (on-start x)))))
+  [id-or-atom opts]
+  (let [id  (if (keyword? id-or-atom)
+              id-or-atom
+              (or (:id opts) :generic))
+        ctx (if (keyword? id-or-atom)
+              opts
+              (assoc opts :!drag-state id-or-atom))]
+    {:on-pointer-down   #(handle-swipe! id :down (assoc ctx :e %))
+     :on-pointer-move   #(handle-swipe! id :move (assoc ctx :e %))
+     :on-pointer-up     #(handle-swipe! id :up (assoc ctx :e %))
+     :on-pointer-cancel #(handle-swipe! id :up (assoc ctx :e %))}))
 
-        handle-ptr-move
-        (fn [e]
-          (let [{:keys [start-x]} @!drag-state]
-            (when start-x
-              (let [dx (- (.-clientX e) start-x)]
-                (swap! !drag-state assoc :dx dx)
-                (when (fn? on-move) (on-move dx))))))
-
-        handle-ptr-up
-        (fn [e]
-          (let [{:keys [start-x dx]} @!drag-state]
-            (when start-x
-              (.releasePointerCapture (.-target e) (.-pointerId e))
-              (when (fn? on-end) (on-end dx))
-              (reset! !drag-state {:start-x nil :dx 0}))))]
-
-    {:on-pointer-down   handle-ptr-down
-     :on-pointer-move   handle-ptr-move
-     :on-pointer-up     handle-ptr-up
-     :on-pointer-cancel handle-ptr-up}))
 
 (defn handle-swipe-down! [e]
-  (when (= (.-button e) 0)
-    (let [fg         (.-currentTarget e)
-          wrapper    (.-parentNode fg)
-          bg         (.querySelector wrapper ".swipe-action-bg")
-          reply-el   (.querySelector bg ".reply-action")
-          edit-el    (.querySelector bg ".edit-action")]
-      (.setPointerCapture fg (.-pointerId e))
-      (set! (.-transition (.-style fg)) "none")
-      (set! (.-userSelect (.-style fg)) "none")
-      (when bg (set! (.-opacity (.-style bg)) "1"))
-      (reset! !swipe-drag-data {:start-x (.-clientX e)
-                                :action nil
-                                :fg-node fg
-                                :bg-node bg
-                                :reply-node reply-el
-                                :edit-node edit-el}))))
+  (handle-swipe! :message :down {:e e}))
 
 (defn handle-swipe-move! [e can-edit? edit-threshold reply-threshold]
-  (let [{:keys [start-x fg-node bg-node reply-node edit-node]} @!swipe-drag-data]
-    (when start-x
-      (let [dx         (- (.-clientX e) start-x)
-            pull-dist  (- dx)
-            bounded-dx (max 0 (min pull-dist 180))
-            new-action (cond
-                         (and can-edit? (> bounded-dx edit-threshold)) :edit
-                         (> bounded-dx reply-threshold)                :reply
-                         :else                                         nil)]
-        (swap! !swipe-drag-data assoc :action new-action)
-        (when fg-node
-          (set! (.-transform (.-style fg-node)) (str "translateX(-" bounded-dx "px)")))
-        (when reply-node
-          (set! (.-display (.-style reply-node)) (if (= new-action :reply) "flex" "none")))
-        (when edit-node
-          (set! (.-display (.-style edit-node)) (if (= new-action :edit) "flex" "none")))))))
+  (handle-swipe! :message :move {:e               e
+                                 :can-edit?       can-edit?
+                                 :edit-threshold  edit-threshold
+                                 :reply-threshold reply-threshold}))
 
 (defn handle-swipe-up! [e on-action]
-  (let [{:keys [start-x action fg-node bg-node]} @!swipe-drag-data]
-    (when start-x
-      (.releasePointerCapture (.-target e) (.-pointerId e))
-      (when (and action (fn? on-action))
-        (on-action action))
-      (reset! !swipe-drag-data {:start-x nil :action nil :fg-node nil :bg-node nil :reply-node nil :edit-node nil})
-      (when fg-node
-        (set! (.-transform (.-style fg-node)) "translateX(0px)")
-        (set! (.-transition (.-style fg-node)) "transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)")
-        (set! (.-userSelect (.-style fg-node)) "auto"))
-      (when bg-node
-        (set! (.-opacity (.-style bg-node)) "0")))))
+  (handle-swipe! :message :up {:e e :on-action on-action}))
+
 #+end_src
 
 
