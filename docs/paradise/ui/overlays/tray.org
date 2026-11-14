@@ -21,7 +21,8 @@ just that.
 
 **** Imports
 
-Should be kept simple as this houses a multi-method.
+Should be kept simple as this houses our tray multi-methods and IPC bridge,
+matching the ~key_handler~ design.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/tray.cljs
 (ns paradise.ui.overlays.tray
