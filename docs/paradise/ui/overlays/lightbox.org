@@ -28,94 +28,329 @@ So we define the component contents and then register in the modal multi-method.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/lightbox.cljs
-(defn ^:ui image-lightbox-content [{:keys [url]}]
-  (r/with-let [!state           (r/atom {:scale 1 :last-scale 1 :x 0 :y 0 :last-x 0 :last-y 0 :start-dist 0})
+(defn- default-transform-state [idx]
+  {:index      (or idx 0)
+   :scale      1
+   :last-scale 1
+   :x          0
+   :y          0
+   :last-x     0
+   :last-y     0
+   :down-x     0
+   :down-y     0
+   :moved?     false
+   :start-dist 0})
+
+
+(defn ^:ui image-lightbox-content [{:keys [url items index room-id]}]
+  (r/with-let [gallery-items    (vec (or items []))
+               total            (count gallery-items)
+               multi?           (> total 1)
+               !state           (r/atom (default-transform-state index))
+               !drag-state      (atom {:start-x nil :dx 0})
                !active-pointers (atom {})
+               !stage-el        (atom nil)
                tr               (re-frame/subscribe [:i18n/tr])
-               reset-zoom-fn    #(reset! !state {:scale 1 :last-scale 1 :x 0 :y 0 :last-x 0 :last-y 0 :start-dist 0})
+               close-fn         #(re-frame/dispatch [:ui/close-modal])
+               reset-zoom-fn    #(swap! !state merge
+                                        {:scale      1
+                                         :last-scale 1
+                                         :x          0
+                                         :y          0
+                                         :last-x     0
+                                         :last-y     0
+                                         :start-dist 0})
+               step-to!         (fn [next-idx]
+                                  (when (pos? total)
+                                    (reset! !active-pointers {})
+                                    (reset! !state (default-transform-state (mod next-idx total)))))
+               prev-fn!         #(when multi? (step-to! (dec (:index @!state))))
+               next-fn!         #(when multi? (step-to! (inc (:index @!state))))
                get-dist         (fn [p1 p2]
                                   (let [dx (- (.-clientX p1) (.-clientX p2))
                                         dy (- (.-clientY p1) (.-clientY p2))]
-                                    (js/Math.sqrt (+ (* dx dx) (* dy dy)))))]
+                                    (js/Math.sqrt (+ (* dx dx) (* dy dy)))))
+               swipe-handlers   (make-swipe-handlers
+                                 !drag-state
+                                 {:id         :lightbox
+                                  :can-claim? (fn [dx dy]
+                                                (and multi?
+                                                     (<= (:scale @!state) 1)
+                                                     (<= (count @!active-pointers) 1)
+                                                     (> (js/Math.abs dx) 8)
+                                                     (> (js/Math.abs dx) (* 1.5 (js/Math.abs dy)))))
+                                  :on-move    (fn [dx]
+                                                (swap! !state assoc :x dx :moved? true))
+                                  :on-end     (fn [dx]
+                                                (cond
+                                                  (> dx 64)
+                                                  (do
+                                                    (prev-fn!)
+                                                    (swap! !state assoc :moved? true))
 
-    (let [{:keys [scale x y]} @!state
-          active-count (count @!active-pointers)
-          close-fn     #(re-frame/dispatch [:ui/close-modal])]
+                                                  (< dx -64)
+                                                  (do
+                                                    (next-fn!)
+                                                    (swap! !state assoc :moved? true))
 
+                                                  :else
+                                                  (reset-zoom-fn)))})
+               key-listener     (fn [e]
+                                  (case (.-key e)
+                                    "ArrowLeft"  (do (.preventDefault e) (prev-fn!))
+                                    "ArrowRight" (do (.preventDefault e) (next-fn!))
+                                    "Escape"     (do (.preventDefault e) (close-fn))
+                                    nil))
+               _                (.addEventListener js/window "keydown" key-listener)]
+    (let [{:keys [scale x y moved?] active-idx :index} @!state
+          active-count     (count @!active-pointers)
+          current-item     (when (pos? total)
+                             (nth gallery-items (mod active-idx total)))
+          video?           (or (:video? current-item)
+                               (= (:media-tag current-item) "Video"))
+          item-room-id     (or (:room-id current-item)
+                               (:room_id current-item)
+                               room-id)
+          item-mime        (or (get-in current-item [:info :mimetype])
+                               (:display-mime current-item))
+          item-name        (or (:filename current-item)
+                               (:caption current-item)
+                               (if video? "video" "image"))
+          stage-class      (cond-> "lightbox-media-stage"
+                             video?              (str " is-video")
+                             (> scale 1)         (str " is-zoomed")
+                             (pos? active-count) (str " is-dragging"))
+          image-class      (if multi? "lightbox-image is-multi" "lightbox-image")
+          resolve-live-url (fn []
+                             (or (when-let [stage @!stage-el]
+                                   (when-let [el (.querySelector stage "img, video")]
+                                     (not-empty (.-src el))))
+                                 url))]
       [:div.lightbox-interaction-layer
-       {:on-click (fn [e]
-              (when (<= scale 1)
-                (close-fn)))
+       {:on-click (fn [_]
+                    (when (and (<= scale 1) (not moved?))
+                      (close-fn)))
         :on-wheel (fn [e]
-                    (let [zoom-factor (if (pos? (.-deltaY e)) 0.9 1.1)
-                          new-scale   (max 1 (min 5 (* scale zoom-factor)))]
-                      (if (<= new-scale 1)
-                        (reset-zoom-fn)
-                        (swap! !state assoc :scale new-scale :last-scale new-scale))))
+                    (when-not video?
+                      (let [zoom-factor (if (pos? (.-deltaY e)) 0.9 1.1)
+                            new-scale   (max 1 (min 5 (* scale zoom-factor)))]
+                        (if (<= new-scale 1)
+                          (reset-zoom-fn)
+                          (swap! !state assoc :scale new-scale :last-scale new-scale)))))
         :on-pointer-down (fn [e]
-                           (.setPointerCapture (.-target e) (.-pointerId e))
-                           (swap! !active-pointers assoc (.-pointerId e) e)
-                           (let [ps (vals @!active-pointers)]
-                             (cond
-                               (= (count ps) 2) (swap! !state assoc :start-dist (get-dist (first ps) (second ps)) :last-scale scale)
-                               (= (count ps) 1) (swap! !state assoc :last-x (.-clientX e) :last-y (.-clientY e)))))
-        :on-pointer-move (fn [e]
-                           (when (contains? @!active-pointers (.-pointerId e))
+                           (when-not video?
+                             ((:on-pointer-down swipe-handlers) e)
                              (swap! !active-pointers assoc (.-pointerId e) e)
                              (let [ps (vals @!active-pointers)]
                                (cond
                                  (= (count ps) 2)
-                                 (let [new-dist (get-dist (first ps) (second ps))
-                                       {:keys [start-dist last-scale]} @!state
-                                       new-scale (max 1 (min 5 (* last-scale (/ new-dist start-dist))))]
-                                   (swap! !state assoc :scale new-scale))
-                                 (and (= (count ps) 1) (> scale 1))
-                                 (swap! !state (fn [{:keys [x y last-x last-y] :as curr}]
-                                                 (let [dx (- (.-clientX e) last-x)
-                                                       dy (- (.-clientY e) last-y)]
-                                                   (assoc curr
-                                                          :x (+ x dx)
-                                                          :y (+ y dy)
-                                                          :last-x (.-clientX e)
-                                                          :last-y (.-clientY e)))))))))
+                                 (do
+                                   (reset! !drag-state {:start-x nil :dx 0})
+                                   (swap! !swipe-drag-data assoc :owner :pinch)
+                                   (.setPointerCapture (.-currentTarget e) (.-pointerId e))
+                                   (swap! !state assoc
+                                          :moved?     true
+                                          :x          0
+                                          :start-dist (get-dist (first ps) (second ps))
+                                          :last-scale scale))
+
+                                 (= (count ps) 1)
+                                 (swap! !state assoc
+                                        :moved? false
+                                        :down-x (.-clientX e)
+                                        :down-y (.-clientY e)
+                                        :last-x (.-clientX e)
+                                        :last-y (.-clientY e))))))
+        :on-pointer-move (fn [e]
+                           (when-not video?
+                             ((:on-pointer-move swipe-handlers) e)
+                             (when (and (not= (:owner @!swipe-drag-data) :lightbox)
+                                        (contains? @!active-pointers (.-pointerId e)))
+                               (swap! !active-pointers assoc (.-pointerId e) e)
+                               (let [ps (vals @!active-pointers)]
+                                 (cond
+                                   (= (count ps) 2)
+                                   (let [new-dist  (get-dist (first ps) (second ps))
+                                         {:keys [start-dist last-scale]} @!state
+                                         new-scale (max 1 (min 5 (* last-scale (/ new-dist (max 1 start-dist)))))]
+                                     (swap! !state assoc :scale new-scale :moved? true))
+
+                                   (= (count ps) 1)
+                                   (let [{:keys [down-x down-y]} @!state
+                                         total-dx (- (.-clientX e) down-x)
+                                         total-dy (- (.-clientY e) down-y)
+                                         dragged? (> (js/Math.hypot total-dx total-dy) 6)]
+                                     (if (> scale 1)
+                                       (swap! !state
+                                              (fn [{:keys [x y last-x last-y] :as curr}]
+                                                (assoc curr
+                                                       :moved? (or (:moved? curr) dragged?)
+                                                       :x      (+ x (- (.-clientX e) last-x))
+                                                       :y      (+ y (- (.-clientY e) last-y))
+                                                       :last-x (.-clientX e)
+                                                       :last-y (.-clientY e))))
+                                       (when dragged?
+                                         (swap! !state assoc :moved? true)))))))))
         :on-pointer-up (fn [e]
-                         (.releasePointerCapture (.-target e) (.-pointerId e))
-                         (swap! !active-pointers dissoc (.-pointerId e))
-                         (let [ps (vals @!active-pointers)
-                               curr-scale (:scale @!state)]
-                           (cond
-                             (<= curr-scale 1) (reset-zoom-fn)
-                             (= (count ps) 1)  (let [p (first ps)]
-                                                 (swap! !state assoc :last-scale curr-scale :last-x (.-clientX p) :last-y (.-clientY p)))
-                             (zero? (count ps)) (swap! !state assoc :last-scale curr-scale))))
+                         (let [was-swiping? (= (:owner @!swipe-drag-data) :lightbox)]
+                           ((:on-pointer-up swipe-handlers) e)
+                           (try
+                             (.releasePointerCapture (.-currentTarget e) (.-pointerId e))
+                             (catch :default _ nil))
+                           (swap! !active-pointers dissoc (.-pointerId e))
+                           (when-not was-swiping?
+                             (let [ps         (vals @!active-pointers)
+                                   curr-scale (:scale @!state)]
+                               (cond
+                                 (<= curr-scale 1)
+                                 (reset-zoom-fn)
+
+                                 (= (count ps) 1)
+                                 (let [p (first ps)]
+                                   (swap! !state assoc
+                                          :last-scale curr-scale
+                                          :last-x     (.-clientX p)
+                                          :last-y     (.-clientY p)))
+
+                                 (zero? (count ps))
+                                 (swap! !state assoc :last-scale curr-scale))))))
         :on-pointer-cancel (fn [e]
-                             (.releasePointerCapture (.-target e) (.-pointerId e))
+                             ((:on-pointer-cancel swipe-handlers) e)
+                             (try
+                               (.releasePointerCapture (.-currentTarget e) (.-pointerId e))
+                               (catch :default _ nil))
                              (reset! !active-pointers {}))}
 
        [:div.lightbox-close-btn
-        {:on-click close-fn :title (@tr [:lightbox/close])
-         }
+        {:on-pointer-down #(.stopPropagation %)
+         :on-click        (fn [e]
+                            (.stopPropagation e)
+                            (close-fn))
+         :title           (@tr [:lightbox/close])}
         [icons/exit]]
 
-       [:img.lightbox-image
-        {:src url
-         :on-click (fn [e] (.stopPropagation e))
-         :on-double-click (fn [e] (.stopPropagation e) (reset-zoom-fn))
-         :style {:transform (str "translate(" x "px, " y "px) scale(" scale ")")
-                 :transition (if (pos? active-count) "none" "transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)")
-                 :cursor (if (> scale 1) (if (pos? active-count) "grabbing" "grab") "zoom-in")
-                 :touch-action "none"
-                 :user-select "none"
-                 :pointer-events "auto"
-                 :max-width "90vw"
-                 :max-height "90vh"
-                 :object-fit "contain"}}]
+       (when multi?
+         [:div.lightbox-counter
+          (str (inc active-idx) " / " total)])
+
+       (when multi?
+         [:button.lightbox-nav-btn.is-prev
+          {:type            "button"
+           :on-pointer-down #(.stopPropagation %)
+           :on-click        (fn [e]
+                              (.stopPropagation e)
+                              (prev-fn!))}
+          [:svg {:width "20" :height "20" :viewBox "0 0 24 24" :fill "none"
+                 :stroke "currentColor" :stroke-width "2.2" :stroke-linecap "round" :stroke-linejoin "round"}
+           [:polyline {:points "15 18 9 12 15 6"}]]])
+
+       (when multi?
+         [:button.lightbox-nav-btn.is-next
+          {:type            "button"
+           :on-pointer-down #(.stopPropagation %)
+           :on-click        (fn [e]
+                              (.stopPropagation e)
+                              (next-fn!))}
+          [:svg {:width "20" :height "20" :viewBox "0 0 24 24" :fill "none"
+                 :stroke "currentColor" :stroke-width "2.2" :stroke-linecap "round" :stroke-linejoin "round"}
+           [:polyline {:points "9 18 15 12 9 6"}]]])
+
+       [:div
+        {:class           stage-class
+         :ref             #(reset! !stage-el %)
+         :on-click        (fn [e] (.stopPropagation e))
+         :on-double-click (fn [e]
+                            (.stopPropagation e)
+                            (when-not video?
+                              (reset-zoom-fn)))
+         :style           {:transform (str "translate(" x "px, " y "px) scale(" scale ")")}}
+        (if (and current-item (or (:source current-item) (:source-map current-item)))
+          [:<>
+           [:div.message-image-placeholder
+            [:div.spinner]]
+           ^{:key (or (:internal-id current-item) (:event-id current-item) active-idx)}
+           [media
+            {:uri        (:source current-item)
+             :source-map (:source-map current-item)
+             :tag-type   (if video? "video" "img")
+             :controls   video?
+             :alt        item-name
+             :mime-type  item-mime
+             :room-id    item-room-id
+             :event-id   (:event-id current-item)
+             :class      image-class}]]
+          [:img
+           {:class image-class
+            :src   url}])]
+
+       (when multi?
+         [:div.lightbox-filmstrip
+          {:on-click        #(.stopPropagation %)
+           :on-pointer-down #(.stopPropagation %)}
+          (map-indexed
+           (fn [idx thumb-item]
+             (let [selected? (= idx active-idx)
+                   t-uri     (or (:display-uri thumb-item)
+                                 (:thumbnail-source thumb-item)
+                                 (when-not (:video? thumb-item) (:source thumb-item)))
+                   t-map     (or (:display-map thumb-item)
+                                 (:thumbnail-source-map thumb-item)
+                                 (when-not (:video? thumb-item) (:source-map thumb-item)))]
+               ^{:key (or (:internal-id thumb-item) (:event-id thumb-item) idx)}
+               [:div.lightbox-thumb-item
+                {:class    (when selected? "is-selected")
+                 :on-click (fn [e]
+                             (.stopPropagation e)
+                             (step-to! idx))}
+                (when (or t-uri t-map)
+                  [media
+                   {:uri        t-uri
+                    :source-map t-map
+                    :tag-type   "img"
+                    :alt        "thumb"
+                    :mime-type  (:display-mime thumb-item)
+                    :room-id    (or (:room-id thumb-item) (:room_id thumb-item) room-id)
+                    :event-id   (:event-id thumb-item)
+                    :width      (:crop-size thumb-item)
+                    :height     (:crop-size thumb-item)
+                    :method     (:crop-method thumb-item)}])]))
+           gallery-items)])
 
        [:div.lightbox-actions
-        [:a.lightbox-btn {:href url :target "_blank" :rel "noopener noreferrer"}
-         [:span.btn-icon [icons/external-link]] [:span (@tr [:lightbox/open-original])]]
-        [:a.lightbox-btn {:href url :download "image"}
-         [:span.btn-icon [icons/download]] [:span (@tr [:lightbox/download])]]]])))
+        {:on-click        #(.stopPropagation %)
+         :on-pointer-down #(.stopPropagation %)}
+        [:a.lightbox-btn
+         {:href     (or url "#")
+          :target   "_blank"
+          :rel      "noopener noreferrer"
+          :on-click (fn [e]
+                      (when current-item
+                        (.preventDefault e)
+                        (when-let [live-src (resolve-live-url)]
+                          (.open js/window live-src "_blank" "noopener,noreferrer"))))}
+         [:span.btn-icon [icons/external-link]]
+         [:span (@tr [:lightbox/open-original])]]
+        (if current-item
+          [:a.lightbox-btn
+           {:href     "#"
+            :on-click (fn [e]
+                        (.preventDefault e)
+                        (re-frame/dispatch
+                         [:media/download {:uri        (:source current-item)
+                                           :source-map (:source-map current-item)
+                                           :filename   item-name
+                                           :mime-type  item-mime
+                                           :room-id    item-room-id
+                                           :event-id   (:event-id current-item)}]))}
+           [:span.btn-icon [icons/download]]
+           [:span (@tr [:lightbox/download])]]
+          [:a.lightbox-btn
+           {:href     url
+            :download "image"}
+           [:span.btn-icon [icons/download]]
+           [:span (@tr [:lightbox/download])]])]])
+    (finally
+      (.removeEventListener js/window "keydown" key-listener))))
 
 (defmethod modal-component :image-lightbox [_]
   image-lightbox-content)
