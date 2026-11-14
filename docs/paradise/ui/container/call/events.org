@@ -182,19 +182,32 @@ Most of the call re-frame events and subscriptions are listed here
                          :encoder-url encoder-url
                          :session-config normalized-config}})))
 
+(defn- sync-call-tray [fx]
+  (let [call-state (:call (:db fx))
+        connected? (= (:status call-state) :connected)]
+    (tray/update-section-fx
+     fx
+     :call
+     (when connected?
+       {:connected?      true
+        :audio-enabled?  (:audio-enabled? call-state true)
+        :deafened?       (:deafened? call-state false)
+        :screen-sharing? (:screen-sharing? call-state false)}))))
+
 (rf/reg-event-fx
  :call/driver-connected
  (fn [{:keys [db]} _]
    (let [audio-enabled? (get-in db [:call :audio-enabled?] true)
          video-enabled? (get-in db [:call :video-enabled?] false)
          call-devices   (get-in db [:settings :call-devices])]
-     (cond-> {:db (assoc-in db [:call :status] :connected)
-              :call.driver/set-microphone audio-enabled?}
-       video-enabled?
-       (assoc :call.driver/set-camera true)
+     (sync-call-tray
+      (cond-> {:db (assoc-in db [:call :status] :connected)
+               :call.driver/set-microphone audio-enabled?}
+        video-enabled?
+        (assoc :call.driver/set-camera true)
 
-       (seq call-devices)
-       (assoc :call.driver/switch-devices call-devices)))))
+        (seq call-devices)
+        (assoc :call.driver/switch-devices call-devices))))))
 
 (rf/reg-event-db
  :call/active-participants-changed
@@ -264,34 +277,36 @@ Most of the call re-frame events and subscriptions are listed here
    {:call.driver/set-screen-share
     (not (get-in db [:call :screen-sharing?] false))}))
 
-(rf/reg-event-db
+(rf/reg-event-fx
  :call/toggle-deafen
- (fn [db _]
-   (update-in db [:call :deafened?] not)))
+ (fn [{:keys [db]} _]
+   (sync-call-tray {:db (update-in db [:call :deafened?] not)})))
 #+end_src
 
 
 ****** Media State
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/events.cljs
-(rf/reg-event-db
+(rf/reg-event-fx
  :call/media-state-changed
- (fn [db [_ kind enabled?]]
-   (case kind
-     :audio          (assoc-in db [:call :audio-enabled?] enabled?)
-     :video          (assoc-in db [:call :video-enabled?] enabled?)
-     :screen-sharing (assoc-in db [:call :screen-sharing?] enabled?)
-     db)))
+ (fn [{:keys [db]} [_ kind enabled?]]
+   (let [next-db (case kind
+                   :audio          (assoc-in db [:call :audio-enabled?] enabled?)
+                   :video          (assoc-in db [:call :video-enabled?] enabled?)
+                   :screen-sharing (assoc-in db [:call :screen-sharing?] enabled?)
+                   db)]
+     (sync-call-tray {:db next-db}))))
 
-(rf/reg-event-db
+(rf/reg-event-fx
  :call/update-media-state
- (fn [db [_ {:keys [audio video screen-sharing]}]]
+ (fn [{:keys [db]} [_ {:keys [audio video screen-sharing]}]]
    (if (= (get-in db [:call :status]) :connected)
-     (cond-> db
-       (some? audio)          (assoc-in [:call :audio-enabled?] audio)
-       (some? video)          (assoc-in [:call :video-enabled?] video)
-       (some? screen-sharing) (assoc-in [:call :screen-sharing?] screen-sharing))
-     db)))
+     (sync-call-tray
+      {:db (cond-> db
+             (some? audio)          (assoc-in [:call :audio-enabled?] audio)
+             (some? video)          (assoc-in [:call :video-enabled?] video)
+             (some? screen-sharing) (assoc-in [:call :screen-sharing?] screen-sharing))})
+     {:db db})))
 
 (rf/reg-event-db
  :call/media-error
@@ -333,29 +348,31 @@ Most of the call re-frame events and subscriptions are listed here
        (mesh/do-with-thread! :engine-pool
                              {:handler :call/leave-sfu
                               :arguments {:room-id room-id}}))
-     {:db (-> db
-              (assoc-in [:call :active-room-id] nil)
-              (assoc-in [:call :is-active?] false)
-              (assoc-in [:call :status] :idle))
-      :dispatch [:call/teardown]})))
+     (sync-call-tray
+      {:db       (-> db
+                     (assoc-in [:call :active-room-id] nil)
+                     (assoc-in [:call :is-active?] false)
+                     (assoc-in [:call :status] :idle))
+       :dispatch [:call/teardown]}))))
 
 (rf/reg-event-fx
  :call/teardown
  (fn [{:keys [db]} _]
    (rtc/reset-session!)
-   {:db (-> db
-            (assoc-in [:call :active-room-id] nil)
-            (assoc-in [:call :is-active?] false)
-            (assoc-in [:call :disconnecting?] false)
-            (assoc-in [:call :screen-sharing?] false)
-            (assoc-in [:call :participants] [])
-            (assoc-in [:call :unwatched-ids] #{})
-            (assoc-in [:call :focused-id] nil)
-            (assoc-in [:call :immersive?] false)
-            (assoc-in [:call :pip-tucked?] false)
-            (assoc-in [:call :media-error] nil)
-            (assoc-in [:call :e2ee-error] nil)
-            (assoc :main-focus :timeline))}))
+   (sync-call-tray
+    {:db (-> db
+             (assoc-in [:call :active-room-id] nil)
+             (assoc-in [:call :is-active?] false)
+             (assoc-in [:call :disconnecting?] false)
+             (assoc-in [:call :screen-sharing?] false)
+             (assoc-in [:call :participants] [])
+             (assoc-in [:call :unwatched-ids] #{})
+             (assoc-in [:call :focused-id] nil)
+             (assoc-in [:call :immersive?] false)
+             (assoc-in [:call :pip-tucked?] false)
+             (assoc-in [:call :media-error] nil)
+             (assoc-in [:call :e2ee-error] nil)
+             (assoc :main-focus :timeline))})))
 
 (rf/reg-event-db
  :call/set-active-room
