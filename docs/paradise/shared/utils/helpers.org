@@ -468,3 +468,40 @@ We need to be able to convert timestamps to date otherwise people might not be t
       3 (tr [(keyword base-path "three")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (truncate-name (nth names 2) 16)])
       (tr [(keyword base-path "many")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (- cnt 2)]))))
 #+end_src
+
+
+**** Converters
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
+(defn uint8->base64 [bytes]
+  (let [len    (.-byteLength bytes)
+        chunks (js/Array.)]
+    (loop [i 0]
+      (when (< i len)
+        (let [end   (min len (+ i 8192))
+              sub   (.subarray bytes i end)
+              piece (.apply js/String.fromCharCode nil sub)]
+          (.push chunks piece)
+          (recur end))))
+    (js/btoa (.join chunks ""))))
+
+(defn base64->uint8 [b64]
+  (if (or (nil? b64) (str/blank? b64))
+    (js/Uint8Array. 0)
+    (let [bin (js/atob b64)
+          len (.-length bin)
+          out (js/Uint8Array. len)]
+      (loop [i 0]
+        (when (< i len)
+          (aset out i (.charCodeAt bin i))
+          (recur (inc i))))
+      out)))
+#+end_src
+
+
+
+
+
+
+
