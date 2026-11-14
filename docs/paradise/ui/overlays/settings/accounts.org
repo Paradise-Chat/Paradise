@@ -12,11 +12,11 @@ log into another or swap to another.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/accounts.cljs
 (ns paradise.ui.overlays.settings.accounts
-  (:require
-   [cljs.core.async :refer [<! go]]
-   [cljs-workers.mesh :as mesh]
-   [re-frame.core :as re-frame]
-   [taoensso.timbre :as log]))
+  (:require [cljs-workers.mesh :as mesh]
+            [cljs.core.async :refer [<! go]]
+            [clojure.string :as str]
+            [re-frame.core :as re-frame]
+            [taoensso.timbre :as log]))
 #+end_src
 
 
