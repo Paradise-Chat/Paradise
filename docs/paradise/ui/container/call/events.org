@@ -16,7 +16,8 @@ Most of the call re-frame events and subscriptions are listed here
    [promesa.core :as p]
    [taoensso.timbre :as log]
    [paradise.ui.container.call.runtime :as rtc]
-   [paradise.ui.container.call.native :as native]))
+   [paradise.ui.container.call.native :as native]
+   [paradise.ui.overlays.tray :as tray]))
 #+end_src
 
 
