@@ -542,23 +542,33 @@ for now this will work though.
  (fn [db [_ room-id]]
    (get-in db [:rooms/membership-loading? room-id])))
 
+(re-frame/reg-sub
+ :room/membership-attempted?
+ (fn [db [_ room-id]]
+   (get-in db [:rooms/membership-attempted? room-id] false)))
+
 (re-frame/reg-event-db
  :room/clear-membership-loading
  (fn [db [_ room-id]]
-   (update db :rooms/membership-loading? dissoc room-id)))
+   (-> db
+       (update :rooms/membership-loading? dissoc room-id)
+       (assoc-in [:rooms/membership-attempted? room-id] true))))
 
 (re-frame/reg-event-db
  :room/set-membership
  (fn [db [_ room-id status]]
    (-> db
        (assoc-in [:rooms/membership room-id] status)
-       (update :rooms/membership-loading? dissoc room-id))))
+       (update :rooms/membership-loading? dissoc room-id)
+       (assoc-in [:rooms/membership-attempted? room-id] true))))
 
 (re-frame/reg-event-fx
  :room/fetch-membership
  (fn [{:keys [db]} [_ room-id]]
-   (if (or (get-in db [:rooms/membership room-id])
-           (get-in db [:rooms/membership-loading? room-id]))
+   (if (or (nil? room-id)
+           (get-in db [:rooms/membership room-id])
+           (get-in db [:rooms/membership-loading? room-id])
+           (get-in db [:rooms/membership-attempted? room-id]))
      {}
      (do
        (go
@@ -570,7 +580,9 @@ for now this will work though.
              (do
                (js/console.warn "Membership fetch failed for" room-id "-" (:msg res))
                (re-frame/dispatch [:room/clear-membership-loading room-id])))))
-       {:db (assoc-in db [:rooms/membership-loading? room-id] true)}))))
+       {:db (-> db
+                (assoc-in [:rooms/membership-loading? room-id] true)
+                (assoc-in [:rooms/membership-attempted? room-id] true))}))))
 
 (re-frame/reg-sub
  :room/security
