@@ -32,14 +32,12 @@ matching the ~key_handler~ design.
    [re-frame.db :as db]))
 #+end_src
 
+**** Multi-methods and Registry
 
-
-**** Tray Code
-
-
-We do need to instantiate it at the start of the app, but otherwise we're golden.
-We add a watch to the app-db, but we might want to try something a bit more
-performant later. Anyway, when changes in tray sync occur we trigger a tray sync.
+Following ~key_handler~, modules declare tray sections via ~tray-section~ using
+pure data (receiving only that section's own small state map rather than full
+~app-db~), and runtime plugins can register pure-data section specs via
+~register-tray-section!~.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/tray.cljs
 (defn- get-tray ^js []
