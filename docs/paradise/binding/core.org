@@ -66,18 +66,39 @@ well we don't want it larger than it is.
   (let [is-map?       (map? data)
         msg-type      (if is-map? (:type data) (goog.object/get data "type"))
         raw-engine-id (if is-map? (get data :engine-id) (goog.object/get data "engine-id"))
-        engine-id     (keyword (or raw-engine-id @!active-engine))
+        active-eng    @!active-engine
+        stale-engine? (and raw-engine-id
+                           active-eng
+                           (not= (keyword raw-engine-id) active-eng))
+        engine-id     (keyword (or raw-engine-id active-eng))
         get-val       (fn [k-str k-kw]
                         (if is-map? (get data k-kw) (goog.object/get data k-str)))]
-    (if-let [handler (get-in @!stream-handlers [engine-id msg-type])]
-      (handler data get-val)
-      (when msg-type
-        (log/warn "Unhandled stream event:" msg-type "for engine:" engine-id)))))
+    (when-not stale-engine?
+      (if-let [handler (get-in @!stream-handlers [engine-id msg-type])]
+        (handler data get-val)
+        (when msg-type
+          (log/warn "Unhandled stream event:" msg-type "for engine:" engine-id))))))
 
 (defn set-active-engine! [engine-id]
   (reset! !active-engine engine-id))
 
-(def internal-handlers #{:register-port :bind-app-db :register-engine})
+(def internal-handlers
+  #{:register-port
+    :bind-app-db
+    :register-engine
+    :evaluate-worker-form
+    :list-all-stored-accounts
+    :recalculate-timeline
+    :set-viewport
+    :recalculate-items
+    :set-scrolling-state
+    :update-layout-context
+    :process-timeline-diff
+    :eval-virtualizer-plugin
+    :proxy-request
+    :open-auth-window
+    :close-auth-window
+    :auth-challenge})
 
 
 
