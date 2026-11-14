@@ -72,6 +72,95 @@ converting back and forth to Clojure maps constantly.
         (.close sync-handle)))))
 #+end_src
 
+
+
+
+**** Engine Helpers
+
+We need a neat manner to load from the different engines we might encounter.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
+(defn- format-stored-account-label [uid username display-name]
+  (let [u (some-> username str str/trim not-empty)
+        d (some-> display-name str str/trim not-empty)]
+    (cond
+      (and d u (not= (str/lower-case d) (str/lower-case u)))
+      (str d " (@" u ")")
+
+      u
+      (str "@" u)
+
+      d
+      d
+
+      :else
+      (str uid))))
+
+(defn- discover-opfs-session-engines [dir seed-engines]
+  (let [seed (->> seed-engines
+                  (map name)
+                  (remove #(or (str/blank? %) (= % "default")))
+                  vec)]
+    (if (and dir (fn? (.-entries dir)))
+      (let [iter (.entries dir)]
+        (p/loop [acc seed]
+          (p/let [step (-> (.next iter) (p/catch (fn [_] #js {:done true})))]
+            (if (.-done step)
+              (vec (distinct acc))
+              (let [val   (.-value step)
+                    fname (when val (aget val 0))
+                    m     (when (string? fname)
+                            (re-matches #"^sessions_(.+)\.json$" fname))
+                    eng   (second m)]
+                (p/recur (if (and eng (not= eng "default"))
+                           (conj acc eng)
+                           acc)))))))
+      (p/resolved (vec (distinct seed))))))
+
+(defn- read-opfs-engine-accounts [dir eng-str]
+  (p/let [parsed (load-raw-sessions-opfs dir eng-str false)
+          uids   (if (and parsed (object? parsed))
+                   (js/Object.keys parsed)
+                   #js [])]
+    (vec
+     (keep (fn [uid]
+             (when-let [entry (gobj/get parsed uid)]
+               (let [raw (or (gobj/get entry "session") entry)]
+                 (when (and raw (object? raw))
+                   (let [tok   (or (gobj/get raw "accessToken")
+                                   (gobj/get raw "token"))
+                         url   (or (gobj/get raw "serverUrl")
+                                   (gobj/get raw "apiBase")
+                                   "")
+                         uname (gobj/get raw "username")
+                         dname (or (gobj/get raw "displayName")
+                                   (gobj/get raw "display_name"))
+                         av    (or (gobj/get raw "avatarUrl")
+                                   (gobj/get raw "avatar_url"))]
+                     (when (or tok (not (str/blank? (str url))))
+                       {:userId       (str uid)
+                        :user-id      (str uid)
+                        :engine       eng-str
+                        :label        (format-stored-account-label uid uname dname)
+                        :username     uname
+                        :display-name dname
+                        :avatar       av
+                        :base-url     url
+                        :server       url}))))))
+           uids))))
+
+(defn list-all-stored-accounts [seed-engines]
+  (p/let [dir     (.. js/navigator -storage getDirectory)
+          eng-ids (discover-opfs-session-engines dir seed-engines)]
+    (p/loop [remaining eng-ids
+             out       []]
+      (if (empty? remaining)
+        out
+        (p/let [batch (read-opfs-engine-accounts dir (first remaining))]
+          (p/recur (rest remaining) (into out batch)))))))
+  
+#+end_src
+
 We also need a cryptographic implementation for generating passphrases.
 The Rust SDK uses this passphrase to encrypt the IndexedDB where the actual keys and messages live.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
