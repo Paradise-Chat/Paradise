@@ -28,6 +28,7 @@ matching the ~key_handler~ design.
 (ns paradise.ui.overlays.tray
   (:require
    [paradise.shared.client.key-handler :as key-handler]
+   [re-frame.core :as re-frame]
    [re-frame.db :as db]))
 #+end_src
 
