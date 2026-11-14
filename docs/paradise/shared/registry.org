@@ -35,7 +35,7 @@ the repo.
 (defn fetch-edn [url]
   (go
     (try
-      (let [res (<p! (js/fetch url))]
+      (let [res (<p! (js/fetch url #js {:cache "no-cache"}))]
         (if (.-ok res)
           (reader/read-string (<p! (.text res)))
           nil))
