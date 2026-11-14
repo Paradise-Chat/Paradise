@@ -930,7 +930,6 @@ library itself some context of deferred components...
 
 (defn ^:ui event-tile-render [item]
   (let [active-room  @(re-frame/subscribe [:rooms/active-id])
-        hs-url       @(re-frame/subscribe [:sdk/homeserver-url])
         is-mobile?   @(re-frame/subscribe [:ui/mobile?])
         my-profile   @(re-frame/subscribe [:sdk/profile])
         my-id        (:user-id my-profile)]
