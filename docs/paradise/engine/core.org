@@ -37,6 +37,8 @@ We need to keep a collection of the engines we've loaded, so we do so here
 
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
 (defonce !loaded-engines (atom {}))
+(defonce !protocol-handlers (atom {}))
+(defonce !current-protocol (atom nil))
 #+end_src
 
 
@@ -74,22 +76,83 @@ actual protocol.
 
 
 #+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
+(defn- versioned-import-url [url manifest]
+  (let [hash-str (some-> (:hash manifest) str)
+        local?   (and (string? url)
+                      (or (str/includes? url "://localhost")
+                          (str/includes? url "://127.0.0.1")))
+        tag      (cond
+                   (seq hash-str) (subs hash-str 0 (min 12 (count hash-str)))
+                   local?         (str (js/Date.now))
+                   :else          nil)]
+    (if (and (string? url) tag)
+      (str url (if (str/includes? url "?") "&v=" "?v=") tag)
+      url)))
+
+(defn- suspend-previous-protocol! [next-kw]
+  (let [prev-kw @!current-protocol]
+    (when (and prev-kw (not= prev-kw next-kw))
+      (when-let [suspend-fn (get-in @!protocol-handlers [prev-kw :suspend-session])]
+        (try
+          (suspend-fn {})
+          (catch :default _ nil))))))
+
+(defn- install-protocol-handlers! [protocol-name captured]
+  (let [namespaced (into {}
+                         (map (fn [[k f]]
+                                [(keyword protocol-name (name k)) f]))
+                         captured)]
+    (swap! worker/handlers merge captured namespaced)))
+
 (defn load-protocol-engine! [protocol]
   (go
     (<! (registry/ensure-environment!))
     (try
-      (let [url (registry/get-engine-url protocol)]
+      (let [protocol-name (name protocol)
+            proto-kw      (keyword protocol-name)
+            url           (registry/get-engine-url protocol-name)
+            manifest      (registry/get-engine-manifest protocol-name)
+            imp-url       (versioned-import-url url manifest)]
         (if-not url
-          {:status "error" :msg (str "Unknown protocol or missing registry URL: " protocol)}
-          (let [_            (<p! (dynamic-import url))
-                bootstrap-fn (get-fallback-bootstrap protocol)]
-            (if bootstrap-fn
-              (do
-                (<! (bootstrap-fn register-engine! url))
-                {:status "success"})
-              {:status "error" :msg (str "Engine module did not export a bootstrap function: " protocol)}))))
+          {:status "error" :msg (str "Unknown protocol or missing registry URL: " protocol-name)}
+          (do
+            (suspend-previous-protocol! proto-kw)
+            (if-let [cached-handlers (get @!protocol-handlers proto-kw)]
+              (install-protocol-handlers! protocol-name cached-handlers)
+              (let [before   @worker/handlers
+                    _        (<p! (dynamic-import imp-url))
+                    after    @worker/handlers
+                    captured (into {}
+                                   (keep (fn [[k f]]
+                                           (when (not (identical? (get before k) f))
+                                             [(keyword (name k)) f])))
+                                   after)]
+                (swap! !protocol-handlers assoc proto-kw captured)
+                (install-protocol-handlers! protocol-name captured)))
+            (let [bootstrap-fn (get-fallback-bootstrap protocol-name)]
+              (if bootstrap-fn
+                (do
+                  (<! (bootstrap-fn register-engine! url))
+                  (reset! !current-protocol proto-kw)
+                  {:status "success"})
+                {:status "error"
+                 :msg    (str "Engine module did not export a bootstrap function: "
+                              protocol-name)})))))
       (catch :default e
         {:status "error" :msg (or (.-message e) (str e))}))))
+
+(worker/register :list-all-stored-accounts
+                 (fn [_]
+                   (go
+                     (try
+                       (<! (registry/ensure-environment!))
+                       (let [seed-engines (keys (registry/resolve-engines))
+                             accounts     (<p! (session-store/list-all-stored-accounts seed-engines))]
+                         {:status   "success"
+                          :accounts accounts})
+                       (catch :default e
+                         {:status "error"
+                          :msg    (or (.-message e) (str e))})))))
 #+end_src
 
 
