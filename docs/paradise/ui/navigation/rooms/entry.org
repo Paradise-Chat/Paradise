@@ -594,23 +594,33 @@ for now this will work though.
  (fn [db [_ room-id]]
    (get-in db [:rooms/security-loading? room-id])))
 
+(re-frame/reg-sub
+ :room/security-attempted?
+ (fn [db [_ room-id]]
+   (get-in db [:rooms/security-attempted? room-id] false)))
+
 (re-frame/reg-event-db
  :room/clear-security-loading
  (fn [db [_ room-id]]
-   (update db :rooms/security-loading? dissoc room-id)))
+   (-> db
+       (update :rooms/security-loading? dissoc room-id)
+       (assoc-in [:rooms/security-attempted? room-id] true))))
 
 (re-frame/reg-event-db
  :room/set-security
  (fn [db [_ room-id data]]
    (-> db
        (assoc-in [:rooms/security room-id] data)
-       (update :rooms/security-loading? dissoc room-id))))
+       (update :rooms/security-loading? dissoc room-id)
+       (assoc-in [:rooms/security-attempted? room-id] true))))
 
 (re-frame/reg-event-fx
  :room/fetch-security
  (fn [{:keys [db]} [_ room-id]]
-   (if (or (get-in db [:rooms/security room-id])
-           (get-in db [:rooms/security-loading? room-id]))
+   (if (or (nil? room-id)
+           (get-in db [:rooms/security room-id])
+           (get-in db [:rooms/security-loading? room-id])
+           (get-in db [:rooms/security-attempted? room-id]))
      {}
      (do
        (go
@@ -618,12 +628,16 @@ for now this will work though.
                                            {:handler   :fetch-room-security
                                             :arguments {:room-id room-id}}))]
            (if (= (:status res) "success")
-             (re-frame/dispatch [:room/set-security room-id {:is-public? (:is-public res)
-                                                             :is-encrypted? (:is-encrypted res)}])
+             (re-frame/dispatch [:room/set-security
+                                 room-id
+                                 {:is-public?    (:is-public res)
+                                  :is-encrypted? (:is-encrypted res)}])
              (do
                (js/console.warn "Security fetch failed for" room-id "-" (:msg res))
                (re-frame/dispatch [:room/clear-security-loading room-id])))))
-       {:db (assoc-in db [:rooms/security-loading? room-id] true)}))))
+       {:db (-> db
+                (assoc-in [:rooms/security-loading? room-id] true)
+                (assoc-in [:rooms/security-attempted? room-id] true))}))))
 #+end_src
 
 **** Room Type Checking?
