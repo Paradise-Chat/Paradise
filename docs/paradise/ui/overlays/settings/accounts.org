@@ -70,16 +70,17 @@ Deprecated method.
  :settings/load-accounts
  (fn [_ _]
    (go
-     (let [res
-           (<! (mesh/do-with-thread!
-                :engine-pool
-                {:handler :get-available-accounts}))]
+     (let [res (<! (mesh/do-with-thread!
+                    :engine-pool
+                    {:handler :list-all-stored-accounts}))]
        (if (= (:status res) "success")
-         (re-frame/dispatch
-          [:settings/set-accounts (:accounts res)])
-         (log/error
-          "Failed to fetch accounts from worker:"
-          (:msg res)))))
+         (re-frame/dispatch [:settings/set-accounts (:accounts res)])
+         (let [fallback (<! (mesh/do-with-thread!
+                             :engine-pool
+                             {:handler :get-available-accounts}))]
+           (if (= (:status fallback) "success")
+             (re-frame/dispatch [:settings/set-accounts (:accounts fallback)])
+             (log/error "Failed to fetch accounts from worker:" (:msg res)))))))
    {}))
 
 (re-frame/reg-event-db
