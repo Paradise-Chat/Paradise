@@ -535,7 +535,17 @@ Likely we'll need some more tweaks in the future for other protocol support stil
      (when is-active?
        [:f> persistent-audio-renderer {:deafened? deafened?}])
      children]))
+#+end_src
 
+
+
+**** Tray
+
+
+***** TODO Update to use TR for the tray entries
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defmethod tray-section :call
   [_ {:keys [connected? audio-enabled? deafened? screen-sharing?]
       :or   {audio-enabled?  true
@@ -561,7 +571,13 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                {:type    "separator"}
                {:id      "call/hangup"
                 :label   "Disconnect Call"}]}))
+#+end_src
 
+
+**** Keybinds
+
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defmethod keybind-spec :call/toggle-audio [_]
   {:id              "call/toggle-audio"
    :label-key       :settings.keybinds/action-toggle-mute
