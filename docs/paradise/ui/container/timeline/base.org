@@ -89,36 +89,41 @@ we've made interop with the WASM bindings.
      (do (log/warn "Prevented duplicate timeline boot for:" room-id) {})
      (do
        (main/do-with-pool! @state/!engine-pool
-                           {:handler :boot-timeline
+                           {:handler   :boot-timeline
                             :arguments {:room-id room-id :mode :live}})
-       {:db (assoc-in db [:timeline-subs room-id :live] true)}))))
+       {:db (-> db
+                (assoc-in [:timeline-subs room-id :live] true)
+                (assoc-in [:timeline/back-dead? room-id] false))}))))
 
 
 (re-frame/reg-event-fx
  :room/boot-focused-timeline
  (fn [{:keys [db]} [_ room-id event-id]]
    (main/do-with-pool! @state/!engine-pool
-                       {:handler :boot-timeline
+                       {:handler   :boot-timeline
                         :arguments {:room-id room-id :mode :focused :event-id event-id}})
-   {:db (assoc-in db [:timeline-subs room-id :focused] true)}))
+   {:db (-> db
+            (assoc-in [:timeline-subs room-id :focused] true)
+            (assoc-in [:timeline/back-dead? room-id] false))}))
 
 
 (re-frame/reg-event-fx
  :room/boot-pinned-timeline
  (fn [{:keys [db]} [_ room-id]]
    (main/do-with-pool! @state/!engine-pool
-                       {:handler :boot-timeline
+                       {:handler   :boot-timeline
                         :arguments {:room-id room-id :mode :pins}})
    {:db (assoc-in db [:timeline-subs room-id :pins] true)}))
 
 (re-frame/reg-event-fx
  :sdk/cleanup-timeline
  (fn [{:keys [db]} [_ room-id]]
-   (main/do-with-pool! @state/!engine-pool {:handler :cleanup-timeline
+   (main/do-with-pool! @state/!engine-pool {:handler   :cleanup-timeline
                                             :arguments {:room-id room-id}})
    {:db (-> db
             (update :timeline-subs dissoc room-id)
             (update :timeline-data dissoc room-id)
+            (assoc-in [:timeline/back-dead? room-id] false)
             (assoc-in [:timeline/loading-more? room-id] false)
             (assoc-in [:timeline/loading-forward? room-id] false))}))
 
@@ -192,7 +197,11 @@ we've made interop with the WASM bindings.
 (re-frame/reg-event-db
  :sdk/update-pagination-status
  (fn [db [_ room-id status]]
-   (assoc-in db [:timeline-pagination room-id] status)))
+   (let [status-str (if (keyword? status) (name status) (str status))]
+     (-> db
+         (assoc-in [:timeline-pagination room-id] status)
+         (assoc-in [:timeline/back-dead? room-id]
+                   (= status-str "TimelineStartReached"))))))
 
 (re-frame/reg-event-fx
  :room/pretty-jump
