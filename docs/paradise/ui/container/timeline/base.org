@@ -46,6 +46,9 @@ we've made interop with the WASM bindings.
 **** Reframe event and subscriptions
 
 
+Need to remove the ref to local-timeline-data or upstream it.
+We could then remove most remaining virtualizer placeholders.
+
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/base.cljs
 (re-frame/reg-event-db
  :app/worker-redraw-ping
