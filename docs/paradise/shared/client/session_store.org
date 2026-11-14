@@ -11,8 +11,10 @@ File with methods to help us store our client configurations and such.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
 (ns paradise.shared.client.session-store
-  (:require [promesa.core :as p]
-            [cljs.reader :as reader]
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [goog.object :as gobj]
+            [promesa.core :as p]
             [taoensso.timbre :as log]))
 #+end_src
 
