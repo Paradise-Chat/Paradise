@@ -339,6 +339,83 @@
     object-fit: contain;
 }
 
+.media-gallery-grid {
+    display: grid;
+    width: 100%;
+    max-width: 400px;
+    margin-top: var(--chat-media-margin);
+    gap: 4px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.gallery-grid-cell {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: 6px;
+    background-color: var(--bg-secondary, #1a1a1a);
+    cursor: pointer;
+}
+
+.gallery-grid-cell .message-image-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.gallery-grid-cell img,
+.gallery-grid-cell video {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+    background-color: transparent;
+    margin: 0;
+    padding: 0;
+}
+
+.gallery-video-fallback {
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-tertiary, #1a1a1a);
+}
+
+.gallery-video-badge {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.28);
+    pointer-events: none;
+}
+
+.gallery-play-pill {
+    padding: 6px 12px;
+    border-radius: 999px;
+    background-color: rgba(0, 0, 0, 0.68);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.gallery-overflow-mask {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.58);
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+    pointer-events: none;
+}
+
 .timeline-input-outer {
     position: relative;
     padding: 0 16px 2px 16px;
