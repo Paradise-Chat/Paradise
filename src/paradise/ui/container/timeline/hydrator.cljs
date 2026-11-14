@@ -7,16 +7,12 @@
 
 (defonce !local-timeline-data (r/atom {}))
 
-(def get-cached-react-tree vhydrator/get-cached-react-tree)
-(def hydrate-by-paths! vhydrator/hydrate-by-paths!)
-(def pojo->react vhydrator/pojo->react)
-(def fast-js->clj-dmp vhydrator/fast-js->clj)
 
 (def sanitize-js-dispatch
   (re-frame/->interceptor
    :id :sanitize-js-dispatch
    :before (fn [context]
-             (update-in context [:coeffects :event] fast-js->clj-dmp))))
+             (update-in context [:coeffects :event] vhydrator/fast-js->clj))))
 
 (re-frame/reg-global-interceptor sanitize-js-dispatch)
 
