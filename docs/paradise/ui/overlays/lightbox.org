@@ -11,9 +11,11 @@ Lightbox (or image previewer) is how we intend to provide a nice way to interact
 (ns paradise.ui.overlays.lightbox
   (:require [re-frame.core :as re-frame]
             [reagent.core :as r]
+            [paradise.media.component :refer [media]]
             [paradise.ui.overlays.base :refer [modal-component]]
             [paradise.shared.utils.svg :as icons]
-            ))
+            [paradise.ui.global :refer [!swipe-drag-data
+                                        make-swipe-handlers]]))
 #+end_src
 
 **** Lightbox Component + CSS
