@@ -179,7 +179,26 @@
                    :no-results "No results found"}
     :headers {:home "Paradise"}}
    :spaces
-   {:bars {:home "Paradise"}}}
+   {:bars {:home "Paradise"}
+    :bar  {:home                  "Paradise"
+           :create-group          "Create New Group..."
+           :edit-group            "Edit Group..."
+           :move-to-group         "Move to %1"
+           :remove-from-group     "Remove from Group"
+           :expand-group          "Expand Group"
+           :collapse-group        "Collapse Group"
+           :ungroup               "Ungroup Spaces"
+           :new-group-default     "Group"
+           :modal-create-title    "Create Space Group"
+           :modal-edit-title      "Edit Space Group"
+           :group-name-label      "Group Name"
+           :group-name-placeholder "e.g. Communities"
+           :group-color-label     "Folder Accent"
+           :group-spaces-label    "Included Spaces"
+           :no-spaces             "No spaces available."
+           :cancel                "Cancel"
+           :create                "Create Group"
+           :save                  "Save Changes"}}}
   :quick-switcher
   {:placeholder "Jump to a room..."
    :empty "No rooms found."
