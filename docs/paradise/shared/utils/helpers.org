@@ -203,21 +203,26 @@ throw an error.
 
 (defn linkify-text [text]
   (if (str/blank? text)
-    [text]
+    (if (seq text) (list text) '())
     (let [pattern #"https?://[^\s]+"
           parts   (str/split text pattern -1)
           matches (re-seq pattern text)]
       (if (empty? matches)
-        [text]
-        (remove nil?
-                (mapcat
-                 (fn [i part]
-                   (let [url (nth matches i nil)]
-                     (if url
-                       [part [:a {:href url :target "_blank" :rel "noopener noreferrer"} url]]
-                       [part])))
-                 (range (count parts))
-                 parts))))))
+        (list text)
+        (mapcat
+         (fn [i part]
+           (let [url (nth matches i nil)]
+             (if url
+               (cond-> []
+                 (seq part) (conj part)
+                 true       (conj ^{:key (str "lnk-" i)}
+                                  [:a {:href   url
+                                       :target "_blank"
+                                       :rel    "noopener noreferrer"}
+                                   url]))
+               (when (seq part) [part]))))
+         (range (count parts))
+         parts)))))
 
 (def block-level-tags #{:p :div :h1 :h2 :h3 :h4 :h5 :h6 :blockquote :li :tr})
 
