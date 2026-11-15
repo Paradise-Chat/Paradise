@@ -105,25 +105,53 @@ switching.
                                (re-frame/dispatch [:quick-switcher/select-room %])
                                (close-fn))
            :render-item    (fn [room _]
-                              (let [room-id  (or (:id room) (:roomId room))
-                                    is-dm?   (or (:isDirect room) (:is-direct? room) (:is-direct room))
-                                    members  @(re-frame/subscribe [:room/members-map room-id])
-                                    profile  @(re-frame/subscribe [:sdk/profile])
-                                    my-id    (:user-id profile)
-                                    other    (when (and is-dm? (seq members))
-                                               (->> (vals members)
-                                                    (remove #(= (:user-id %) my-id))
-                                                    first))
-                                    final-avatar (or (:avatarUrl room) (:avatar room) (:avatar-url other))
-                                    final-name   (if (and is-dm? other (or (nil? (:name room)) (= (:name room) (tr [:quick-switcher/loading]))))
-                                                   (:display-name other)
-                                                   (:name room))]
+                              (let [room-id       (or (:id room) (:roomId room))
+                                    is-dm?        (or (:isDirect room) (:is-direct? room) (:is-direct room))
+                                    members       @(re-frame/subscribe [:room/members-map room-id])
+                                    profile       @(re-frame/subscribe [:sdk/profile])
+                                    my-id         (:user-id profile)
+                                    others        (when (and is-dm? (seq members))
+                                                    (->> (vals members)
+                                                         (remove #(= (:user-id %) my-id))))
+                                    group-dm?     (boolean (or (:isGroupDm room)
+                                                               (:is-group-dm? room)
+                                                               (> (count others) 1)))
+                                    other         (when (and is-dm? (not group-dm?))
+                                                    (first others))
+                                    recip-avs     (or (:recipientAvatars room) (:recipient-avatars room))
+                                    group-members (when group-dm?
+                                                    (or (seq recip-avs)
+                                                        (mapv (fn [u]
+                                                                {:id   (:user-id u)
+                                                                 :name (:display-name u)
+                                                                 :url  (:avatar-url u)})
+                                                              others)))
+                                    final-avatar  (if group-dm?
+                                                    (or (:avatarUrl room) (:avatar room))
+                                                    (or (:avatarUrl room) (:avatar room) (:avatar-url other)))
+                                    final-name    (cond
+                                                    (and group-dm?
+                                                         (or (nil? (:name room))
+                                                             (= (:name room) (tr [:quick-switcher/loading])))
+                                                         (seq others))
+                                                    (str/join ", " (map :display-name others))
+
+                                                    (and is-dm?
+                                                         other
+                                                         (or (nil? (:name room))
+                                                             (= (:name room) (tr [:quick-switcher/loading]))))
+                                                    (:display-name other)
+
+                                                    :else
+                                                    (:name room))]
                                 [:div {:style {:display "flex" :align-items "center" :gap "12px" :padding "8px"}}
-                                 [avatar {:id    room-id
-                                          :name  (or final-name "?")
-                                          :url   final-avatar
-                                          :size  28
-                                          :shape :rounded}]
+                                 [avatar (cond-> {:id    room-id
+                                                  :name  (or final-name "?")
+                                                  :url   final-avatar
+                                                  :size  28
+                                                  :shape :rounded}
+                                           group-dm? (assoc :is-group? true
+                                                            :group-members group-members))]
                                  [:span.name final-name]]))
 
             }]]]))))
