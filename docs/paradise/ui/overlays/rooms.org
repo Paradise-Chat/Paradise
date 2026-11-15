@@ -63,13 +63,17 @@ Mostly just moving what we had into this new shape.
 
              (when is-joined?
                {:id "invite"
-                :label (tr (if is-dm? [:navigation.actions/invite-to] [:navigation.actions/invite-here]))
+                :label (tr (if (or is-dm? is-space?)
+                             [:navigation.actions/invite-to]
+                             [:navigation.actions/invite-here]))
                 :icon [icons/members-plus]
-                :action #(re-frame/dispatch [:ui/open-modal (if is-dm? :invite-room :invite-user)
-                                             {:backdrop-props {:class "lightbox-backdrop"}
-                                              :window-props   {:style {:background "transparent"
-                                                                       :box-shadow "none"}}
-                                              :target-room-id room-id}])})
+                :action #(re-frame/dispatch
+                          [:ui/open-modal (if is-space? :invite-room :invite-user)
+                           (cond-> {:backdrop-props {:class "lightbox-backdrop"}
+                                    :window-props   {:style {:background "transparent"
+                                                             :box-shadow "none"}}}
+                             is-space?       (assoc :target-space-id room-id)
+                             (not is-space?) (assoc :target-room-id room-id))])})
 
              (when (and is-joined? (not is-dm?) (= context :header))
                {:id "call"
