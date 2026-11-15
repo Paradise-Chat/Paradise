@@ -33,108 +33,116 @@ This is the interface that handles plugin installations.
           custom-theme?    (and (string? current-theme)
                                 (str/starts-with? current-theme "http"))]
       [:<>
-       [:div.settings-section
-        [:h3.settings-subheading
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
          (tr [:settings.plugins/themes-title])]
-        [:div.settings-row
-         [:input.form-input.plugin-input
-          {:type "text"
-           :placeholder (tr [:settings.plugins/placeholder-theme-url])
-           :value @theme-url-input
-           :on-change #(reset! theme-url-input (.. % -target -value))}]
-         [:div.settings-actions
-          [:button.settings-button
-           {:disabled (empty? @theme-url-input)
-            :on-click #(do
-                         (re-frame/dispatch [:ui/switch-theme @theme-url-input])
-                         (reset! theme-url-input ""))}
-           (tr [:settings.plugins/apply])]]]
+        [:div.settings-hub-group-card
+         [:div.settings-card-stack
+          [:div.settings-input-row
+           [:input.settings-input
+            {:type        "text"
+             :placeholder (tr [:settings.plugins/placeholder-theme-url])
+             :value       @theme-url-input
+             :on-change   #(reset! theme-url-input (.. % -target -value))}]
+           [:button.settings-button
+            {:disabled (empty? @theme-url-input)
+             :on-click #(do
+                          (re-frame/dispatch [:ui/switch-theme @theme-url-input])
+                          (reset! theme-url-input ""))}
+            (tr [:settings.plugins/apply])]]]
 
-        (when custom-theme?
-          [:div.settings-row
-           [:div.settings-row-text
-            [:div.settings-row-title
-             (tr [:settings.plugins/active-custom-theme])]
-            [:div.settings-row-description
-             current-theme]]
-           [:div.settings-actions
-            [:button.settings-button.destructive
-             {:on-click #(re-frame/dispatch [:ui/reset-theme])}
-             (tr [:settings.plugins/reset-default])]]])]
+         (when custom-theme?
+           [:div.settings-card-row
+            [:div.settings-row-text
+             [:div.settings-row-title
+              (tr [:settings.plugins/active-custom-theme])]
+             [:div.settings-row-description
+              current-theme]]
+            [:div.settings-actions
+             [:button.settings-button.destructive.is-compact
+              {:on-click #(re-frame/dispatch [:ui/reset-theme])}
+              (tr [:settings.plugins/reset-default])]]])]]
 
-       [:div.settings-section
-        [:h3.settings-subheading
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
          (tr [:settings.plugins/plugins-title])]
-        [:div.settings-row
-         [:input.form-input.plugin-input
-          {:type "text"
-           :placeholder (tr [:settings.plugins/placeholder-plugin-url])
-           :value @plugin-url-input
-           :on-change #(reset! plugin-url-input (.. % -target -value))}]
-         [:div.settings-actions
-          [:button.settings-button
-           {:disabled (empty? @plugin-url-input)
-            :on-click #(do
-                         (re-frame/dispatch [:plugins/install-from-url @plugin-url-input])
-                         (reset! plugin-url-input ""))}
-           (tr [:settings.plugins/install])]]]
+        [:div.settings-hub-group-card
+         [:div.settings-card-stack
+          [:div.settings-input-row
+           [:input.settings-input
+            {:type        "text"
+             :placeholder (tr [:settings.plugins/placeholder-plugin-url])
+             :value       @plugin-url-input
+             :on-change   #(reset! plugin-url-input (.. % -target -value))}]
+           [:button.settings-button
+            {:disabled (empty? @plugin-url-input)
+             :on-click #(do
+                          (re-frame/dispatch [:plugins/install-from-url @plugin-url-input])
+                          (reset! plugin-url-input ""))}
+            (tr [:settings.plugins/install])]]]]]
 
-        (when (seq active-plugins)
-          [:<>
-           [:h3.settings-subheading
-            (tr [:settings.plugins/active-plugins])]
+       (when (seq active-plugins)
+         [:div.settings-hub-group
+          [:div.settings-hub-group-label
+           (tr [:settings.plugins/active-plugins])]
+          [:div.settings-hub-group-card
            (for [plugin active-plugins]
              (let [url         (:source-url plugin)
                    provided-by (:provided-by plugin)
                    enabled?    (not (contains? disabled-urls url))]
                ^{:key (:id plugin)}
-               [:div.settings-row.is-toggle
+               [:div.settings-card-row.is-toggle
                 [:div.settings-row-text
                  [:div.settings-row-title
-                  (:name plugin (tr [:settings.plugins/unknown-plugin]))
-                  (str " v" (:version plugin "1.0.0"))
+                  [:span (:name plugin (tr [:settings.plugins/unknown-plugin]))]
+                  [:span.settings-badge.neutral
+                   (str "v" (:version plugin "1.0.0"))]
                   (when provided-by
-                    (str " (" (name provided-by) ")"))]
+                    [:span.settings-badge
+                     (clojure.core/name provided-by)])]
                  [:div.settings-row-description
                   (:description plugin (tr [:settings.plugins/no-description]))]]
                 [:div.settings-actions
                  [:label.settings-toggle
                   [:input
-                   {:type "checkbox"
-                    :checked enabled?
+                   {:type      "checkbox"
+                    :checked   enabled?
                     :on-change #(re-frame/dispatch
                                  [:plugins/toggle-plugin url (.. % -target -checked)])}]
                   [:div.settings-toggle-track
                    [:div.settings-toggle-knob]]]
                  (when-not provided-by
-                   [:button.settings-button.destructive
-                    {:title (tr [:settings.plugins/uninstall-plugin])
+                   [:button.settings-button.destructive.icon-only
+                    {:title    (tr [:settings.plugins/uninstall-plugin])
                      :on-click #(re-frame/dispatch [:plugins/uninstall-url url])}
-                    [icons/trash]])]]))])]
+                    [icons/trash]])]]))]])
 
        (when (seq registry-plugins)
-         [:div.settings-section
-          [:h3.settings-subheading
+         [:div.settings-hub-group
+          [:div.settings-hub-group-label
            (tr [:settings.plugins/available-in-registry])]
-          (for [reg-plugin registry-plugins]
-            (let [m-url      (:manifest-url reg-plugin)
-                  installed? (or (contains? installed-urls m-url)
-                                 (contains? active-ids (:id reg-plugin)))]
-              ^{:key (:id reg-plugin)}
-              [:div.settings-row
-               [:div.settings-row-text
-                [:div.settings-row-title
-                 (:name reg-plugin (name (:id reg-plugin)))
-                 (str " v" (:version reg-plugin "1.0.0"))]
-                [:div.settings-row-description
-                 (:description reg-plugin "")]]
-               [:div.settings-actions
-                [:button.settings-button
-                 {:disabled installed?
-                  :on-click #(re-frame/dispatch [:plugins/install-from-url m-url])}
-                 (if installed?
-                   (tr [:settings.plugins/installed])
-                   (tr [:settings.plugins/install]))]]]))])])))
+          [:div.settings-hub-group-card
+           (for [reg-plugin registry-plugins]
+             (let [m-url      (:manifest-url reg-plugin)
+                   installed? (or (contains? installed-urls m-url)
+                                  (contains? active-ids (:id reg-plugin)))]
+               ^{:key (:id reg-plugin)}
+               [:div.settings-card-row
+                [:div.settings-row-text
+                 [:div.settings-row-title
+                  [:span (:name reg-plugin (clojure.core/name (:id reg-plugin)))]
+                  [:span.settings-badge.neutral
+                   (str "v" (:version reg-plugin "1.0.0"))]]
+                 [:div.settings-row-description
+                  (:description reg-plugin "")]]
+                [:div.settings-actions
+                 [:button.settings-button.is-compact
+                  {:class    (when installed? "secondary")
+                   :disabled installed?
+                   :on-click #(re-frame/dispatch [:plugins/install-from-url m-url])}
+                  (if installed?
+                    (tr [:settings.plugins/installed])
+                    (tr [:settings.plugins/install]))]]]))]])])))
 
 #+end_src
 
@@ -329,8 +337,8 @@ We'll likely repurpose this at some point.
 
        [:p.security-modal-warning
         (tr [:settings.plugins/warning-message])]
-       [:div.settings-actions
-        [:button.settings-button
+       [:div.security-modal-actions
+        [:button.settings-button.secondary
          {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
          (tr [:settings.plugins/cancel])]
         [:button.settings-button.destructive
