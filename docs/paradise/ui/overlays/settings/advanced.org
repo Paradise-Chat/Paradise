@@ -28,32 +28,32 @@ live here.
   (let [tr           @(re-frame/subscribe [:i18n/tr])
         policy       @(re-frame/subscribe [:settings/media-preview-policy])
         previews-on? (= policy :on)]
-    [:div.settings-section
-     [:h3.settings-subheading
+    [:div.settings-hub-group
+     [:div.settings-hub-group-label
       (tr [:settings.advanced/prefs-subheading])]
-
-     [:div.settings-row.is-toggle
-      [:div.settings-row-text
-       [:div.settings-row-title
-        (tr [:settings.advanced/link-previews-title])]
-       [:div.settings-row-description
-        (tr [:settings.advanced/link-previews-description])]]
-      [:label.settings-toggle
-       [:input
-        {:type "checkbox"
-         :checked previews-on?
-         :on-change #(re-frame/dispatch
-                      [:settings/update-media-preview-policy
-                       (if (.. % -target -checked)
-                         :on
-                         :off)])}]
-       [:div.settings-toggle-track
-        [:div.settings-toggle-knob]]]]]))
+     [:div.settings-hub-group-card
+      [:div.settings-card-row.is-toggle
+       [:div.settings-row-text
+        [:div.settings-row-title
+         (tr [:settings.advanced/link-previews-title])]
+        [:div.settings-row-description
+         (tr [:settings.advanced/link-previews-description])]]
+       [:label.settings-toggle
+        [:input
+         {:type      "checkbox"
+          :checked   previews-on?
+          :on-change #(re-frame/dispatch
+                       [:settings/update-media-preview-policy
+                        (if (.. % -target -checked)
+                          :on
+                          :off)])}]
+        [:div.settings-toggle-track
+         [:div.settings-toggle-knob]]]]]]))
 
 (defn ^:ui advanced-plugins-view []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
     [:<>
-     [:p.settings-description
+     [:p.settings-subview-lead
       (tr [:settings.advanced/description])]
      [plugins/plugins-installer]]))
 
@@ -61,33 +61,30 @@ live here.
   [registry/registries-and-engines-panel])
 
 (defn ^:ui advanced-tab []
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    (r/with-let [!active-sub-tab (r/atom :preferences)]
+  (r/with-let [!active-sub-tab (r/atom :preferences)]
+    (let [tr  @(re-frame/subscribe [:i18n/tr])
+          sub @!active-sub-tab]
       [:div.settings-tab-content
-       [:div.settings-page-header
-        [:h2.settings-heading
-         (tr [:settings.advanced/title])]]
-
-       [:div.settings-actions.settings-subtabs
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :preferences)
-                   "is-active")
+       [:div.settings-segmented
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :preferences) "is-active")
           :on-click #(reset! !active-sub-tab :preferences)}
          (tr [:settings.advanced/section-prefs])]
 
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :plugins)
-                   "is-active")
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :plugins) "is-active")
           :on-click #(reset! !active-sub-tab :plugins)}
          (tr [:settings.plugins/section-title])]
 
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :registries)
-                   "is-active")
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :registries) "is-active")
           :on-click #(reset! !active-sub-tab :registries)}
          (tr [:settings.registry/section-title])]]
 
-       (case @!active-sub-tab
+       (case sub
          :preferences [advanced-preferences-view]
          :plugins     [advanced-plugins-view]
          :registries  [advanced-registries-view])])))
