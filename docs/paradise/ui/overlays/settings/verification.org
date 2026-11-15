@@ -98,17 +98,12 @@ while logged in. So perhaps we shift to more of that identity.
           is-verifying? (= status :verifying)
           is-empty?     (empty? @!passphrase)]
       [:div.settings-tab-content
-       [:div.settings-page-header
-        [:h2.settings-heading
-         (tr [:settings.verification/title])]
-        (when (or (= status :incomplete)
-                  (= status :verifying)
-                  (= status :error))
-          [:p.settings-description
-           (tr [:settings.verification/description])])]
+       [:p.settings-subview-lead
+        (tr [:settings.verification/description])]
 
        (cond
-         (= status :enabled)
+         (or (= status :enabled)
+             (= status :verified))
          [:div.settings-banner.success
           [:div.settings-banner-icon
            [icons/check-circle-green]]
@@ -121,30 +116,33 @@ while logged in. So perhaps we shift to more of that identity.
          (or (= status :incomplete)
              (= status :verifying)
              (= status :error))
-         [:div.settings-section
-          [:div.settings-field
-           [:label.settings-label
-            (tr [:settings.verification.form/label])]
-           [:input.settings-input
-            {:class (when error "is-invalid")
-             :type "password"
-             :value @!passphrase
-             :on-change #(reset! !passphrase (.. % -target -value))
-             :disabled is-verifying?
-             :placeholder (tr [:settings.verification.form/placeholder])}]
-           (when error
-             [:div.settings-error
-              (str
-               (tr [:settings.verification.form/error-prefix])
-               error)])
-           [:button.settings-button
-            {:class (when is-verifying? "is-busy")
-             :on-click #(re-frame/dispatch
-                         [:sdk/submit-verification @!passphrase])
-             :disabled (or is-empty? is-verifying?)}
-            (if is-verifying?
-              (tr [:settings.verification.status/is-verifying])
-              (tr [:settings.verification.status/verify-action]))]]]
+         [:div.settings-hub-group
+          [:div.settings-hub-group-label
+           (tr [:settings.verification/title])]
+          [:div.settings-hub-group-card
+           [:div.settings-card-stack
+            [:div.settings-field
+             [:label.settings-label
+              (tr [:settings.verification.form/label])]
+             [:input.settings-input
+              {:class       (when error "is-invalid")
+               :type        "password"
+               :value       @!passphrase
+               :on-change   #(reset! !passphrase (.. % -target -value))
+               :disabled    is-verifying?
+               :placeholder (tr [:settings.verification.form/placeholder])}]
+             (when error
+               [:div.settings-error
+                (str (tr [:settings.verification.form/error-prefix]) error)])]
+            [:div.settings-actions
+             [:button.settings-button
+              {:class    (when is-verifying? "is-busy")
+               :on-click #(re-frame/dispatch
+                           [:sdk/submit-verification @!passphrase])
+               :disabled (or is-empty? is-verifying?)}
+              (if is-verifying?
+                (tr [:settings.verification.status/is-verifying])
+                (tr [:settings.verification.status/verify-action]))]]]]]
 
          (= status :disabled)
          [:div.settings-banner.warning
@@ -155,7 +153,8 @@ while logged in. So perhaps we shift to more of that identity.
             (tr [:settings.verification.status/warning-subtitle])]]]
 
          :else
-         [:div.settings-loading
-          (tr [:settings.verification.status/checking])])])))
+         [:div.settings-hub-group-card
+          [:div.settings-loading
+           (tr [:settings.verification.status/checking])]])])))
 #+end_src
 
