@@ -53,12 +53,15 @@ export interface ProxyRequestOptions {
     url: string;
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    body?: string | Uint8Array | ArrayBuffer;
+    bodyEncoding?: "utf8" | "base64";
     responseType?: "text" | "json" | "base64";
 }
 
 export interface PrepareStreamOptions {
-    urlOrHost: string;
+    url?: string;
+    urlOrHost?: string;
+    headers?: Record<string, string>;
     requestHeaders?: Record<string, string>;
 }
 
@@ -106,23 +109,31 @@ export function setupParadiseProxyIpc(): void {
     ipcMain.handle(
         "paradise-proxy:prepare-stream",
         (_event, opts: PrepareStreamOptions) => {
-            const host = extractHostname(opts?.urlOrHost);
-            if (!host) return false;
-            streamHeaderRules.set(host, opts?.requestHeaders ?? {});
-            return true;
+            const rawTarget = String(opts?.url || opts?.urlOrHost || "").trim();
+            const host = extractHostname(rawTarget);
+            if (!host) {
+                return { ok: false, url: rawTarget };
+            }
+            const hdrs = opts?.headers ?? opts?.requestHeaders ?? {};
+            streamHeaderRules.set(host, hdrs);
+            return { ok: true, url: opts?.url || rawTarget };
         }
     );
 
     ipcMain.handle(
         "paradise-proxy:clear-stream",
-        (_event, urlOrHost?: string) => {
-            if (!urlOrHost) {
+        (_event, urlOrHost?: string | { urlOrHost?: string }) => {
+            const target =
+                typeof urlOrHost === "string"
+                    ? urlOrHost
+                    : urlOrHost?.urlOrHost;
+            if (!target) {
                 streamHeaderRules.clear();
-                return true;
+                return { ok: true };
             }
-            const host = extractHostname(urlOrHost);
+            const host = extractHostname(target);
             if (host) streamHeaderRules.delete(host);
-            return true;
+            return { ok: true };
         }
     );
 
@@ -137,10 +148,26 @@ export function setupParadiseProxyIpc(): void {
             const method = (opts.method ?? "GET").toUpperCase();
             const canHaveBody = method !== "GET" && method !== "HEAD";
 
+            let requestBody: BodyInit | undefined;
+            if (canHaveBody && opts.body !== undefined && opts.body !== null) {
+                if (
+                    opts.bodyEncoding === "base64" &&
+                    typeof opts.body === "string"
+                ) {
+                    requestBody = Buffer.from(opts.body, "base64");
+                } else if (opts.body instanceof Uint8Array) {
+                    requestBody = Buffer.from(opts.body);
+                } else if (opts.body instanceof ArrayBuffer) {
+                    requestBody = Buffer.from(opts.body);
+                } else {
+                    requestBody = String(opts.body);
+                }
+            }
+
             const res = await net.fetch(opts.url, {
                 method,
                 headers: opts.headers ?? {},
-                body: canHaveBody && opts.body ? opts.body : undefined,
+                body: requestBody,
                 redirect: "follow",
                 credentials: "omit",
             });

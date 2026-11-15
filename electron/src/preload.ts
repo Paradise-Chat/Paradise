@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("paradiseWindow", {
 });
 
 contextBridge.exposeInMainWorld("paradiseProxy", {
+    provider: "electron",
+    version: "1.0",
     isSupported: () => Promise.resolve(true),
     request: (opts: any) => ipcRenderer.invoke("paradise-proxy:request", opts),
     prepareStream: (opts: any) =>
@@ -66,5 +68,22 @@ contextBridge.exposeInMainWorld("paradiseProxy", {
         ipcRenderer.invoke("paradise-proxy:close-auth-window"),
     openExternal: (url: string) =>
         ipcRenderer.invoke("paradise-proxy:open-external", url),
+});
+
+const announceElectronProxyReady = () => {
+    try {
+        window.dispatchEvent(
+            new CustomEvent("paradise:proxy-ready", {
+                detail: { provider: "electron", version: "1.0" },
+            })
+        );
+    } catch {
+        // Ignore if window event target is not ready yet
+    }
+};
+
+announceElectronProxyReady();
+window.addEventListener("DOMContentLoaded", announceElectronProxyReady, {
+    once: true,
 });
 
