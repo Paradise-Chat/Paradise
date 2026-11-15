@@ -95,7 +95,10 @@ well we don't want it larger than it is.
     :update-layout-context
     :process-timeline-diff
     :eval-virtualizer-plugin
+    :proxy-status
     :proxy-request
+    :prepare-stream
+    :clear-stream
     :open-auth-window
     :close-auth-window
     :auth-challenge})
