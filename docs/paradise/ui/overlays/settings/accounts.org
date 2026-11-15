@@ -15,6 +15,8 @@ log into another or swap to another.
   (:require [cljs-workers.mesh :as mesh]
             [cljs.core.async :refer [<! go]]
             [clojure.string :as str]
+            [paradise.shared.utils.svg :as icons]
+            [paradise.ui.global :refer [avatar]]
             [re-frame.core :as re-frame]
             [taoensso.timbre :as log]))
 #+end_src
