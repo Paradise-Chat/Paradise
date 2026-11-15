@@ -1,7 +1,6 @@
-
 ** Spaces
 
-Spaces rendering.
+Spaces rendering, scrolling, and protocol-agnostic space groups (folders).
 
 The logical starting point is ensuring that there isn't any internal structure for the Rust sdk that trivializes this further.
 I am aware, however, that as spaces are just rooms the room object contains a flag that outlines whether an item is a space or
