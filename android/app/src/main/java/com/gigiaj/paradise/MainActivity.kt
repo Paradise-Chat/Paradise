@@ -9,6 +9,7 @@ import com.getcapacitor.BridgeActivity
 class MainActivity : BridgeActivity() {
     public override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(ShadowDevicePlugin::class.java)
+        registerPlugin(ParadiseProxyPlugin::class.java)
 //        registerPlugin(ParadiseCallPlugin::class.java)
         super.onCreate(savedInstanceState)
         
