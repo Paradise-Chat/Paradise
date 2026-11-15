@@ -371,10 +371,15 @@ html, body {
 }
 
 .app-root {
+    --app-bottom-cushion: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
     display: flex;
     height: 100dvh;
     width: 100dvw;
     overflow: hidden;
+}
+
+.app-root[data-platform="ios"] {
+    --app-bottom-cushion: 8px;
 }
 
 
@@ -424,7 +429,7 @@ html, body {
     .app-root {
         position: relative;
         overflow: hidden;
-        padding-top: env(safe-area-inset-top, 0px);
+        padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
         padding-bottom: 0px;
     }
 
@@ -438,9 +443,9 @@ html, body {
         position: absolute;
         display: flex;
         z-index: 100;
+        height: auto;
         min-height: 0;
-        overflow-y: auto;
-        top: env(safe-area-inset-top, 0px);
+        top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
         bottom: 0;
         transform: translateX(-100%);
         transition: transform 0.3s ease;
@@ -457,10 +462,7 @@ html, body {
 
     .mobile-overlay {
         position: fixed;
-        padding-top: env(safe-area-inset-top, 0px);
-/*
-        bottom: env(safe-area-inset-bottom, 0px);
-*/
+        padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
         inset: 0;
         background: rgba(0, 0, 0, 0.5);
         z-index: 90;
@@ -638,7 +640,7 @@ providing the encapsulation and parsing for us.
         platform      (.getPlatform js/Capacitor)
         cushion       (if (= platform "ios")
                         "8px"
-                        "env(safe-area-inset-bottom, 0px)")
+                        "var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))")
         swipe-props   (make-swipe-handlers
                        :sidebar
                        {:sidebar-open? sidebar-open?
