@@ -31,6 +31,10 @@ Mildly temporary until we better place these with the engine.
      "global-spaces-diff"
      (fn [_ get-val]
        (re-frame/dispatch [:sdk/set-spaces-list-sync (get-val "spaces" :spaces)]))
+     "space-layout-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:space-groups/apply-remote-sync
+                           (get-val "layout" :layout)]))
      "space-rooms-diff"
      (fn [_ get-val]
        (re-frame/dispatch [:sdk/update-space-view
