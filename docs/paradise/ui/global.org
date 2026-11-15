@@ -55,6 +55,8 @@ enable passing functions through them.
 (defonce !active-context-menu (r/atom nil))
 (defonce !active-modal (r/atom nil))
 (defonce !active-popover (r/atom nil))
+(defonce !long-press-state (atom {}))
+(declare !swipe-drag-data)
 #+end_src
 
 
@@ -102,7 +104,7 @@ enable passing functions through them.
           (enable-clicks!)))
 
       (when (and active-menu (not @!safe-to-click?) (not @!listener-active?))
-        (if is-mobile?
+        (if (and is-mobile? (:touch-active? @!long-press-state))
           (do
             (reset! !listener-active? true)
             (.addEventListener js/window "touchend" enable-clicks! true)
@@ -434,89 +436,223 @@ much simpler.
 
 500ms is the standard
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
+(defn- vibrate-short! []
+  (try
+    (when (some-> js/navigator .-vibrate)
+      (.vibrate js/navigator 10))
+    (catch :default _ nil)))
 
+(defn- attach-scroll-lock! [!state handler]
+  (when-not (:scroll-handler @!state)
+    (swap! !state assoc :scroll-handler handler)
+    (.addEventListener js/window "touchmove" handler #js {:passive false :capture true})))
 
-(defn start-long-press! [handler !long-press-state action-fn mx my]
+(defn- suppress-next-click! []
+  (swap! !long-press-state assoc :suppress-click-until (+ (js/Date.now) 400)))
+
+(defn start-long-press!
+  ([handler !state action-fn mx my]
+   (start-long-press! handler !state action-fn mx my 500))
+  ([handler !state action-fn mx my delay-ms]
+   (js/setTimeout
+    (fn []
+      (try
+        (when-not (:dragging? @!state)
+          (attach-scroll-lock! !state handler)
+          (swap! !state assoc :fired? true)
+          (if action-fn
+            (action-fn mx my)
+            (js/console.error "[LongPress Debug] Timer fired but action-fn is nil!")))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash inside timeout! !state:" !state)
+          (throw err))))
+    delay-ms)))
+
+(defn- start-drag-arm! [handler !state drag-opts mx my target-el]
   (js/setTimeout
    (fn []
-     (try
-       (swap! !long-press-state assoc
-              :fired? true
-              :scroll-handler handler)
-       (.addEventListener js/window "touchmove" handler #js {:passive false :capture true})
-       (if action-fn
-         (action-fn mx my)
-         (js/console.error "[LongPress Debug] Timer fired but action-fn is nil!"))
-       (catch :default err
-         (js/console.error "[LongPress Debug] Crash inside timeout! !long-press-state:" !long-press-state)
-         (throw err))))
-   500))
-
-(defonce !long-press-state (atom {}))
+     (when-not (:dragging? @!state)
+       (attach-scroll-lock! !state handler)
+       (swap! !swipe-drag-data assoc :owner :touch-drag)
+       (swap! !state assoc :armed? true)
+       (vibrate-short!)
+       (when-let [f (:on-arm drag-opts)]
+         (f mx my target-el))))
+   200))
 
 (defn clear-long-press! []
-  (let [{:keys [timer scroll-handler]} @!long-press-state]
+  (let [{:keys [timer arm-timer scroll-handler suppress-click-until last-touch-at]} @!long-press-state]
     (when timer (js/clearTimeout timer))
+    (when arm-timer (js/clearTimeout arm-timer))
     (when scroll-handler
       (.removeEventListener js/window "touchmove" scroll-handler true))
-    (reset! !long-press-state {:timer nil :fired? false :start-pos nil :scroll-handler nil})))
+    (when (= (:owner @!swipe-drag-data) :touch-drag)
+      (swap! !swipe-drag-data assoc :owner nil))
+    (reset! !long-press-state
+            {:timer                nil
+             :arm-timer            nil
+             :touch-active?        false
+             :armed?               false
+             :dragging?            false
+             :fired?               false
+             :started-at           nil
+             :start-pos            nil
+             :target-el            nil
+             :scroll-handler       nil
+             :last-touch-at        (or last-touch-at 0)
+             :suppress-click-until (or suppress-click-until 0)})))
 
-(defn long-press-props [action-fn]
-  {:on-context-menu (fn [e]
-                      (try
-                        (.stopPropagation e)
-                        (.preventDefault e)
-                        (when (and action-fn (not (:fired? @!long-press-state)))
-                          (action-fn (.-clientX e) (.-clientY e)))
-                        (clear-long-press!)
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-context-menu. action-fn:" action-fn)
-                          (throw err))))
+(defn long-press-props
+  ([action-fn]
+   (long-press-props action-fn nil))
+  ([action-fn drag-opts]
+   {:on-click-capture
+    (fn [e]
+      (when (< (js/Date.now) (:suppress-click-until @!long-press-state 0))
+        (.stopPropagation e)
+        (.preventDefault e)))
 
-   :on-touch-start  (fn [e]
-                      (try
-                        (clear-long-press!)
-                        (let [touch (aget (.-touches e) 0)
-                              mx    (.-clientX touch)
-                              my    (.-clientY touch)
-                              handler (fn [ev] (.preventDefault ev))
-                              timer  (start-long-press! handler !long-press-state action-fn mx my)]
-                          (swap! !long-press-state assoc
-                                 :start-pos {:x mx :y my}
-                                 :timer timer))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-start. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-context-menu
+    (fn [e]
+      (try
+        (.stopPropagation e)
+        (.preventDefault e)
+        (let [st     @!long-press-state
+              now    (js/Date.now)
+              touch? (or (:touch-active? st)
+                         (< (- now (:last-touch-at st 0)) 750))]
+          (when-not touch?
+            (when (and action-fn (not (:fired? st)))
+              (action-fn (.-clientX e) (.-clientY e)))
+            (clear-long-press!)))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-context-menu. action-fn:" action-fn)
+          (throw err))))
 
-   :on-touch-move   (fn [e]
-                      (try
-                        (let [{:keys [timer start-pos fired?]} @!long-press-state]
-                          (when (and timer (not fired?))
-                            (let [touch (aget (.-touches e) 0)
-                                  mx    (.-clientX touch)
-                                  my    (.-clientY touch)
-                                  {:keys [x y]} start-pos
-                                  dx    (- mx x)
-                                  dy    (- my y)
-                                  dist-sq (+ (* dx dx) (* dy dy))]
-                              (when (> dist-sq 100)
-                                (clear-long-press!)))))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-move. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-touch-start
+    (fn [e]
+      (try
+        (clear-long-press!)
+        (when-let [touch (aget (.-touches e) 0)]
+          (let [mx        (.-clientX touch)
+                my        (.-clientY touch)
+                target-el (.-currentTarget e)
+                now       (js/Date.now)
+                handler   (fn [ev] (.preventDefault ev))]
+            (if drag-opts
+              (let [arm-timer (start-drag-arm! handler !long-press-state drag-opts mx my target-el)]
+                (swap! !long-press-state assoc
+                       :touch-active?  true
+                       :last-touch-at  now
+                       :started-at     now
+                       :start-pos      {:x mx :y my}
+                       :target-el      target-el
+                       :arm-timer      arm-timer
+                       :timer          nil))
+              (let [timer (start-long-press! handler !long-press-state action-fn mx my 500)]
+                (swap! !long-press-state assoc
+                       :touch-active?  true
+                       :last-touch-at  now
+                       :started-at     now
+                       :start-pos      {:x mx :y my}
+                       :target-el      target-el
+                       :timer          timer)))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-start. !long-press-state:" !long-press-state)
+          (throw err))))
 
-   :on-touch-end    (fn [e]
-                      (try
-                        (let [{:keys [fired?]} @!long-press-state]
-                          (clear-long-press!)
-                          (when fired?
-                            (.stopPropagation e)
-                            (.preventDefault e)))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-end. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-touch-move
+    (fn [e]
+      (try
+        (when-let [touch (aget (.-touches e) 0)]
+          (swap! !long-press-state assoc :last-touch-at (js/Date.now))
+          (let [mx    (.-clientX touch)
+                my    (.-clientY touch)
+                state @!long-press-state
+                {:keys [timer arm-timer start-pos armed? dragging? fired? target-el]} state]
+            (cond
+              dragging?
+              (do
+                (.stopPropagation e)
+                (when-let [f (:on-drag-move drag-opts)]
+                  (f mx my)))
 
-   :on-touch-cancel (fn [_] (clear-long-press!))})
+              (and drag-opts armed? start-pos)
+              (let [{:keys [x y]} start-pos
+                    dx            (- mx x)
+                    dy            (- my y)
+                    dist-sq       (+ (* dx dx) (* dy dy))]
+                (when (> dist-sq 64)
+                  (swap! !swipe-drag-data assoc :owner :touch-drag)
+                  (swap! !long-press-state assoc :dragging? true)
+                  (.stopPropagation e)
+                  (when-let [f (:on-drag-start drag-opts)]
+                    (f x y target-el))
+                  (when-let [f (:on-drag-move drag-opts)]
+                    (f mx my))))
+
+              (and (or timer arm-timer) (not fired?) start-pos)
+              (let [{:keys [x y]} start-pos
+                    dx            (- mx x)
+                    dy            (- my y)
+                    dist-sq       (+ (* dx dx) (* dy dy))]
+                (when (> dist-sq 100)
+                  (clear-long-press!))))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-move. !long-press-state:" !long-press-state)
+          (throw err))))
+
+    :on-touch-end
+    (fn [e]
+      (try
+        (let [now        (js/Date.now)
+              state      @!long-press-state
+              {:keys [armed? dragging? fired? start-pos started-at]} state
+              end-touch  (some-> (.-changedTouches e) (aget 0))
+              ex         (if end-touch (.-clientX end-touch) (:x start-pos 0))
+              ey         (if end-touch (.-clientY end-touch) (:y start-pos 0))
+              elapsed    (- now (or started-at 0))
+              cancelled? (= (.-type e) "touchcancel")]
+          (swap! !long-press-state assoc :last-touch-at now)
+          (clear-long-press!)
+          (cond
+            dragging?
+            (do
+              (suppress-next-click!)
+              (.stopPropagation e)
+              (.preventDefault e)
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey cancelled?)))
+
+            fired?
+            (do
+              (suppress-next-click!)
+              (.stopPropagation e)
+              (.preventDefault e)
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey true)))
+
+            armed?
+            (do
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey true))
+              (when (and (not cancelled?) (>= elapsed 450) action-fn start-pos)
+                (suppress-next-click!)
+                (.stopPropagation e)
+                (.preventDefault e)
+                (action-fn (:x start-pos) (:y start-pos))))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-end. !long-press-state:" !long-press-state)
+          (throw err))))
+
+    :on-touch-cancel
+    (fn [_]
+      (let [{:keys [armed? dragging? start-pos]} @!long-press-state]
+        (swap! !long-press-state assoc :last-touch-at (js/Date.now))
+        (clear-long-press!)
+        (when (or armed? dragging?)
+          (when-let [f (:on-drag-end drag-opts)]
+            (f (:x start-pos 0) (:y start-pos 0) true)))))}))
 #+end_src
 
 
