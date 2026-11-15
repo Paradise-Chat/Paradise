@@ -58,6 +58,7 @@ so we'll keep them nicely collected here.
         room-meta     @(re-frame/subscribe [:rooms/active-metadata])
         final-name    (or (:name room-meta) display-name active-id)
         is-dm?        (:isDirect room-meta)
+        is-group-dm?  (boolean (or (:isGroupDm room-meta) (:is-group-dm? room-meta)))
         is-space?     (:isSpace room-meta)
         in-lobby?     (and (= main-focus :timeline) call-active?)
         show-actions? (or (not compact?) (= main-focus :call))
@@ -103,11 +104,12 @@ so we'll keep them nicely collected here.
                       (re-frame/dispatch [:room/fetch-pinned-events active-id]))}
          [icons/pins {:animate :sink}]]
 
-        (when-not is-dm?
+        (when (or (not is-dm?) is-group-dm?)
           [:button.header-icon-btn.hide-on-mobile
            {:title (tr [:container.header/member-list])
             :class (when (= side-panel :members) "active")
-            :on-click #(re-frame/dispatch [:container/set-side-panel :members])}
+            :on-click #(re-frame/dispatch [:container/set-side-panel
+                                           (if (= side-panel :members) nil :members)])}
            [icons/members]])
 
         [:button.header-icon-btn
