@@ -2,9 +2,11 @@
 
 Spaces rendering, scrolling, and protocol-agnostic space groups (folders).
 
-The logical starting point is ensuring that there isn't any internal structure for the Rust sdk that trivializes this further.
-I am aware, however, that as spaces are just rooms the room object contains a flag that outlines whether an item is a space or
-not (among many other indicators).
+The space rail keeps the Home action pinned at the top and the mini profile
+footer pinned at the bottom, while unread DM pops and spaces/groups scroll
+smoothly in between. Users can organize spaces, servers, or communities into
+Discord-style folders via drag-and-drop or the context menu, cached locally per
+account in ~session-store~ and synchronized with the active protocol engine.
 
 **** Imports
 
