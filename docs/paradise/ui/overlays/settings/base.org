@@ -62,6 +62,7 @@ file.
    "disabled_plugin_urls"   {:event :plugins/hydrate-disabled-urls      :default []       :stage :boot}
    "plugin_urls"            {:event :plugins/hydrate-urls               :default []       :stage :boot}
    "space_hierarchies"      {:event :space/hydrate-hierarchies          :default {}       :stage :login}
+   "space_layouts"          {:event :space-groups/hydrate               :default {}       :stage :login}
    "keybinds"               {:event :settings/hydrate-keybinds          :default {}       :stage :boot}
    "call_audio_input"       {:event :settings/hydrate-audio-input       :default nil      :stage :boot}
    "call_video_input"       {:event :settings/hydrate-video-input       :default nil      :stage :boot}
