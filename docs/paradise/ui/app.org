@@ -801,6 +801,7 @@ when we detatch and reload (basically when you hit control + s to save).
 
 
 (defn ^:after-load re-render []
+  (load-i18n)
   (mount-root))
 #+end_src
 
