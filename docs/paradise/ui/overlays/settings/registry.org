@@ -17,7 +17,6 @@ https://github.com/Paradise-Chat/Community-Registry
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/registry.cljs
 (ns paradise.ui.overlays.settings.registry
   (:require
-   [clojure.string :as str]
    [paradise.shared.utils.svg :as icons]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
