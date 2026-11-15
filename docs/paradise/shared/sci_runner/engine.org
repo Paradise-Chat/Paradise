@@ -18,7 +18,6 @@ SCI runner context.
             [cljs-workers.worker :as worker]
             [cljs-workers.mesh :as mesh]
             [paradise.engine.state :as state]
-            [net :as net]
             [paradise.shared.sci-runner.factory :as factory]))
 #+end_src
 
