@@ -451,6 +451,15 @@ html, body {
         transition: transform 0.3s ease;
     }
 
+    .sidebar-spaces {
+        overflow: hidden;
+    }
+
+    .sidebar-rooms {
+        overflow-y: auto;
+        padding-bottom: max(12px, calc(6px + var(--app-bottom-cushion, 0px)));
+    }
+
 
     .sidebars-open .sidebar-spaces {
         transform: translateX(0);
@@ -660,9 +669,10 @@ providing the encapsulation and parsing for us.
 
         [persistent-call-container]
         (into [:div.app-root
-               (merge {:class (when sidebar-open? "sidebars-open")
-                       :style {:touch-action   "pan-y"
-                               :padding-bottom cushion}}
+               (merge {:class         (when sidebar-open? "sidebars-open")
+                       :data-platform platform
+                       :style         {:touch-action   "pan-y"
+                                       :padding-bottom cushion}}
                       swipe-props)]
               [[spaces-sidebar]
                [room-list]
