@@ -25,23 +25,19 @@ between the i18n options for example.
   (let [tr     @(re-frame/subscribe [:i18n/tr])
         locale @(re-frame/subscribe [:i18n/locale])]
     [:div.settings-tab-content
-     [:div.settings-page-header
-      [:h2.settings-heading
-       (tr [:settings.language/title])]
-      [:p.settings-description
-       (tr [:settings.language/description])]]
+     [:p.settings-subview-lead
+      (tr [:settings.language/description])]
 
-     [:div.settings-section
-      [:h3.settings-subheading
+     [:div.settings-hub-group
+      [:div.settings-hub-group-label
        (tr [:settings.language/system-label])]
-
       [:div.settings-list
        (for [[id label native]
              [[:en "English" "English"]
               [:lorem "Lorem Ipsum" "Lorem Ipsum"]]]
          ^{:key id}
          [:div.settings-list-item.is-clickable
-          {:class (when (= locale id) "is-active")
+          {:class    (when (= locale id) "is-active")
            :on-click #(re-frame/dispatch [:i18n/set-locale id])}
           [:div.settings-list-main
            [:div.settings-list-title native]
