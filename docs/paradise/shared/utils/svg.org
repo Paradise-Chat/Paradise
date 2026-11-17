@@ -748,10 +748,15 @@ And maybe a send button for later use in the style of a paper plane.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def thread-shapes
   [:g
-   [:circle {:cx "7" :cy "7" :r "3"}]
-   [:circle {:cx "17" :cy "17" :r "3"}]
-   [:path {:d "M7 10v4a2 2 0 0 0 2 2h4"}]
-   [:path {:d "M17 14v-4a2 2 0 0 0-2-2h-4"}]])
+   [:g {:transform "rotate(35 12 11.5)"}
+    [:rect {:x "4.5" :y "3" :width "15" :height "3" :rx "1"}]
+    [:rect {:x "4.5" :y "17" :width "15" :height "3" :rx "1"}]
+    [:path {:d "M7 6v11"}]
+    [:path {:d "M17 6v11"}]
+    [:path {:d "M7 9.5h10"}]
+    [:path {:d "M7 13.5h10"}]]
+   [:path {:d "M6.5 13.5c-2.5 1.5-2 4.5.5 5.5s1.5 3-2.5 3"}]])
+
 
 (defn thread [props]
   (build-icon-hiccup props thread-shapes))
