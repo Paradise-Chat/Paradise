@@ -170,27 +170,59 @@ cross-room (~:all~) scopes.
    (get-in db [:settings :encrypted-search-crawler] true)))
 #+end_src
 
-For now though, text search will do.
+**** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/search.cljs
 (defn ^:ui search []
-  (let [active-room  @(re-frame/subscribe [:rooms/active-id])
-        search-state @(re-frame/subscribe [:room/search-state active-room])
-        loading?     (:loading? search-state)
-        results      (:results search-state)
-        tr           @(re-frame/subscribe [:i18n/tr])]
-    (r/with-let [!local-query (r/atom (:query search-state ""))]
+  (r/with-let [_            (re-frame/dispatch [:search/refresh-index-status])
+               !local-query (r/atom "")]
+    (let [active-room  @(re-frame/subscribe [:rooms/active-id])
+          scope        @(re-frame/subscribe [:search/scope])
+          search-state @(re-frame/subscribe [:room/search-state active-room scope])
+          idx-status   @(re-frame/subscribe [:search/index-status])
+          loading?     (:loading? search-state)
+          results      (:results search-state)
+          tr           @(re-frame/subscribe [:i18n/tr])
+          select-scope (fn [next-scope]
+                         (when (not= scope next-scope)
+                           (re-frame/dispatch [:search/set-scope next-scope])
+                           (when-not (str/blank? @!local-query)
+                             (re-frame/dispatch [:room/execute-search
+                                                 active-room
+                                                 @!local-query
+                                                 next-scope]))))]
       [:div.sidebar-search-container
        [:div.search-input-wrapper
         [:div.search-input-box
          [icons/search {:width "20px" :height "20px" :style {:margin-right "8px" :opacity 0.5}}]
          [:input.search-input
-          {:type         "text"
-           :placeholder  (tr [:container.search/placeholder])
-           :value        @!local-query
-           :on-change    #(reset! !local-query (.. % -target -value))
-           :on-key-down  #(when (= (.-key %) "Enter")
-                            (re-frame/dispatch [:room/execute-search active-room @!local-query]))}]]]
+          {:type        "text"
+           :placeholder (if (= scope :all)
+                          (tr [:container.search/placeholder-all])
+                          (tr [:container.search/placeholder]))
+           :value       @!local-query
+           :on-change   #(reset! !local-query (.. % -target -value))
+           :on-key-down #(when (= (.-key %) "Enter")
+                           (re-frame/dispatch [:room/execute-search
+                                               active-room
+                                               @!local-query
+                                               scope]))}]]
+        [:div.search-scope-bar
+         [:button.search-scope-pill
+          {:type     "button"
+           :class    (when (= scope :room) "is-active")
+           :on-click #(select-scope :room)}
+          (tr [:container.search/scope-room])]
+         [:button.search-scope-pill
+          {:type     "button"
+           :class    (when (= scope :all) "is-active")
+           :on-click #(select-scope :all)}
+          (tr [:container.search/scope-all])]]
+        (when (and (:supported? idx-status) (:running? idx-status))
+          [:div.search-index-banner
+           [:span.search-index-dot]
+           [:span (tr [:container.search/indexing-active]
+                      [(:indexed-events idx-status 0)])]])]
 
        [:div.search-results-area
         (cond
@@ -201,9 +233,14 @@ For now though, text search will do.
 
           (and (not loading?) (seq results))
           [:div.search-list
-           (for [res results]
-             ^{:key (:id res)}
-             [message-preview-item active-room res])]
+           (for [res results
+                 :let [hit-room (or (:room-id res) (:room_id res) active-room)
+                       row-key  (str hit-room "::" (:id res))]]
+             ^{:key row-key}
+             [message-preview-item
+              active-room
+              res
+              {:show-room-badge? (= scope :all)}])]
 
           (and (not loading?) (not (str/blank? (:query search-state))) (empty? results))
           [:div.search-status
