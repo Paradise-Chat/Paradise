@@ -52,9 +52,18 @@
     <string>audio</string>
     <string>voip</string>
   </array>
+  <key>NSSupportsLiveActivities</key>
+  <true/>
+  <key>NSSupportsLiveActivitiesFrequentUpdates</key>
+  <true/>
   <key>NSCameraUsageDescription</key>
   <string>Paradise requires camera access for video calls.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Paradise requires microphone access for voice and video calls.</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
 </dict>
 </plist>
