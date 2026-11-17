@@ -440,11 +440,11 @@ We also don't want to list our own name, so we remove that too.
        has-typists?
        [:div.status-content {:key "typing"}
         [icons/typing-dots {:width "14px" :height "14px" :style {:color "var(--cp-text-muted)"}}]
-        [:span.text (get-status-string tr :typing typing-names)]]
+        [:span.text (get-status-string tr [:container.timeline.typing] typing-names)]]
        has-readers?
        [:div.status-content {:key "readers"}
         [icons/double-check {:width "14px" :height "14px"}]
-        [:span.text (get-status-string tr :reading reader-names)]]
+        [:span.text (get-status-string tr [:container.timeline.reading] reader-names)]]
        :else
        [:span.text {:key "empty"} "\u00A0"])]))
 #+end_src
