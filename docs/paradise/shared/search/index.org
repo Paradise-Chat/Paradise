@@ -1,0 +1,693 @@
+** Encrypted Search Blinded Index & Document Store
+
+**** Preface
+
+Implements the protocol-agnostic encrypted search store on top of ~IndexedDB~
+(with an automatic in-memory fallback for headless test environments where
+~indexedDB~ is absent).
+
+All cryptographic work (~HKDF~, ~HMAC-SHA-256~, and ~AES-256-GCM~) is performed
+strictly outside ~IDBTransaction~ scopes so transactions never auto-commit
+across ~WebCrypto~ microtasks on Chromium, Gecko, or WebKit.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(ns paradise.shared.search.index
+  (:require [clojure.set :as set]
+            [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.search.crypto :as crypto]
+            [promesa.core :as p]
+            [taoensso.timbre :as log]))
+#+end_src
+
+**** Constants & State
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(def ^:const idb-version 1)
+(def ^:const max-candidate-decrypts 500)
+(def ^:const default-search-limit 50)
+(def ^:const debounce-flush-ms 250)
+
+(defonce !sessions (atom {}))
+
+(defn search-db-name [engine-id store-id]
+  (str "paradise-search-" (name engine-id) "-" store-id))
+#+end_src
+
+**** Storage Backend (~IndexedDB~ + Headless Memory Fallback)
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn- idb-factory []
+  (or (gobj/get js/globalThis "indexedDB")
+      (when (exists? js/indexedDB) js/indexedDB)))
+
+(defn- open-idb [db-name]
+  (js/Promise.
+   (fn [res-fn rej-fn]
+     (let [req (.open (idb-factory) db-name idb-version)]
+       (set! (.-onupgradeneeded req)
+             (fn [ev]
+               (let [db (.. ev -target -result)]
+                 (when-not (.contains (.-objectStoreNames db) "events")
+                   (let [os (.createObjectStore db "events" #js {:keyPath "docKey"})]
+                     (.createIndex os "by_room_ts" #js ["roomTag" "ts"] #js {:unique false})))
+                 (when-not (.contains (.-objectStoreNames db) "postings")
+                   (.createObjectStore db "postings" #js {:keyPath "tokKey"}))
+                 (when-not (.contains (.-objectStoreNames db) "checkpoints")
+                   (.createObjectStore db "checkpoints" #js {:keyPath "cpKey"})))))
+       (set! (.-onsuccess req) #(res-fn (.. % -target -result)))
+       (set! (.-onerror req) #(rej-fn (or (.. % -target -error)
+                                          (js/Error. "IndexedDB open failed"))))
+       (set! (.-onblocked req)
+             #(log/warn "Encrypted search DB open blocked:" db-name))))))
+
+(defn- make-memory-backend [db-name]
+  {:kind         :memory
+   :db-name      db-name
+   :!events      (atom {})
+   :!postings    (atom {})
+   :!checkpoints (atom {})})
+
+(defn- open-backend [db-name]
+  (if (idb-factory)
+    (-> (open-idb db-name)
+        (p/then (fn [db] {:kind :idb :db-name db-name :db db}))
+        (p/catch (fn [err]
+                   (log/warn "Falling back to in-memory encrypted search store:" err)
+                   (make-memory-backend db-name))))
+    (p/resolved (make-memory-backend db-name))))
+
+(defn- close-backend! [backend]
+  (when (and (= (:kind backend) :idb) (:db backend))
+    (try
+      (.close (:db backend))
+      (catch :default _ nil))))
+
+(defn- backend-get-events [backend doc-keys]
+  (let [ks (into [] (distinct) doc-keys)]
+    (cond
+      (empty? ks)
+      (p/resolved {})
+
+      (= (:kind backend) :memory)
+      (let [evs @(:!events backend)]
+        (p/resolved (into {} (keep (fn [k] (when-let [v (get evs k)] [k v]))) ks)))
+
+      :else
+      (js/Promise.
+       (fn [res-fn rej-fn]
+         (let [tx    (.transaction (:db backend) #js ["events"] "readonly")
+               store (.objectStore tx "events")
+               !acc  (atom {})]
+           (doseq [k ks]
+             (let [req (.get store k)]
+               (set! (.-onsuccess req)
+                     (fn [ev]
+                       (when-let [row (.. ev -target -result)]
+                         (swap! !acc assoc k
+                                {:doc-key  (gobj/get row "docKey")
+                                 :room-tag (gobj/get row "roomTag")
+                                 :ts       (gobj/get row "ts")
+                                 :iv       (gobj/get row "iv")
+                                 :ct       (gobj/get row "ct")}))))))
+           (set! (.-oncomplete tx) #(res-fn @!acc))
+           (set! (.-onerror tx) #(rej-fn (.-error tx)))))))))
+
+(defn- backend-get-postings [backend tok-keys]
+  (let [ks (into [] (distinct) tok-keys)]
+    (cond
+      (empty? ks)
+      (p/resolved {})
+
+      (= (:kind backend) :memory)
+      (let [ps @(:!postings backend)]
+        (p/resolved (into {} (map (fn [k] [k (get ps k #{})])) ks)))
+
+      :else
+      (js/Promise.
+       (fn [res-fn rej-fn]
+         (let [tx    (.transaction (:db backend) #js ["postings"] "readonly")
+               store (.objectStore tx "postings")
+               !acc  (atom {})]
+           (doseq [k ks]
+             (let [req (.get store k)]
+               (set! (.-onsuccess req)
+                     (fn [ev]
+                       (let [row (.. ev -target -result)
+                             dks (if row
+                                   (set (array-seq (or (gobj/get row "docKeys") #js [])))
+                                   #{})]
+                         (swap! !acc assoc k dks))))))
+           (set! (.-oncomplete tx) #(res-fn @!acc))
+           (set! (.-onerror tx) #(rej-fn (.-error tx)))))))))
+
+(defn- backend-apply-mutations!
+  [backend {:keys [upserts deletes posting-adds posting-removes]}]
+  (if (= (:kind backend) :memory)
+    (do
+      (when (seq deletes)
+        (swap! (:!events backend) #(apply dissoc % deletes)))
+      (when (seq upserts)
+        (swap! (:!events backend)
+               (fn [m]
+                 (reduce (fn [acc row] (assoc acc (:doc-key row) row)) m upserts))))
+      (when (or (seq posting-adds) (seq posting-removes))
+        (swap! (:!postings backend)
+               (fn [pm]
+                 (let [all-tks (set/union (set (keys posting-adds))
+                                          (set (keys posting-removes)))]
+                   (reduce
+                    (fn [acc tk]
+                      (let [cur  (get acc tk #{})
+                            remd (set/difference cur (get posting-removes tk #{}))
+                            nxt  (set/union remd (get posting-adds tk #{}))]
+                        (if (empty? nxt)
+                          (dissoc acc tk)
+                          (assoc acc tk nxt))))
+                    pm
+                    all-tks)))))
+      (p/resolved true))
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (let [tx      (.transaction (:db backend) #js ["events" "postings"] "readwrite")
+             e-store (.objectStore tx "events")
+             p-store (.objectStore tx "postings")
+             all-tks (set/union (set (keys posting-adds))
+                                (set (keys posting-removes)))]
+         (doseq [dk deletes]
+           (.delete e-store dk))
+         (doseq [{:keys [doc-key room-tag ts iv ct]} upserts]
+           (.put e-store #js {:docKey  doc-key
+                              :roomTag room-tag
+                              :ts      ts
+                              :iv      iv
+                              :ct      ct}))
+         (doseq [tk all-tks]
+           (let [adds (get posting-adds tk #{})
+                 rems (get posting-removes tk #{})
+                 req  (.get p-store tk)]
+             (set! (.-onsuccess req)
+                   (fn [ev]
+                     (let [row (.. ev -target -result)
+                           cur (if row
+                                 (set (array-seq (or (gobj/get row "docKeys") #js [])))
+                                 #{})
+                           nxt (-> cur
+                                   (set/difference rems)
+                                   (set/union adds))]
+                       (if (empty? nxt)
+                         (.delete p-store tk)
+                         (.put p-store #js {:tokKey  tk
+                                            :docKeys (into-array nxt)})))))))
+         (set! (.-oncomplete tx) #(res-fn true))
+         (set! (.-onerror tx) #(rej-fn (.-error tx))))))))
+
+(defn- backend-count-events [backend]
+  (if (= (:kind backend) :memory)
+    (p/resolved (count @(:!events backend)))
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (let [tx  (.transaction (:db backend) #js ["events"] "readonly")
+             req (.count (.objectStore tx "events"))]
+         (set! (.-onsuccess req) #(res-fn (js/Number (.. % -target -result))))
+         (set! (.-onerror req) #(rej-fn (.-error tx))))))))
+
+(defn- backend-get-checkpoint [backend cp-key]
+  (if (= (:kind backend) :memory)
+    (p/resolved (get @(:!checkpoints backend) cp-key))
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (let [tx  (.transaction (:db backend) #js ["checkpoints"] "readonly")
+             req (.get (.objectStore tx "checkpoints") cp-key)]
+         (set! (.-onsuccess req)
+               (fn [ev]
+                 (when-let [row (.. ev -target -result)]
+                   (res-fn {:cp-key (gobj/get row "cpKey")
+                            :iv     (gobj/get row "iv")
+                            :ct     (gobj/get row "ct")}))
+                 (when-not (.. ev -target -result)
+                   (res-fn nil))))
+         (set! (.-onerror req) #(rej-fn (.-error tx))))))))
+
+(defn- backend-put-checkpoint! [backend {:keys [cp-key iv ct]}]
+  (if (= (:kind backend) :memory)
+    (do
+      (swap! (:!checkpoints backend) assoc cp-key {:cp-key cp-key :iv iv :ct ct})
+      (p/resolved true))
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (let [tx  (.transaction (:db backend) #js ["checkpoints"] "readwrite")
+             os  (.objectStore tx "checkpoints")]
+         (.put os #js {:cpKey cp-key :iv iv :ct ct})
+         (set! (.-oncomplete tx) #(res-fn true))
+         (set! (.-onerror tx) #(rej-fn (.-error tx))))))))
+
+(defn- backend-clear-all! [backend]
+  (if (= (:kind backend) :memory)
+    (do
+      (reset! (:!events backend) {})
+      (reset! (:!postings backend) {})
+      (reset! (:!checkpoints backend) {})
+      (p/resolved true))
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (let [tx (.transaction (:db backend)
+                              #js ["events" "postings" "checkpoints"]
+                              "readwrite")]
+         (.clear (.objectStore tx "events"))
+         (.clear (.objectStore tx "postings"))
+         (.clear (.objectStore tx "checkpoints"))
+         (set! (.-oncomplete tx) #(res-fn true))
+         (set! (.-onerror tx) #(rej-fn (.-error tx))))))))
+#+end_src
+
+**** Session Lifecycle
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn close-session! [engine-id]
+  (let [ek (keyword engine-id)]
+    (when-let [sess (get @!sessions ek)]
+      (when-let [tmr @(:!flush-timer sess)]
+        (js/clearTimeout tmr))
+      (close-backend! (:backend sess))
+      (swap! !sessions dissoc ek))))
+
+(defn init-session! [{:keys [engine-id store-id search-key on-count-fn]}]
+  (let [ek      (keyword engine-id)
+        db-name (search-db-name ek store-id)
+        current (get @!sessions ek)]
+    (if (and current
+             (= (:db-name current) db-name)
+             (= (:search-key current) search-key))
+      (p/resolved current)
+      (p/let [_        (do (close-session! ek) nil)
+              key-ring (crypto/derive-key-ring search-key)
+              backend  (open-backend db-name)
+              cnt      (backend-count-events backend)
+              sess     {:engine-id    ek
+                        :db-name      db-name
+                        :search-key   search-key
+                        :key-ring     key-ring
+                        :backend      backend
+                        :!queue       (atom {})
+                        :!flush-timer (atom nil)
+                        :!write-mutex (atom (p/resolved nil))
+                        :!event-count (atom cnt)
+                        :on-count-fn  on-count-fn}]
+        (swap! !sessions assoc ek sess)
+        (when on-count-fn
+          (on-count-fn cnt))
+        sess))))
+
+(defn active-session [engine-id]
+  (get @!sessions (keyword engine-id)))
+#+end_src
+
+**** Indexing, Edits & Redactions
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn- compute-doc-tok-keys [tok-key room-id body]
+  (let [tokens (crypto/extract-index-tokens body)]
+    (if (empty? tokens)
+      (p/resolved [])
+      (p/let [room-ks   (p/all (map #(crypto/room-token-key tok-key room-id %) tokens))
+              global-ks (p/all (map #(crypto/global-token-key tok-key %) tokens))]
+        (vec (distinct (concat room-ks global-ks)))))))
+
+(defn- prepare-single-event [{:keys [doc-key tok-key]} raw-ev]
+  (let [rid  (str (:room-id raw-ev))
+        eid  (str (:id raw-ev))
+        body (str/trim (str (or (:body raw-ev) "")))
+        ts   (js/Number (or (:ts raw-ev) 0))]
+    (if (or (str/blank? rid) (str/blank? eid) (str/blank? body))
+      (p/resolved nil)
+      (p/let [dk       (crypto/doc-key tok-key rid eid)
+              rtag     (crypto/room-tag tok-key rid)
+              tok-keys (compute-doc-tok-keys tok-key rid body)]
+        (if (empty? tok-keys)
+          (p/resolved nil)
+          (let [payload {:id            eid
+                         :room-id       rid
+                         :sender-id     (str (or (:sender-id raw-ev) ""))
+                         :sender-name   (str (or (:sender-name raw-ev) (:sender-id raw-ev) ""))
+                         :sender-avatar (:sender-avatar raw-ev)
+                         :ts            ts
+                         :body          body
+                         :html          (:html raw-ev)
+                         :msg-tag       (or (:msg-tag raw-ev) "Text")
+                         :is-edited?    (boolean (:is-edited? raw-ev))
+                         :tok-keys      tok-keys}]
+            (p/let [{:keys [iv ct]} (crypto/encrypt-record doc-key dk payload)]
+              {:doc-key  dk
+               :room-tag rtag
+               :ts       ts
+               :iv       iv
+               :ct       ct
+               :payload  payload})))))))
+
+(defn- with-write-lock! [sess f]
+  (let [!m (:!write-mutex sess)]
+    (js/Promise.
+     (fn [res-fn rej-fn]
+       (swap! !m
+              (fn [prev]
+                (-> prev
+                    (p/catch (fn [_] nil))
+                    (p/then f)
+                    (p/then (fn [res]
+                              (res-fn res)
+                              res))
+                    (p/catch (fn [err]
+                               (rej-fn err)
+                               nil)))))))))
+
+(defn upsert-events! [engine-id events]
+  (if-let [sess (active-session engine-id)]
+    (if (empty? events)
+      (p/resolved 0)
+      (with-write-lock!
+       sess
+       (fn []
+         (let [{:keys [key-ring backend !event-count on-count-fn]} sess
+               aes-key (:doc-key key-ring)
+               deduped (->> events
+                            (reduce (fn [acc ev]
+                                      (if (and (:room-id ev) (:id ev))
+                                        (assoc acc [(str (:room-id ev)) (str (:id ev))] ev)
+                                        acc))
+                                    {})
+                            vals)]
+           (p/let [prepared-raw (p/all (map #(prepare-single-event key-ring %) deduped))
+                   prepared     (vec (remove nil? prepared-raw))]
+             (if (empty? prepared)
+               0
+               (p/let [existing-map (backend-get-events backend (map :doc-key prepared))
+                       decrypted-existing
+                       (p/all
+                        (map (fn [{dk :doc-key}]
+                               (if-let [old-row (get existing-map dk)]
+                                 (-> (crypto/decrypt-record aes-key
+                                                            dk
+                                                            (:iv old-row)
+                                                            (:ct old-row))
+                                     (p/then (fn [rec] [dk rec]))
+                                     (p/catch (fn [_] [dk nil])))
+                                 (p/resolved nil)))
+                             prepared))
+                       old-by-dk    (into {} (remove nil? decrypted-existing))
+                       changed      (filterv
+                                     (fn [{:keys [doc-key payload]}]
+                                       (if-let [old (get old-by-dk doc-key)]
+                                         (or (not= (:body old) (:body payload))
+                                             (not= (boolean (:is-edited? old))
+                                                   (boolean (:is-edited? payload)))
+                                             (not= (:sender-name old) (:sender-name payload)))
+                                         true))
+                                     prepared)]
+                 (if (empty? changed)
+                   0
+                   (let [adds (reduce
+                               (fn [acc {:keys [doc-key payload]}]
+                                 (let [old-tks (set (get-in old-by-dk [doc-key :tok-keys] []))
+                                       new-tks (set (:tok-keys payload))]
+                                   (reduce (fn [m tk]
+                                             (update m tk (fnil conj #{}) doc-key))
+                                           acc
+                                           (set/difference new-tks old-tks))))
+                               {}
+                               changed)
+                         rems (reduce
+                               (fn [acc {:keys [doc-key payload]}]
+                                 (let [old-tks (set (get-in old-by-dk [doc-key :tok-keys] []))
+                                       new-tks (set (:tok-keys payload))]
+                                   (reduce (fn [m tk]
+                                             (update m tk (fnil conj #{}) doc-key))
+                                           acc
+                                           (set/difference old-tks new-tks))))
+                               {}
+                               changed)]
+                     (p/let [_   (backend-apply-mutations!
+                                  backend
+                                  {:upserts         (mapv #(dissoc % :payload) changed)
+                                   :deletes         []
+                                   :posting-adds    adds
+                                   :posting-removes rems})
+                             cnt (backend-count-events backend)]
+                       (reset! !event-count cnt)
+                       (when on-count-fn
+                         (on-count-fn cnt))
+                       (count changed)))))))))))
+    (p/resolved 0)))
+
+(defn remove-event! [engine-id room-id event-id]
+  (if-let [sess (active-session engine-id)]
+    (let [rid (str room-id)
+          eid (str event-id)]
+      (if (or (str/blank? rid) (str/blank? eid))
+        (p/resolved false)
+        (do
+          (swap! (:!queue sess) dissoc [rid eid])
+          (with-write-lock!
+           sess
+           (fn []
+             (let [{:keys [key-ring backend !event-count on-count-fn]} sess
+                   {:keys [doc-key tok-key]} key-ring]
+               (p/let [dk       (crypto/doc-key tok-key rid eid)
+                       existing (backend-get-events backend [dk])
+                       old-row  (get existing dk)]
+                 (if-not old-row
+                   false
+                   (p/let [old-rec (-> (crypto/decrypt-record doc-key
+                                                              dk
+                                                              (:iv old-row)
+                                                              (:ct old-row))
+                                       (p/catch (fn [_] nil)))
+                           old-tks (set (:tok-keys old-rec []))
+                           rems    (into {} (map (fn [tk] [tk #{dk}])) old-tks)
+                           _       (backend-apply-mutations!
+                                    backend
+                                    {:upserts         []
+                                     :deletes         [dk]
+                                     :posting-adds    {}
+                                     :posting-removes rems})
+                           cnt     (backend-count-events backend)]
+                     (reset! !event-count cnt)
+                     (when on-count-fn
+                       (on-count-fn cnt))
+                     true)))))))))
+    (p/resolved false)))
+
+(defn flush-queue! [engine-id]
+  (if-let [sess (active-session engine-id)]
+    (let [batch (vals (first (reset-vals! (:!queue sess) {})))]
+      (when-let [tmr @(:!flush-timer sess)]
+        (js/clearTimeout tmr)
+        (reset! (:!flush-timer sess) nil))
+      (if (seq batch)
+        (upsert-events! engine-id batch)
+        (p/resolved 0)))
+    (p/resolved 0)))
+
+(defn enqueue-events! [engine-id events]
+  (when-let [sess (active-session engine-id)]
+    (doseq [ev events
+            :let [rid  (some-> (:room-id ev) str)
+                  eid  (some-> (:id ev) str)
+                  body (some-> (:body ev) str str/trim)]
+            :when (and (not (str/blank? rid))
+                       (not (str/blank? eid))
+                       (not (str/blank? body)))]
+      (swap! (:!queue sess) assoc [rid eid] ev))
+    (when (and (seq @(:!queue sess))
+               (nil? @(:!flush-timer sess)))
+      (reset! (:!flush-timer sess)
+              (js/setTimeout
+               (fn []
+                 (reset! (:!flush-timer sess) nil)
+                 (flush-queue! engine-id))
+               debounce-flush-ms)))))
+#+end_src
+
+**** Timeline Item Extraction Helper
+
+Converts standard Paradise timeline event maps into compact indexable records
+or detects redactions automatically so engines can pipe live timeline diffs
+straight into the encrypted index.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn extract-timeline-item [default-room-id item]
+  (when (and (map? item)
+             (not= (:type item) :virtual))
+    (let [rid (str (or (:room-id item) (:room_id item) default-room-id ""))
+          eid (str (or (:id item) ""))]
+      (when (and (not (str/blank? rid))
+                 (not (str/blank? eid))
+                 (not (str/starts-with? eid "virt-"))
+                 (not (str/starts-with? eid "gallery-")))
+        (let [ctag    (:content-tag item)
+              ktag    (get-in item [:content :tag])
+              mtag    (get-in item [:content :inner :tag])
+              mcont   (get-in item [:content :inner :content])]
+          (cond
+            (or (= ktag "Redacted") (= ctag "Redacted"))
+            {:action  :remove
+             :room-id rid
+             :id      eid}
+
+            (and (= ctag "MsgLike") (= ktag "Message"))
+            (let [body (str/trim (str (or (:body mcont)
+                                          (:caption mcont)
+                                          (:filename mcont)
+                                          "")))]
+              (when-not (str/blank? body)
+                {:action  :upsert
+                 :event   {:id            eid
+                           :room-id       rid
+                           :sender-id     (:sender-id item)
+                           :sender-name   (:sender-name item)
+                           :sender-avatar (:sender-avatar item)
+                           :ts            (or (:ts item) (:timestamp item) 0)
+                           :body          body
+                           :html          (:html mcont)
+                           :msg-tag       (or mtag "Text")
+                           :is-edited?    (boolean (or (:is-edited? item)
+                                                       (:is-edited? mcont)))}}))
+
+            :else nil))))))
+
+(defn ingest-timeline-items! [engine-id room-id items]
+  (when (active-session engine-id)
+    (let [extracted (keep #(extract-timeline-item room-id %) items)
+          upserts   (keep #(when (= (:action %) :upsert) (:event %)) extracted)
+          removals  (filter #(= (:action %) :remove) extracted)]
+      (when (seq upserts)
+        (enqueue-events! engine-id upserts))
+      (doseq [{:keys [room-id id]} removals]
+        (remove-event! engine-id room-id id)))))
+#+end_src
+
+**** Blinded Query & Decrypted Verification
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn record->timeline-hit [rec]
+  (let [edited? (boolean (:is-edited? rec))
+        body    (or (:body rec) "")
+        mtag    (or (:msg-tag rec) "Text")]
+    {:id            (:id rec)
+     :internal-id   (:id rec)
+     :room-id       (:room-id rec)
+     :room_id       (:room-id rec)
+     :sender-id     (:sender-id rec)
+     :sender-name   (:sender-name rec)
+     :sender-avatar (:sender-avatar rec)
+     :ts            (:ts rec)
+     :timestamp     (:ts rec)
+     :is-edited?    edited?
+     :content-tag   "MsgLike"
+     :content       {:tag   "Message"
+                     :inner {:tag     mtag
+                             :content (cond-> {:body       body
+                                               :is-edited? edited?}
+                                        (:html rec) (assoc :html (:html rec)))}}
+     :type          :timeline}))
+
+(defn search! [engine-id {:keys [room-id query scope limit]}]
+  (if-let [sess (active-session engine-id)]
+    (let [parsed (crypto/parse-search-query query)
+          lim    (or limit default-search-limit)
+          all?   (= (keyword (or scope :room)) :all)
+          rid    (str (or room-id ""))]
+      (if (or (:empty? parsed)
+              (empty? (:lookup-tokens parsed))
+              (and (not all?) (str/blank? rid)))
+        (p/resolved [])
+        (p/let [_        (flush-queue! engine-id)
+                {:keys [key-ring backend]} sess
+                {aes-key :doc-key hmac-key :tok-key} key-ring
+                tok-keys (p/all
+                          (map (fn [tok]
+                                 (if all?
+                                   (crypto/global-token-key hmac-key tok)
+                                   (crypto/room-token-key hmac-key rid tok)))
+                               (:lookup-tokens parsed)))
+                p-map    (backend-get-postings backend tok-keys)
+                sets     (->> tok-keys
+                              (map #(get p-map % #{}))
+                              (sort-by count))]
+          (if (or (empty? sets) (empty? (first sets)))
+            []
+            (let [intersected (reduce set/intersection sets)]
+              (if (empty? intersected)
+                []
+                (p/let [rows-map (backend-get-events backend intersected)
+                        ordered  (->> (vals rows-map)
+                                      (sort-by :ts >)
+                                      (take max-candidate-decrypts))
+                        recs     (p/all
+                                  (map (fn [{dk :doc-key :keys [iv ct]}]
+                                         (-> (crypto/decrypt-record aes-key dk iv ct)
+                                             (p/catch (fn [_] nil))))
+                                       ordered))]
+                  (->> recs
+                       (remove nil?)
+                       (filter (fn [rec]
+                                 (and (or all? (= (:room-id rec) rid))
+                                      (crypto/matches-parsed-query? parsed (:body rec)))))
+                       (sort-by :ts >)
+                       (take lim)
+                       (mapv record->timeline-hit)))))))))
+    (p/resolved [])))
+#+end_src
+
+**** Encrypted Crawler Checkpoints & Index Maintenance
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/search/index.cljs
+(defn load-checkpoint! [engine-id room-id]
+  (if-let [sess (active-session engine-id)]
+    (let [{:keys [key-ring backend]} sess
+          {:keys [doc-key tok-key]}  key-ring]
+      (p/let [cp-key (crypto/checkpoint-key tok-key (str room-id))
+              row    (backend-get-checkpoint backend cp-key)]
+        (when row
+          (-> (crypto/decrypt-record doc-key cp-key (:iv row) (:ct row))
+              (p/catch (fn [_] nil))))))
+    (p/resolved nil)))
+
+(defn save-checkpoint! [engine-id room-id checkpoint-map]
+  (if-let [sess (active-session engine-id)]
+    (let [{:keys [key-ring backend]} sess
+          {:keys [doc-key tok-key]}  key-ring]
+      (p/let [cp-key          (crypto/checkpoint-key tok-key (str room-id))
+              {:keys [iv ct]} (crypto/encrypt-record doc-key cp-key checkpoint-map)
+              _               (backend-put-checkpoint!
+                               backend
+                               {:cp-key cp-key :iv iv :ct ct})]
+        true))
+    (p/resolved false)))
+
+(defn count-indexed-events! [engine-id]
+  (if-let [sess (active-session engine-id)]
+    (p/let [cnt (backend-count-events (:backend sess))]
+      (reset! (:!event-count sess) cnt)
+      cnt)
+    (p/resolved 0)))
+
+(defn clear-index! [engine-id]
+  (if-let [sess (active-session engine-id)]
+    (do
+      (reset! (:!queue sess) {})
+      (when-let [tmr @(:!flush-timer sess)]
+        (js/clearTimeout tmr)
+        (reset! (:!flush-timer sess) nil))
+      (with-write-lock!
+       sess
+       (fn []
+         (p/let [_ (backend-clear-all! (:backend sess))]
+           (reset! (:!event-count sess) 0)
+           (when-let [cb (:on-count-fn sess)]
+             (cb 0))
+           true))))
+    (p/resolved false)))
+#+end_src
