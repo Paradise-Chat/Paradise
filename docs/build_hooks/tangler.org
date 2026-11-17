@@ -110,22 +110,57 @@ Since this is a simple tangler in one language it obviously doesn't have the cap
 to do more than 'clojurescript' however since the method of determination is simple this
 could easily be extended later to support more.
 #+begin_src clojurescript :tangle ../../tangler.cljs
-(defn tangle-file [f-path]
+(def block-re
+  #"(?im)^[ \t]*#\+begin_src\s+([^\n\r]+)\r?\n([\s\S]*?)\r?\n[ \t]*#\+end_src")
+
+(def tangle-arg-re
+  #"(?i):tangle\s+\"?([^\"\s\n\r]+)\"?")
+
+(def file-prop-tangle-re
+  #"(?im)^[ \t]*#\+property:\s+header-args[^\n\r]*?:tangle\s+\"?([^\"\s\n\r]+)\"?")
+
+(defn extract-blocks [f-path]
   (let [content (fs/readFileSync f-path "utf8")
-        blocks (re-seq #"(?is)#\+begin_src\s+(?:clojurescript|css)\s+:tangle\s+([^\s\n]+).*?\n(.*?)\n#\+end_src" content)
-        tangled-map (reduce (fn [acc [ _ rel-path code]]
-                              (update acc rel-path (fnil conj []) code))
-                            {}
-                            blocks)]
-    (doseq [[rel-path codes] tangled-map]
-      (when (not= rel-path "no")
-        (let [full-path (path/resolve (path/dirname f-path) rel-path)
-              new-code (str/join "\n\n" codes)
-              old-code (if (fs/existsSync full-path) (fs/readFileSync full-path "utf8") "")]
-          (when (not= (str/trim old-code) (str/trim new-code))
-            (fs/mkdirSync (path/dirname full-path) #js {:recursive true})
-            (fs/writeFileSync full-path new-code)
-            (println "  > Tangled (Updated):" full-path)))))))
+        default-tangle (second (re-find file-prop-tangle-re content))
+        matches (re-seq block-re content)]
+    (reduce
+      (fn [acc [_ header-line code]]
+        (let [tangle-target (or (second (re-find tangle-arg-re header-line))
+                                default-tangle)]
+          (if (and tangle-target (not= (str/lower-case tangle-target) "no"))
+            (let [full-path (path/resolve (path/dirname f-path) tangle-target)]
+              (update acc full-path (fnil conj []) code))
+            acc)))
+      {}
+      matches)))
+
+(defn write-tangled-map! [tangled-map]
+  (doseq [[full-path codes] tangled-map]
+    (let [new-code (str/join "\n\n" codes)
+          old-code (if (fs/existsSync full-path)
+                     (fs/readFileSync full-path "utf8")
+                     "")]
+      (when (not= (str/trim old-code) (str/trim new-code))
+        (fs/mkdirSync (path/dirname full-path) #js {:recursive true})
+        (fs/writeFileSync full-path (str new-code "\n"))
+        (println "  > Tangled (Updated):" full-path)))))
+
+(defn tangle-file [f-path]
+  (write-tangled-map! (extract-blocks f-path)))
+
+(defn collect-org-files [dir]
+  (if-not (fs/existsSync dir)
+    []
+    (mapcat
+      (fn [f]
+        (when-not (str/starts-with? f ".")
+          (let [p (path/join dir f)
+                stat (fs/statSync p)]
+            (cond
+              (.isDirectory stat) (collect-org-files p)
+              (str/ends-with? f ".org") [p]
+              :else []))))
+      (fs/readdirSync dir))))
 #+end_src
 
 
@@ -138,17 +173,13 @@ for Emacs users to just allow the tangling to be performed by the client's
 tangler function.
 #+begin_src clojurescript :tangle ../../tangler.cljs
 (defn run-tangle-all []
-  (let [docs-dir "docs"]
-    (when (fs/existsSync docs-dir)
-      (let [scan (fn scan [dir]
-                   (doseq [f (fs/readdirSync dir)]
-                     (when (not (str/starts-with? f "."))
-                       (let [p (path/join dir f)
-                             stat (fs/statSync p)]
-                         (cond
-                           (.isDirectory stat) (scan p)
-                           (str/ends-with? f ".org") (tangle-file p))))))]
-        (scan docs-dir)))))
+  (let [org-files (collect-org-files "docs")
+        combined-map (reduce
+                       (fn [acc f-path]
+                         (merge-with into acc (extract-blocks f-path)))
+                       {}
+                       org-files)]
+    (write-tangled-map! combined-map)))
 #+end_src
 
 
@@ -159,11 +190,12 @@ the interval to scan the file system for changes. That way it can
 neatly fit in the ClojureScript web development process.
 #+begin_src clojurescript :tangle ../../tangler.cljs
 (defn watch []
-  (println "--- nbb Org-Tangle Watcher Active ---")
-  (run-tangle-all)
-  (js/setInterval run-tangle-all 1000))
+  (let [initial-files (collect-org-files "docs")]
+    (println (str "--- nbb Org-Tangle Watcher Active (" (count initial-files) " .org files found) ---"))
+    (run-tangle-all)
+    (js/setInterval run-tangle-all 1000)))
 
-(let [args (not-empty (js->clj (.slice js/process.argv 2)))]
+(let [args (seq *command-line-args*)]
   (if args
     (doseq [file args]
       (if (fs/existsSync file)
