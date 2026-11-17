@@ -12,66 +12,163 @@ cross-room (~:all~) scopes.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/search.cljs
 (ns paradise.ui.container.search
   (:require
-   [re-frame.core :as re-frame]
-   [taoensso.timbre :as log]
-   [clojure.string :as str]
    [cljs-workers.core :as main]
+   [cljs.core.async :refer [<! go]]
+   [clojure.string :as str]
    [paradise.shared.client.state :as state]
-   [cljs.core.async :refer [go <!]]
-   [reagent.core :as r]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.container.reusable :refer [message-preview-item]]))
+   [paradise.ui.container.reusable :refer [message-preview-item]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 #+end_src
-
 
 **** Reframe
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/search.cljs
+(defn- ok-status? [s]
+  (contains? #{"success" :success} s))
+
 (re-frame/reg-event-fx
  :room/execute-search
- (fn [{:keys [db]} [_ room-id query]]
-   (if (str/blank? query)
-     (log/warn "Search aborted: Empty query")
-     (do
-       (go
-         (let [pool @state/!engine-pool
-               res  (<! (main/do-with-pool! pool {:handler :search-room
-                                                  :arguments {:room-id room-id :query query}}))]
-           (if (= (:status res) "success")
-             (re-frame/dispatch [:room/search-success room-id (:results res)])
-             (re-frame/dispatch [:room/search-error room-id (:msg res)]))))
-       {:db (-> db
-                (assoc-in [:search-data room-id :loading?] true)
-                (assoc-in [:search-data room-id :query] query)
-                (assoc-in [:search-data room-id :results] []))}))))
+ (fn [{:keys [db]} [_ room-id query scope-opt]]
+   (let [scope     (keyword (or scope-opt (get-in db [:search-ui :scope] :room)))
+         state-key (if (= scope :all) :all room-id)]
+     (if (str/blank? query)
+       (do
+         (log/warn "Search aborted: Empty query")
+         {})
+       (do
+         (go
+           (when-let [pool @state/!engine-pool]
+             (let [res (<! (main/do-with-pool!
+                            pool
+                            {:handler   :search-room
+                             :arguments {:room-id room-id
+                                         :query   query
+                                         :scope   scope
+                                         :limit   50}}))]
+               (if (ok-status? (:status res))
+                 (re-frame/dispatch [:room/search-success state-key (:results res)])
+                 (re-frame/dispatch [:room/search-error state-key (:msg res)])))))
+         {:db (-> db
+                  (assoc-in [:search-ui :scope] scope)
+                  (assoc-in [:search-data state-key :loading?] true)
+                  (assoc-in [:search-data state-key :query] query)
+                  (assoc-in [:search-data state-key :results] []))})))) )
 
 (re-frame/reg-event-db
  :room/search-success
- (fn [db [_ room-id normalized-hits]]
+ (fn [db [_ state-key normalized-hits]]
    (-> db
-       (assoc-in [:search-data room-id :results] normalized-hits)
-       (assoc-in [:search-data room-id :loading?] false))))
+       (assoc-in [:search-data state-key :results] (vec (or normalized-hits [])))
+       (assoc-in [:search-data state-key :loading?] false))))
 
 (re-frame/reg-event-db
  :room/search-error
- (fn [db [_ room-id err]]
-   (log/error "Search API failed:" err)
-   (assoc-in db [:search-data room-id :loading?] false)))
+ (fn [db [_ state-key err]]
+   (log/error "Search failed:" err)
+   (assoc-in db [:search-data state-key :loading?] false)))
+
+(re-frame/reg-event-db
+ :search/set-scope
+ (fn [db [_ scope]]
+   (assoc-in db [:search-ui :scope] (keyword scope))))
+
+(re-frame/reg-event-db
+ :search/receive-index-status
+ (fn [db [_ status-map]]
+   (assoc db
+          :search/index-status
+          (merge {:supported?     false
+                  :enabled?       true
+                  :running?       false
+                  :indexed-events 0
+                  :rooms-done     0
+                  :rooms-total    0}
+                 (dissoc status-map :status :state)))))
+
+(re-frame/reg-event-fx
+ :search/refresh-index-status
+ (fn [_ _]
+   (go
+     (when-let [pool @state/!engine-pool]
+       (let [res (<! (main/do-with-pool! pool {:handler   :search-index-status
+                                               :arguments {}}))]
+         (when (ok-status? (:status res))
+           (re-frame/dispatch [:search/receive-index-status res])))))
+   {}))
+
+(re-frame/reg-event-fx
+ :search/hydrate-crawler-enabled
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [flag (if (nil? enabled?) true (boolean enabled?))]
+     (go
+       (when-let [pool @state/!engine-pool]
+         (let [res (<! (main/do-with-pool!
+                        pool
+                        {:handler   :search-crawler-set-enabled
+                         :arguments {:enabled? flag}}))]
+           (when (ok-status? (:status res))
+             (re-frame/dispatch [:search/receive-index-status res])))))
+     {:db (assoc-in db [:settings :encrypted-search-crawler] flag)})))
+
+(re-frame/reg-event-fx
+ :search/set-crawler-enabled
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [flag (boolean enabled?)]
+     (go
+       (when-let [pool @state/!engine-pool]
+         (let [res (<! (main/do-with-pool!
+                        pool
+                        {:handler   :search-crawler-set-enabled
+                         :arguments {:enabled? flag}}))]
+           (when (ok-status? (:status res))
+             (re-frame/dispatch [:search/receive-index-status res])))))
+     {:db       (assoc-in db [:settings :encrypted-search-crawler] flag)
+      :dispatch [:settings/save "encrypted_search_crawler" flag]})))
+
+(re-frame/reg-event-fx
+ :search/clear-index
+ (fn [_ [_ rebuild?]]
+   (go
+     (when-let [pool @state/!engine-pool]
+       (let [res (<! (main/do-with-pool!
+                      pool
+                      {:handler   :search-index-clear
+                       :arguments {:rebuild? (boolean rebuild?)}}))]
+         (when (ok-status? (:status res))
+           (re-frame/dispatch [:search/receive-index-status res])))))
+   {}))
+
+(re-frame/reg-sub
+ :search/scope
+ (fn [db _]
+   (get-in db [:search-ui :scope] :room)))
 
 (re-frame/reg-sub
  :room/search-state
- (fn [db [_ room-id]]
-   (get-in db [:search-data room-id] {:loading? false :results [] :query ""})))
+ (fn [db [_ room-id scope-opt]]
+   (let [scope     (or scope-opt (get-in db [:search-ui :scope] :room))
+         state-key (if (= scope :all) :all room-id)]
+     (get-in db [:search-data state-key] {:loading? false :results [] :query ""}))))
+
+(re-frame/reg-sub
+ :search/index-status
+ (fn [db _]
+   (merge {:supported?     false
+           :enabled?       true
+           :running?       false
+           :indexed-events 0
+           :rooms-done     0
+           :rooms-total    0}
+          (:search/index-status db))))
+
+(re-frame/reg-sub
+ :settings/encrypted-search-crawler
+ (fn [db _]
+   (get-in db [:settings :encrypted-search-crawler] true)))
 #+end_src
-
-
-
-**** Component
-
-
-We want to provide some nice visual impact to the user.
-At some point down the road we'd like to provide
-nice clean filter instructions and provide more complex search options.
 
 For now though, text search will do.
 
