@@ -1,19 +1,11 @@
-
 ** Search
-
 
 **** Preface
 
-Searching the rust-sdk... there isn't a great search method!
-In fact I didn't really see one at all.
-Good method for searching the public room directory... But that doesn't
-really help us here.
-
-So we need to cook up something that targets the search endpoint.
-
-https://spec.matrix.org/v1.17/client-server-api/#post_matrixclientv3search
-
-
+Provides the unified Search side panel and state management across both
+client-side encrypted search engines (~Matrix~, ~Nostr~) and server-searched
+protocols (~Discord~, ~Fluxer~), supporting both per-room (~:room~) and
+cross-room (~:all~) scopes.
 
 **** Imports
 
