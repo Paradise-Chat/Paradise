@@ -461,17 +461,19 @@ We need to be able to convert timestamps to date otherwise people might not be t
                      " is in the call"
                      " are in the call"))))))
 
-(defn get-status-string [tr type names]
-  (let [cnt       (count names)
-        base-path (if (= type :typing)
-                    "container.timeline.status.typing"
-                    "container.timeline.status.reading")]
+(defn get-status-string [tr path names]
+  (let [cnt  (count names)
+        base (if (vector? path) (first path) path)
+        k    #(keyword (name base) %)
+        n1   #(truncate-name (first names) 16)
+        n2   #(truncate-name (second names) 16)
+        n3   #(truncate-name (nth names 2) 16)]
     (case cnt
       0 ""
-      1 (tr [(keyword base-path "one")] [(truncate-name (first names) 16)])
-      2 (tr [(keyword base-path "two")] [(truncate-name (first names) 16) (truncate-name (second names) 16)])
-      3 (tr [(keyword base-path "three")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (truncate-name (nth names 2) 16)])
-      (tr [(keyword base-path "many")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (- cnt 2)]))))
+      1 (tr [(k "one")] [(n1)])
+      2 (tr [(k "two")] [(n1) (n2)])
+      3 (tr [(k "three")] [(n1) (n2) (n3)])
+      (tr [(k "many")] [(n1) (n2) (- cnt 2)]))))
 #+end_src
 
 
