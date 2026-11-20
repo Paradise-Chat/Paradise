@@ -146,6 +146,20 @@ This is more or less where the layout and control of the container's contents wi
   overflow: hidden;
 }
 
+@media (max-width: 768px) {
+  .room-layout.with-sidebar {
+    grid-template-columns: 1fr;
+    position: relative;
+  }
+
+  .room-layout.with-sidebar > .sidebar {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    z-index: 25;
+  }
+}
+
 #+end_src
 
 
