@@ -134,6 +134,12 @@ This is what we use to measure the contents.
 (defn calc-audio-height [theme-metrics]
   (:audio-player-h theme-metrics 70))
 
+(defn calc-poll-height [content theme-metrics]
+  (let [poll-inner (or (:inner content) content)
+        opt-cnt    (max 1 (count (:answers poll-inner)))]
+    (+ (:poll-chrome-h theme-metrics 118)
+       (* opt-cnt (:poll-option-h theme-metrics 44)))))
+
 (defn calc-text-height [msg available-w theme-metrics pretext-api]
   (let [{:keys [id pretext-prep is-quote? has-code-block? has-html? is-edited-calc?]} msg
         code-pad-x   (if has-code-block? (:code-padding-x theme-metrics 24) 0)
