@@ -293,10 +293,26 @@ This is what we use to measure the contents.
               available-w        (max 0 (- width horiz-chrome))
               reply-h            (calc-reply-height content theme-metrics)
               reaction-h         (calc-reaction-height msg theme-metrics)
+              thread-h           (calc-thread-summary-height msg theme-metrics)
               tags-present       #{(:tag content) (get-in content [:inner :tag]) (:content-tag msg)}
+              is-poll?           (contains? tags-present "Poll")
+              is-audio?          (contains? tags-present "Audio")
               actual-tag         (first (filter #{"Image" "Video" "Sticker"} tags-present))
               is-media?          (boolean actual-tag)
-              body-h             (if is-media?
+              body-h             (cond
+                                   is-poll?
+                                   (calc-poll-height content theme-metrics)
+
+                                   is-audio?
+                                   (let [a-h     (calc-audio-height theme-metrics)
+                                         caption (or (not-empty (:caption content))
+                                                     (not-empty (get-in content [:inner :content :caption])))
+                                         t-h     (if caption
+                                                   (calc-text-height msg available-w theme-metrics pretext-api)
+                                                   0)]
+                                     (+ a-h t-h))
+
+                                   is-media?
                                    (let [m-h     (calc-media-height content actual-tag available-w theme-metrics)
                                          caption (when (not= actual-tag "Sticker")
                                                    (or (not-empty (:caption content))
@@ -305,13 +321,21 @@ This is what we use to measure the contents.
                                                    (calc-text-height msg available-w theme-metrics pretext-api)
                                                    0)]
                                      (+ m-h t-h))
+
+                                   :else
                                    (calc-text-height msg available-w theme-metrics pretext-api))]
           (if is-sequence-start?
-            (+ (max avatar-h (+ header-h body-h reply-h)) seq-padding reaction-h)
-            (+ body-h reply-h merged-padding reaction-h))))))
+            (+ (max avatar-h (+ header-h body-h reply-h)) seq-padding reaction-h thread-h)
+            (+ body-h reply-h merged-padding reaction-h thread-h))))))
 
   (ast-cache-key [_ item revision]
-    (hash [(:raw item) (:unread? item) (:reactions item) (:merge-with-prev? item) revision]))
+    (hash [(:raw item)
+           (get-in item [:content :inner])
+           (:unread? item)
+           (:reactions item)
+           (:thread-summary item)
+           (:merge-with-prev? item)
+           revision]))
 
   (render-item-hiccup [_ item]
     (let [render-fn (or (get @state/!worker-overrides :event-tile-render)
