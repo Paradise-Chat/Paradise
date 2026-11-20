@@ -71,6 +71,7 @@ let selectedAudioTarget: AudioAppCandidate | "ALL" | "NONE" = "NONE";
 let isScreenShareActive = false;
 
 const streamHeaderRules = new Map<string, Record<string, string>>();
+const frameHeaderRules = new Map<string, Record<string, string>>();
 let proxyIpcInitialized = false;
 let activeCustomScheme: string | undefined;
 let webRequestInstalled = false;
@@ -80,6 +81,7 @@ let lastMainWebContentsId: number | null = null;
 function extractHostname(urlOrHost: string): string | null {
     const trimmed = String(urlOrHost || "").trim();
     if (!trimmed) return null;
+    if (trimmed === "*") return "*";
     try {
         if (trimmed.includes("://")) {
             return new URL(trimmed).hostname.toLowerCase();
@@ -90,6 +92,22 @@ function extractHostname(urlOrHost: string): string | null {
     }
 }
 
+function lookupHostRule(
+    map: Map<string, Record<string, string>>,
+    host: string | null
+): Record<string, string> | undefined {
+    if (!host) return map.get("*");
+    const direct = map.get(host);
+    if (direct) return direct;
+    const parts = host.split(".");
+    for (let i = 1; i < parts.length - 1; i++) {
+        const parentDomain = parts.slice(i).join(".");
+        const found = map.get(parentDomain);
+        if (found) return found;
+    }
+    return map.get("*");
+}
+
 function stripHeaderCaseInsensitive(
     headers: Record<string, string | string[]>,
     targetKey: string
@@ -97,6 +115,36 @@ function stripHeaderCaseInsensitive(
     const lower = targetKey.toLowerCase();
     for (const key of Object.keys(headers)) {
         if (key.toLowerCase() === lower) {
+            delete headers[key];
+        }
+    }
+}
+
+function stripFrameAncestorsFromCsp(
+    headers: Record<string, string | string[]>,
+    targetKey: string
+): void {
+    const lower = targetKey.toLowerCase();
+    for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() !== lower) continue;
+        const raw = headers[key];
+        const values = Array.isArray(raw) ? raw : [String(raw ?? "")];
+        const cleaned = values
+            .map((policy) =>
+                policy
+                    .split(";")
+                    .map((d) => d.trim())
+                    .filter(
+                        (d) =>
+                            d.length > 0 &&
+                            !/^frame-ancestors(\s|$)/i.test(d)
+                    )
+                    .join("; ")
+            )
+            .filter((policy) => policy.length > 0);
+        if (cleaned.length > 0) {
+            headers[key] = cleaned;
+        } else {
             delete headers[key];
         }
     }
@@ -138,6 +186,37 @@ export function setupParadiseProxyIpc(): void {
     );
 
     ipcMain.handle(
+        "paradise-proxy:prepare-frame",
+        (_event, opts: PrepareStreamOptions) => {
+            const rawTarget = String(opts?.url || opts?.urlOrHost || "").trim();
+            const host = extractHostname(rawTarget);
+            if (!host) {
+                return { ok: false, url: rawTarget };
+            }
+            const hdrs = opts?.headers ?? opts?.requestHeaders ?? {};
+            frameHeaderRules.set(host, hdrs);
+            return { ok: true, url: opts?.url || rawTarget, mode: "headers" };
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:clear-frame",
+        (_event, urlOrHost?: string | { urlOrHost?: string }) => {
+            const target =
+                typeof urlOrHost === "string"
+                    ? urlOrHost
+                    : urlOrHost?.urlOrHost;
+            if (!target) {
+                frameHeaderRules.clear();
+                return { ok: true };
+            }
+            const host = extractHostname(target);
+            if (host) frameHeaderRules.delete(host);
+            return { ok: true };
+        }
+    );
+
+    ipcMain.handle(
         "paradise-proxy:request",
         async (_event, opts: ProxyRequestOptions) => {
             const parsed = new URL(opts.url);
@@ -148,17 +227,51 @@ export function setupParadiseProxyIpc(): void {
             const method = (opts.method ?? "GET").toUpperCase();
             const canHaveBody = method !== "GET" && method !== "HEAD";
 
+            const forbiddenFramingHeaders = new Set([
+                "content-length",
+                "transfer-encoding",
+                "host",
+            ]);
+            const reqHeaders: Record<string, string> = {};
+            for (const [rawKey, rawVal] of Object.entries(opts.headers ?? {})) {
+                if (rawVal === undefined || rawVal === null) continue;
+                const key = rawKey.trim();
+                if (!key) continue;
+                const lower = key.toLowerCase();
+                if (forbiddenFramingHeaders.has(lower)) continue;
+                if (
+                    lower === "referer" &&
+                    parsed.protocol === "http:" &&
+                    /^https:/i.test(String(rawVal).trim())
+                ) {
+                    continue;
+                }
+                for (const existing of Object.keys(reqHeaders)) {
+                    if (existing.toLowerCase() === lower) {
+                        delete reqHeaders[existing];
+                    }
+                }
+                reqHeaders[key] = String(rawVal);
+            }
+
             let requestBody: BodyInit | undefined;
             if (canHaveBody && opts.body !== undefined && opts.body !== null) {
                 if (
                     opts.bodyEncoding === "base64" &&
                     typeof opts.body === "string"
                 ) {
-                    requestBody = Buffer.from(opts.body, "base64");
-                } else if (opts.body instanceof Uint8Array) {
-                    requestBody = Buffer.from(opts.body);
+                    requestBody = Buffer.from(
+                        opts.body,
+                        "base64"
+                    ) as unknown as BodyInit;
+                } else if (ArrayBuffer.isView(opts.body)) {
+                    requestBody = Buffer.from(
+                        opts.body.buffer,
+                        opts.body.byteOffset,
+                        opts.body.byteLength
+                    ) as unknown as BodyInit;
                 } else if (opts.body instanceof ArrayBuffer) {
-                    requestBody = Buffer.from(opts.body);
+                    requestBody = Buffer.from(opts.body) as unknown as BodyInit;
                 } else {
                     requestBody = String(opts.body);
                 }
@@ -166,7 +279,7 @@ export function setupParadiseProxyIpc(): void {
 
             const res = await net.fetch(opts.url, {
                 method,
-                headers: opts.headers ?? {},
+                headers: reqHeaders,
                 body: requestBody,
                 redirect: "follow",
                 credentials: "omit",
@@ -318,7 +431,38 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
         HTTP_URL_FILTER,
         (details, callback) => {
             const host = extractHostname(details.url);
-            const customHeaders = host ? streamHeaderRules.get(host) : undefined;
+            const streamHdrs = lookupHostRule(streamHeaderRules, host);
+            const isSubFrame =
+                details.resourceType === "subFrame" && frameHeaderRules.size > 0;
+            const frameHdrs =
+                details.resourceType === "subFrame"
+                    ? lookupHostRule(frameHeaderRules, host)
+                    : undefined;
+
+            const hasExistingReferer = Object.keys(
+                details.requestHeaders
+            ).some((k) => k.toLowerCase() === "referer");
+            const fallbackSubFrameReferer =
+                isSubFrame && !hasExistingReferer
+                    ? (() => {
+                          try {
+                              return `${new URL(details.url).origin}/`;
+                          } catch {
+                              return undefined;
+                          }
+                      })()
+                    : undefined;
+
+            const customHeaders =
+                streamHdrs || frameHdrs || fallbackSubFrameReferer
+                    ? {
+                          ...(fallbackSubFrameReferer
+                              ? { Referer: fallbackSubFrameReferer }
+                              : {}),
+                          ...(frameHdrs ?? {}),
+                          ...(streamHdrs ?? {}),
+                      }
+                    : undefined;
             if (!customHeaders || Object.keys(customHeaders).length === 0) {
                 callback({ requestHeaders: details.requestHeaders });
                 return;
@@ -349,9 +493,26 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
             details.url.startsWith("http://") ||
             details.url.startsWith("https://");
         const host = isHttp ? extractHostname(details.url) : null;
-        const isPreparedHost = host ? streamHeaderRules.has(host) : false;
+        const isPreparedHost = Boolean(lookupHostRule(streamHeaderRules, host));
+        const isSubFrame =
+            isHttp &&
+            details.resourceType === "subFrame" &&
+            frameHeaderRules.size > 0;
         const isMediaStream =
             isHttp && (details.resourceType === "media" || isPreparedHost);
+
+        if (isSubFrame) {
+            stripHeaderCaseInsensitive(headers, "x-frame-options");
+            stripFrameAncestorsFromCsp(headers, "content-security-policy");
+            stripFrameAncestorsFromCsp(
+                headers,
+                "content-security-policy-report-only"
+            );
+            stripHeaderCaseInsensitive(headers, "cross-origin-opener-policy");
+            stripHeaderCaseInsensitive(headers, "cross-origin-embedder-policy");
+            stripHeaderCaseInsensitive(headers, "cross-origin-resource-policy");
+            headers["Cross-Origin-Resource-Policy"] = ["cross-origin"];
+        }
 
         if (isMediaStream) {
             stripHeaderCaseInsensitive(headers, "access-control-allow-origin");
@@ -361,10 +522,12 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
             stripHeaderCaseInsensitive(headers, "cross-origin-resource-policy");
 
             headers["Access-Control-Allow-Origin"] = ["*"];
-            headers["Access-Control-Allow-Methods"] = ["GET, HEAD, OPTIONS"];
+            headers["Access-Control-Allow-Methods"] = [
+                "GET, HEAD, POST, OPTIONS",
+            ];
             headers["Access-Control-Allow-Headers"] = ["*"];
             headers["Access-Control-Expose-Headers"] = [
-                "Content-Length, Content-Range, Accept-Ranges",
+                "Content-Length, Content-Range, Accept-Ranges, Content-Type, Location",
             ];
             headers["Cross-Origin-Resource-Policy"] = ["cross-origin"];
         } else if (activeCustomScheme) {
