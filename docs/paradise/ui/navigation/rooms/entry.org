@@ -468,9 +468,22 @@ Now before we define the panel we may want to define media buttons...
                       (remove #(= (:user-id %) my-id))
                       first)]
      (if other
-       {:dispatch [:room/invite-user target-room-id (:user-id other)]}
+       {:dispatch [:rooms/invite-user target-room-id (:user-id other)]}
        (do
-         (log/warn "Could not resolve user from DM room" dm-room-id)
+         (go
+           (let [res (<! (main/do-with-pool! @state/!engine-pool
+                                             {:handler   :fetch-room-members
+                                              :arguments {:room-id dm-room-id}}))]
+             (if (= (some-> (:status res) clojure.core/name) "success")
+               (let [fetched (->> (:members res)
+                                  (remove #(= (:user-id %) my-id))
+                                  first)]
+                 (when (:members res)
+                   (re-frame/dispatch [:room/set-members dm-room-id (:members res)]))
+                 (if fetched
+                   (re-frame/dispatch [:rooms/invite-user target-room-id (:user-id fetched)])
+                   (log/warn "Could not resolve user from DM room" dm-room-id)))
+               (log/warn "Failed to fetch DM members for invite:" dm-room-id))))
          {})))))
 
 
