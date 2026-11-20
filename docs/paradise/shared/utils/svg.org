@@ -984,6 +984,15 @@ Some more room icons
 
 (defn play [props]
   (build-icon-hiccup props play-shapes))
+
+(def pause-shapes
+  [:g {:fill "currentColor" :stroke "none"}
+   [:rect {:x "6" :y "4" :width "4" :height "16" :rx "1"}]
+   [:rect {:x "14" :y "4" :width "4" :height "16" :rx "1"}]])
+
+(defn pause [props]
+  (build-icon-hiccup props pause-shapes))
+
 #+end_src
 
 
