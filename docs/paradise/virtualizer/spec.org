@@ -275,7 +275,7 @@ This is what we use to measure the contents.
             (= id "read-marker"))
         (:virtual-divider-h theme-metrics 49)
 
-        (and tag (not (#{"MsgLike" "Image" "Video" "Sticker" "File" "Text"} tag)))
+        (and tag (not (#{"MsgLike" "Image" "Video" "Audio" "Sticker" "File" "Text" "Poll"} tag)))
         (:system-event-h theme-metrics 42)
 
         :else
