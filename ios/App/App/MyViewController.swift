@@ -7,6 +7,7 @@
 
 import Foundation
 import UIKit
+import WebKit
 import Capacitor
 
 class MyViewController: CAPBridgeViewController {
