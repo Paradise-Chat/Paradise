@@ -414,10 +414,12 @@ Making sure this is dynamic, but abstract is important for now.
 @import "profiles.css";
 @import "search.css";
 @import "pins.css";
+@import "threads.css";
 @import "plugin.css";
 @import "switcher.css";
 @import "invites.css";
 @import "creation.css";
+@import "polls.css";
 
 
 html, body {
