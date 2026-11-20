@@ -1,0 +1,561 @@
+** Space, Room, Server, & Community Settings Overlay
+
+**** Preface
+
+Provides the protocol-agnostic Space / Room / Server / Community configuration
+modal (~:room-settings~) using the same hub-and-subview layout as User Settings,
+sharing ~custom-emotes-manager~ for custom emojis and stickers alongside
+Overview (name, topic/description, avatar) and Members & Roles views.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
+(ns paradise.ui.overlays.room-settings
+  (:require
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
+   [cljs.core.async.interop :refer-macros [<p!]]
+   [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [decode-edn-field file->array-buffer uint8->base64]]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.global :refer [avatar]]
+   [paradise.ui.overlays.base :refer [modal-component]]
+   [paradise.ui.overlays.emotes-manager :refer [custom-emotes-manager]]
+   [paradise.ui.overlays.permissions-roles :refer [members-moderation-tab
+                                                   permissions-access-tab
+                                                   roles-editor-tab]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
+#+end_src
+
+**** Reframe Events & Subscriptions
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
+(re-frame/reg-sub
+ :room-settings/active-tab
+ (fn [db _]
+   (:room-settings/active-tab db nil)))
+
+(re-frame/reg-event-db
+ :room-settings/set-tab
+ (fn [db [_ tab-id]]
+   (assoc db :room-settings/active-tab tab-id)))
+
+(re-frame/reg-sub
+ :room-settings/state
+ (fn [db [_ room-id]]
+   (get-in db [:room-settings/by-id room-id]
+           {:loading? false
+            :saving?  false
+            :config   nil
+            :error    nil
+            :saved?   false})))
+
+(re-frame/reg-event-db
+ :room-settings/clear-feedback
+ (fn [db [_ room-id]]
+   (update-in db [:room-settings/by-id room-id] dissoc :error :saved?)))
+
+(re-frame/reg-event-db
+ :room-settings/fetch-config-done
+ (fn [db [_ room-id {:keys [config error]}]]
+   (update-in db [:room-settings/by-id room-id]
+              (fn [prev]
+                (cond-> (assoc (or prev {}) :loading? false)
+                  config (assoc :config config)
+                  error  (assoc :error error))))))
+
+(re-frame/reg-event-fx
+ :room-settings/fetch-config
+ (fn [{:keys [db]} [_ room-id]]
+   (when room-id
+     (go
+       (try
+         (let [res (<! (mesh/do-with-thread!
+                        :engine-pool
+                        {:handler   :fetch-room-config
+                         :arguments {:room-id room-id}}))]
+           (if (contains? #{"success" :success} (:status res))
+             (re-frame/dispatch [:room-settings/fetch-config-done room-id
+                                 {:config (decode-edn-field res :config-edn :config)}])
+             (re-frame/dispatch [:room-settings/fetch-config-done room-id
+                                 {:error (or (:msg res) "Failed to load settings")}])))
+         (catch :default e
+           (re-frame/dispatch [:room-settings/fetch-config-done room-id {:error (str e)}])))))
+   {:db (assoc-in db [:room-settings/by-id room-id :loading?] true)}))
+
+(re-frame/reg-event-db
+ :room-settings/save-done
+ (fn [db [_ room-id {:keys [config error]}]]
+   (update-in db [:room-settings/by-id room-id]
+              (fn [prev]
+                (cond-> (assoc (or prev {})
+                               :saving? false
+                               :saved?  (nil? error)
+                               :error   error)
+                  config (assoc :config config))))))
+
+(re-frame/reg-event-fx
+ :room-settings/save-overview
+ (fn [{:keys [db]} [_ {:keys [room-id name topic avatar-file remove-avatar? on-done]}]]
+   (when room-id
+     (go
+       (try
+         (let [ab   (when avatar-file (<p! (file->array-buffer avatar-file)))
+               u8   (when (and ab (pos? (.-byteLength ab))) (js/Uint8Array. ab))
+               b64  (when u8 (uint8->base64 u8))
+               mime (when avatar-file (or (not-empty (.-type avatar-file)) "image/png"))
+               res  (<! (mesh/do-with-thread!
+                         :engine-pool
+                         {:handler   :update-room-config
+                          :arguments {:room-id           room-id
+                                      :name              name
+                                      :topic             topic
+                                      :avatar-buffer-b64 b64
+                                      :avatar-mime       mime
+                                      :remove-avatar?    (boolean remove-avatar?)}}))]
+           (if (contains? #{"success" :success} (:status res))
+             (do
+               (when on-done (on-done))
+               (re-frame/dispatch [:room-settings/save-done room-id
+                                   {:config (decode-edn-field res :config-edn :config)}]))
+             (re-frame/dispatch [:room-settings/save-done room-id
+                                 {:error (or (:msg res) "Failed to save changes")}])))
+         (catch :default e
+           (log/error "Room settings save failed:" e)
+           (re-frame/dispatch [:room-settings/save-done room-id {:error (str e)}])))))
+   {:db (-> db
+            (assoc-in [:room-settings/by-id room-id :saving?] true)
+            (update-in [:room-settings/by-id room-id] dissoc :error :saved?))}))
+
+(re-frame/reg-event-fx
+ :rooms/open-settings
+ (fn [{:keys [db]} [_ room-id initial-tab]]
+   (when room-id
+     (let [parent-sp (get-in db [:rooms/data room-id :first-parent-id])]
+       {:db (assoc db :room-settings/active-tab initial-tab)
+        :fx [[:dispatch [:room-settings/fetch-config room-id]]
+             [:dispatch [:room-perms/fetch room-id parent-sp]]
+             [:dispatch [:room/fetch-members room-id]]
+             [:dispatch [:room/fetch-power-level-tags room-id]]
+             [:dispatch [:ui/open-modal :room-settings
+                         {:room-id        room-id
+                          :initial-tab    initial-tab
+                          :backdrop-props {:class "settings-backdrop"}
+                          :window-props   {:class "settings-window"}}]]]}))))
+#+end_src
+
+**** Subviews
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
+(defn- resolve-fallback-config [room-id live-cfg rooms spaces]
+  (or live-cfg
+      (let [sp (some #(when (= (str (:id %)) (str room-id)) %) spaces)
+            rm (get rooms room-id)]
+        (cond
+          sp {:id                 room-id
+              :name               (or (:name sp) room-id)
+              :topic              ""
+              :avatar-url         (:avatar-url sp)
+              :is-space?          true
+              :is-dm?             false
+              :emoji-target-id    room-id
+              :emoji-scope        "space"
+              :can-edit?          true
+              :can-manage-emotes? true}
+          rm {:id                 room-id
+              :name               (or (:name rm) room-id)
+              :topic              ""
+              :avatar-url         (or (:avatar rm) (:avatar-url rm))
+              :is-space?          (boolean (or (:is-space? rm) (:isSpace rm)))
+              :is-dm?             (boolean (or (:is-direct? rm) (:isDirect rm)))
+              :emoji-target-id    (or (:first-parent-id rm) room-id)
+              :emoji-scope        (if (or (:is-space? rm) (:first-parent-id rm)) "space" "room")
+              :can-edit?          true
+              :can-manage-emotes? true}
+          :else {:id                 room-id
+                 :name               (str room-id)
+                 :topic              ""
+                 :is-space?          false
+                 :emoji-target-id    room-id
+                 :emoji-scope        "room"
+                 :can-edit?          true
+                 :can-manage-emotes? true}))))
+
+(defn ^:ui room-overview-tab [{:keys [room-id config saving? error saved?]}]
+  (r/with-let [!seed-key    (atom nil)
+               !name        (r/atom "")
+               !topic       (r/atom "")
+               !av-file     (r/atom nil)
+               !av-preview  (r/atom nil)
+               !av-remove?  (r/atom false)
+               !copied?     (r/atom false)
+               file-id      (str "paradise-room-av-" (random-uuid))
+               clear-av!    (fn []
+                              (when-let [u @!av-preview]
+                                (try (js/URL.revokeObjectURL u) (catch :default _ nil)))
+                              (reset! !av-file nil)
+                              (reset! !av-preview nil)
+                              (reset! !av-remove? false))]
+    (let [tr        @(re-frame/subscribe [:i18n/tr])
+          cfg-sig   [room-id (:name config) (:topic config) (:avatar-url config)]
+          _         (when (not= @!seed-key cfg-sig)
+                      (reset! !seed-key cfg-sig)
+                      (reset! !name (or (:name config) ""))
+                      (reset! !topic (or (:topic config) ""))
+                      (clear-av!))
+          can-edit?        (boolean (:can-edit? config true))
+          can-edit-avatar? (boolean (and can-edit? (:can-edit-avatar? config true)))
+          can-edit-topic?  (boolean (:can-edit-topic? config true))
+          is-space?        (boolean (:is-space? config))
+          lead-key         (or (:overview-lead-key config)
+                               (if is-space?
+                                 :room-settings/overview-space-desc
+                                 :room-settings/overview-room-desc))
+          name-lbl-key     (or (:name-label-key config)
+                               (if is-space?
+                                 :creation.space/name-label
+                                 :creation.room/name-label))
+          topic-lbl-key    (or (:topic-label-key config)
+                               (if is-space?
+                                 :creation.space/topic-label
+                                 :creation.room/topic-label))
+          shown-av         (cond
+                             @!av-remove? nil
+                             @!av-preview @!av-preview
+                             :else        (:avatar-url config))
+          dirty?           (or (not= @!name (or (:name config) ""))
+                               (and can-edit-topic? (not= @!topic (or (:topic config) "")))
+                               (some? @!av-file)
+                               @!av-remove?)]
+      [:div.settings-tab-content
+       [:p.settings-subview-lead (tr [lead-key])]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label (tr [:room-settings/identity-heading])]
+        [:div.settings-hub-group-card
+         [:div.room-settings-avatar-editor
+          (when can-edit-avatar?
+            [:input
+             {:id        file-id
+              :type      "file"
+              :accept    "image/png,image/gif,image/webp,image/jpeg"
+              :style     {:display "none"}
+              :on-change (fn [^js e]
+                           (when-let [f (some-> e .-target .-files (aget 0))]
+                             (clear-av!)
+                             (reset! !av-file f)
+                             (reset! !av-preview (js/URL.createObjectURL f))
+                             (re-frame/dispatch [:room-settings/clear-feedback room-id]))
+                           (when-let [t (.-target e)]
+                             (set! (.-value t) "")))}])
+          [avatar {:id   room-id
+                   :name (or (not-empty @!name) "?")
+                   :url  shown-av
+                   :size 64}]
+          (when can-edit-avatar?
+            [:div.emotes-mgr-action-btns {:style {:margin-left "0"}}
+             [:button.settings-button.secondary
+              {:type     "button"
+               :disabled saving?
+               :on-click #(when-let [el (.getElementById js/document file-id)]
+                            (.click el))}
+              (tr [:settings.profile/change-avatar])]
+             (when (or shown-av @!av-remove?)
+               [:button.settings-button.secondary
+                {:type     "button"
+                 :disabled saving?
+                 :on-click #(do
+                              (re-frame/dispatch [:room-settings/clear-feedback room-id])
+                              (if @!av-remove?
+                                (reset! !av-remove? false)
+                                (do (clear-av!) (reset! !av-remove? true))))}
+                (tr (if @!av-remove?
+                      [:settings.profile/undo-remove-avatar]
+                      [:settings.profile/remove-avatar]))])])]
+
+         [:div.room-settings-form-body
+          [:div.settings-field
+           [:label.settings-label (tr [name-lbl-key])]
+           [:input.settings-input
+            {:type      "text"
+             :disabled  (or saving? (not can-edit?))
+             :value     @!name
+             :on-change (fn [e]
+                          (re-frame/dispatch [:room-settings/clear-feedback room-id])
+                          (reset! !name (.. e -target -value)))}]]
+
+          (when (or can-edit-topic? (not (str/blank? @!topic)))
+            [:div.settings-field
+             [:label.settings-label (tr [topic-lbl-key])]
+             [:textarea.settings-input
+              {:rows      3
+               :disabled  (or saving? (not can-edit?) (not can-edit-topic?))
+               :style     {:resize "vertical" :font-family "inherit"}
+               :value     @!topic
+               :on-change (fn [e]
+                            (re-frame/dispatch [:room-settings/clear-feedback room-id])
+                            (reset! !topic (.. e -target -value)))}]])
+
+          (when error
+            [:div.emotes-mgr-banner.is-error {:style {:margin "0"}} error])
+          (when saved?
+            [:div.emotes-mgr-banner.is-success {:style {:margin "0"}}
+             (tr [:room-settings/saved])])
+
+          (when (and can-edit? dirty?)
+            [:div.emotes-mgr-action-btns
+             [:button.settings-button.secondary
+              {:type     "button"
+               :disabled saving?
+               :on-click (fn []
+                           (reset! !name (or (:name config) ""))
+                           (reset! !topic (or (:topic config) ""))
+                           (clear-av!))}
+              (tr [:settings.profile/reset])]
+             [:button.settings-button.primary
+              {:type     "button"
+               :disabled (or saving? (str/blank? (str/trim @!name)))
+               :on-click #(re-frame/dispatch
+                           [:room-settings/save-overview
+                            {:room-id        room-id
+                             :name           (str/trim @!name)
+                             :topic          @!topic
+                             :avatar-file    @!av-file
+                             :remove-avatar? @!av-remove?
+                             :on-done        clear-av!}])}
+              (if saving?
+                (tr [:settings.profile/saving])
+                (tr [:settings.profile/save-changes]))]])]]]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label (tr [:room-settings/identifier-label])]
+        [:div.settings-hub-group-card
+         [:div.settings-card-row
+          [:div.settings-row-text
+           [:div.settings-row-title {:style {:font-family "monospace" :font-size "0.84rem"}}
+            room-id]]
+          [:button.settings-button.secondary
+           {:type     "button"
+            :on-click (fn []
+                        (when-let [cb (some-> js/navigator .-clipboard)]
+                          (.writeText cb (str room-id))
+                          (reset! !copied? true)
+                          (js/setTimeout #(reset! !copied? false) 1800)))}
+           (if @!copied?
+             (tr [:room-settings/copied])
+             (tr [:settings.context-menu/copy-id]))]]]]])
+    (finally
+      (clear-av!))))
+#+end_src
+
+**** Modal Shell
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
+(defn- resolve-tab-icon [icon-spec]
+  (cond
+    (vector? icon-spec) icon-spec
+    (keyword? icon-spec)
+    (case icon-spec
+      :edit     [icons/edit]
+      :shield   [icons/shield]
+      :lock     [icons/lock]
+      :smiley   [icons/smiley]
+      :members  [icons/members]
+      :settings [icons/settings]
+      :globe    [icons/globe]
+      [icons/settings])
+    :else [icons/settings]))
+
+(defn- default-room-tabs [is-space? is-dm? can-emotes?]
+  (cond-> [{:id           :overview
+            :title-key    :room-settings.tabs/overview
+            :subtitle-key (if is-space?
+                            :room-settings/overview-space-desc
+                            :room-settings/overview-room-desc)
+            :accent       "indigo"
+            :icon         :edit}]
+    (not is-dm?)
+    (conj {:id           :roles
+           :title-key    :room-settings.tabs/roles
+           :subtitle-key :room-settings/roles-desc
+           :badge-source :roles-count
+           :accent       "violet"
+           :icon         :shield}
+          {:id           :permissions
+           :title-key    :room-settings.tabs/permissions
+           :subtitle-key :room-settings/permissions-desc
+           :accent       "sky"
+           :icon         :lock})
+
+    can-emotes?
+    (conj {:id           :emotes
+           :title-key    :room-settings.tabs/emotes
+           :subtitle-key :room-settings/emotes-desc
+           :accent       "amber"
+           :icon         :smiley})
+
+    true
+    (conj {:id           :members
+           :title-key    :room-settings.tabs/members
+           :subtitle-key :room-settings/members-desc
+           :badge-source :members-count
+           :accent       "emerald"
+           :icon         :members})))
+
+(defn- room-tab-title [tr nav-items tab-id]
+  (if-let [item (some #(when (= (:id %) tab-id) %) nav-items)]
+    (:title item)
+    (case tab-id
+      :overview    (tr [:room-settings.tabs/overview])
+      :roles       (tr [:room-settings.tabs/roles])
+      :permissions (tr [:room-settings.tabs/permissions])
+      :emotes      (tr [:room-settings.tabs/emotes])
+      :members     (tr [:room-settings.tabs/members])
+      (tr [:navigation.room-list/room-settings]))))
+
+(defn ^:ui room-settings-modal [{:keys [room-id]}]
+  (r/with-let [!fetched-id (atom nil)
+               on-esc      (fn [^js e]
+                             (when (and (= (.-key e) "Escape")
+                                        (some? @(re-frame/subscribe [:room-settings/active-tab])))
+                               (.preventDefault e)
+                               (.stopImmediatePropagation e)
+                               (re-frame/dispatch [:room-settings/set-tab nil])))
+               _           (.addEventListener js/globalThis "keyup" on-esc true)]
+    (let [tr          @(re-frame/subscribe [:i18n/tr])
+          active-tab  @(re-frame/subscribe [:room-settings/active-tab])
+          rs-state    @(re-frame/subscribe [:room-settings/state room-id])
+          perms-data  @(re-frame/subscribe [:room-perms/data room-id])
+          rooms-map   @(re-frame/subscribe [:rooms/indexed-map])
+          spaces-list @(re-frame/subscribe [:spaces/all])
+          members     @(re-frame/subscribe [:room/members room-id])
+          parent-sp   (some-> (get rooms-map room-id) :first-parent-id)
+          _           (when (and room-id (not= @!fetched-id room-id))
+                        (reset! !fetched-id room-id)
+                        (re-frame/dispatch [:room-settings/fetch-config room-id])
+                        (re-frame/dispatch [:room-perms/fetch room-id parent-sp])
+                        (re-frame/dispatch [:room/fetch-members room-id])
+                        (re-frame/dispatch [:room/fetch-power-level-tags room-id]))
+          config      (resolve-fallback-config room-id (:config rs-state) rooms-map spaces-list)
+          is-space?   (boolean (:is-space? config))
+          is-dm?      (boolean (:is-dm? config))
+          roles-cnt   (count (:roles perms-data []))
+          members-cnt (count members)
+          root-title  (tr [(or (:title-key config)
+                               (if is-space?
+                                 :room-settings/space-title
+                                 :room-settings/room-title))])
+          badge-label (tr [(or (:badge-key config)
+                               (if is-space? :invites/space :invites/room))])
+          em-scope    (keyword (or (:emoji-scope config) (if is-space? "space" "room")))
+          em-target   (or (:emoji-target-id config) room-id)
+          raw-tabs    (if (seq (:tabs config))
+                        (:tabs config)
+                        (default-room-tabs is-space? is-dm? (:can-manage-emotes? config true)))
+          nav-items   (mapv
+                       (fn [{:keys [id title title-key subtitle subtitle-key
+                                    badge badge-source accent icon]}]
+                         {:id       (keyword id)
+                          :title    (or (when title-key (tr [title-key])) title (name id))
+                          :subtitle (or (when subtitle-key (tr [subtitle-key])) subtitle "")
+                          :badge    (or badge
+                                        (case (some-> badge-source keyword)
+                                          :roles-count   (when (pos? roles-cnt) (str roles-cnt))
+                                          :members-count (when (pos? members-cnt) (str members-cnt))
+                                          nil))
+                          :accent   (or accent "indigo")
+                          :icon     (resolve-tab-icon icon)})
+                       raw-tabs)]
+      [:div.settings-shell
+       [:div.settings-topbar
+        (if active-tab
+          [:button.settings-back-btn
+           {:type     "button"
+            :on-click #(re-frame/dispatch [:room-settings/set-tab nil])}
+           [:span.settings-back-icon [icons/arrow-left]]
+           [:span.settings-back-root root-title]
+           [:span.settings-breadcrumb-sep "/"]
+           [:span.settings-breadcrumb-current (room-tab-title tr nav-items active-tab)]]
+          [:div.settings-topbar-title
+           [:span.settings-topbar-icon [icons/settings]]
+           [:span root-title]])
+        [:button.settings-close-btn
+         {:type     "button"
+          :title    (tr [:settings.modal/esc])
+          :on-click #(re-frame/dispatch [:ui/close-modal])}
+         [:span.settings-close-esc (tr [:settings.modal/esc])]
+         [:span.settings-close-icon [icons/exit]]]]
+
+       [:div.settings-body
+        (if (nil? active-tab)
+          [:div.settings-hub-scroll
+           [:div.settings-hub-inner
+            [:div.settings-hub-profile-card
+             {:on-click #(re-frame/dispatch [:room-settings/set-tab :overview])}
+             [avatar {:id   room-id
+                      :name (or (:name config) "?")
+                      :url  (:avatar-url config)
+                      :size 52}]
+             [:div.settings-hub-profile-copy
+              [:div.settings-hub-profile-row
+               [:span.settings-hub-profile-name (or (:name config) room-id)]
+               [:span.settings-hub-proto-pill badge-label]]
+              [:div.settings-hub-profile-id
+               (if (not (str/blank? (str (:topic config))))
+                 (:topic config)
+                 room-id)]]
+             [:span.settings-hub-chevron [icons/chevron-down]]]
+
+            [:div.settings-hub-group
+             [:div.settings-hub-group-label root-title]
+             [:div.settings-hub-group-card
+              (for [item nav-items]
+                ^{:key (:id item)}
+                [:button.settings-hub-item
+                 {:type     "button"
+                  :on-click #(re-frame/dispatch [:room-settings/set-tab (:id item)])}
+                 [:span.settings-hub-icon
+                  {:class (str "accent-" (:accent item))}
+                  (:icon item)]
+                 [:span.settings-hub-item-copy
+                  [:span.settings-hub-item-title (:title item)]
+                  [:span.settings-hub-item-subtitle (:subtitle item)]]
+                 (when-let [b (:badge item)]
+                   [:span.settings-hub-badge b])
+                 [:span.settings-hub-chevron [icons/chevron-down]]])]]]]
+          [:div.settings-subview
+           {:key (name active-tab)}
+           (case active-tab
+             :overview
+             [room-overview-tab {:room-id room-id
+                                 :config  config
+                                 :saving? (:saving? rs-state)
+                                 :error   (:error rs-state)
+                                 :saved?  (:saved? rs-state)}]
+
+             :roles
+             [roles-editor-tab {:room-id room-id}]
+
+             :permissions
+             [permissions-access-tab {:room-id         room-id
+                                      :parent-space-id parent-sp}]
+
+             :emotes
+             [:div.settings-tab-content
+              [:p.settings-subview-lead
+               (tr [:room-settings/emotes-desc])]
+              [custom-emotes-manager {:scope     em-scope
+                                      :target-id em-target}]]
+
+             :members
+             [members-moderation-tab {:room-id room-id}]
+
+             [:div.settings-empty (tr [:settings.modal/tab-not-found])])])]])
+    (finally
+      (.removeEventListener js/globalThis "keyup" on-esc true))))
+
+(defmethod modal-component :room-settings [_]
+  room-settings-modal)
+#+end_src
