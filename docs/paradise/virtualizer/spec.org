@@ -98,6 +98,16 @@ This is what we use to measure the contents.
 (defn calc-reaction-height [msg theme-metrics]
   (if (seq (:reactions msg)) (:reaction-row-h theme-metrics 24) 0))
 
+(defn calc-thread-summary-height [msg theme-metrics]
+  (let [summary (:thread-summary msg)]
+    (if (and (map? summary)
+             (not (:in-thread-view? msg))
+             (or (pos? (:reply-count summary 0))
+                 (not-empty (:title summary))
+                 (not-empty (str (:thread-id summary "")))))
+      (:thread-pill-h theme-metrics 32)
+      0)))
+
 (defn calc-media-height [content actual-tag available-w theme-metrics]
   (let [info          (or (:info content)
                           (get-in content [:inner :info])
