@@ -100,7 +100,17 @@ Mildly temporary until we better place these with the engine.
        (re-frame/dispatch [:call/e2ee-key-received
                            {:participant-id (get-val "participant-id" :participant-id)
                             :key-index      (get-val "key-index" :key-index)
-                            :key-array      (get-val "key-array" :key-array)}]))})))
+                            :key-array      (get-val "key-array" :key-array)}]))
+     "search-index-progress"
+     (fn [_ get-val]
+       (re-frame/dispatch [:search/receive-index-status
+                           {:supported?     (boolean (get-val "supported?" :supported?))
+                            :engine-id      (get-val "engine-id" :engine-id)
+                            :enabled?       (boolean (get-val "enabled?" :enabled?))
+                            :running?       (boolean (get-val "running?" :running?))
+                            :indexed-events (or (get-val "indexed-events" :indexed-events) 0)
+                            :rooms-done     (or (get-val "rooms-done" :rooms-done) 0)
+                            :rooms-total    (or (get-val "rooms-total" :rooms-total) 0)}]))
      "threads-list-sync"
      (fn [_ get-val]
        (re-frame/dispatch [:threads/sync-list
