@@ -101,5 +101,23 @@ Mildly temporary until we better place these with the engine.
                            {:participant-id (get-val "participant-id" :participant-id)
                             :key-index      (get-val "key-index" :key-index)
                             :key-array      (get-val "key-array" :key-array)}]))})))
+     "threads-list-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:threads/sync-list
+                           {:room-id   (get-val "room-id" :room-id)
+                            :threads   (get-val "threads" :threads)
+                            :has-more? (boolean (get-val "has-more?" :has-more?))
+                            :loading?  (boolean (get-val "loading?" :loading?))}]))
+     "thread-timeline-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:threads/sync-timeline
+                           {:room-id        (get-val "room-id" :room-id)
+                            :thread-id      (get-val "thread-id" :thread-id)
+                            :prev-thread-id (get-val "prev-thread-id" :prev-thread-id)
+                            :title          (get-val "title" :title)
+                            :root-event     (get-val "root-event" :root-event)
+                            :events         (get-val "events" :events)
+                            :has-more?      (boolean (get-val "has-more?" :has-more?))
+                            :loading?       (boolean (get-val "loading?" :loading?))}]))})))
 
 #+end_src
