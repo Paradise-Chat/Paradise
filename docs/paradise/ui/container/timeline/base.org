@@ -209,9 +209,11 @@ We could then remove most remaining virtualizer placeholders.
 (re-frame/reg-event-fx
  :room/pretty-jump
  (fn [{:keys [db]} [_ room-id event-id]]
-   {:db (assoc-in db [:timeline/ui-state room-id :animating-jump?] true)
-    :dispatch-later [{:ms 300
-                      :dispatch [:room/execute-deep-jump room-id event-id]}]}))
+   (if (and room-id (not= room-id (:active-room-id db)))
+     {:dispatch [:rooms/select room-id {:jump-event-id event-id}]}
+     {:db (assoc-in db [:timeline/ui-state room-id :animating-jump?] true)
+      :dispatch-later [{:ms 300
+                        :dispatch [:room/execute-deep-jump room-id event-id]}]})))
 
 (re-frame/reg-event-fx
  :room/execute-deep-jump
