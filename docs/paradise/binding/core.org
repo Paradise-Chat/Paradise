@@ -43,8 +43,7 @@ well we don't want it larger than it is.
 (ns paradise.binding.core
   (:require [goog.object]
             [taoensso.timbre :as log]
-            [cljs-workers.helpers :as workers-helpers]
-            ))
+            [cljs-workers.helpers :as workers-helpers]))
 #+end_src
 
 
