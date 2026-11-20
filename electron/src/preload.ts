@@ -62,6 +62,10 @@ contextBridge.exposeInMainWorld("paradiseProxy", {
         ipcRenderer.invoke("paradise-proxy:prepare-stream", opts),
     clearStream: (urlOrHost?: string) =>
         ipcRenderer.invoke("paradise-proxy:clear-stream", urlOrHost),
+    prepareFrame: (opts: any) =>
+        ipcRenderer.invoke("paradise-proxy:prepare-frame", opts),
+    clearFrame: (urlOrHost?: string) =>
+        ipcRenderer.invoke("paradise-proxy:clear-frame", urlOrHost),
     openAuthWindow: (opts: any) =>
         ipcRenderer.invoke("paradise-proxy:open-auth-window", opts),
     closeAuthWindow: () =>
