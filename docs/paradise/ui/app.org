@@ -707,10 +707,21 @@ This just provides some basic behavior to the back button on Android.
      {:db       (assoc-in db [:ui :app-visible?] vis?)
       :dispatch [:call/visibility-changed vis?]})))
 
+(defonce ^:private !capacitor-listeners-ready? (atom false))
+
 (defn init-capacitor-listeners! []
-  (.addListener App "backButton"
-                (fn [_]
-                  (re-frame/dispatch [:native/hardware-back]))))
+  (when (compare-and-set! !capacitor-listeners-ready? false true)
+    (.addListener App "backButton"
+                  (fn [_]
+                    (re-frame/dispatch [:native/hardware-back])))
+    (.addListener App "appStateChange"
+                  (fn [^js state]
+                    (re-frame/dispatch [:app/visibility-changed (boolean (.-isActive state))])))
+    (when (exists? js/document)
+      (.addEventListener js/document "visibilitychange"
+                         (fn []
+                           (re-frame/dispatch
+                            [:app/visibility-changed (not (.-hidden js/document))]))))))
 #+end_src
 
 
