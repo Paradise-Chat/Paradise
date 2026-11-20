@@ -211,6 +211,14 @@ We want to be sure with the reframe components that we don't call unnecessarily.
 locale and dictionary allows us to only ever update strings if we explicitly change the
 displayed language.
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
+(defn- deep-merge-dicts [& maps]
+  (apply merge-with
+         (fn [a b]
+           (if (and (map? a) (map? b))
+             (deep-merge-dicts a b)
+             b))
+         (remove nil? maps)))
+
 (re-frame/reg-sub
  :i18n/locale
  (fn [db _] (:locale db)))
@@ -219,22 +227,79 @@ displayed language.
  :i18n/dictionary
  (fn [db _] (:dictionary db)))
 
-(defonce !tr-cache (atom {:locale nil :is-empty? true :fn nil}))
+(re-frame/reg-sub
+ :i18n/engine-dictionary
+ (fn [db _] (:i18n/engine-dictionary db)))
 
+(defonce !tr-cache (atom {:locale nil :is-empty? true :fn nil}))
 
 (re-frame/reg-sub
  :i18n/tr
  :<- [:i18n/locale]
  :<- [:i18n/dictionary]
- (fn [[locale dictionary] _]
-   (if (empty? dictionary)
-     (fn [k & _] (str "[" (name (last k)) "]"))
-     (partial tempura/tr {:dict dictionary} [locale :en]))))
+ :<- [:i18n/engine-dictionary]
+ (fn [[locale dictionary engine-dictionary] _]
+   (let [base-dict      (if (and (map? dictionary) (seq dictionary))
+                          dictionary
+                          i18n-data)
+         effective-dict (if (and (map? engine-dictionary) (seq engine-dictionary))
+                          (deep-merge-dicts base-dict engine-dictionary)
+                          base-dict)
+         safe-locale    (or (some-> locale keyword) :en)]
+     (if (empty? effective-dict)
+       (fn [k & _] (str "[" (name (last k)) "]"))
+       (partial tempura/tr {:dict effective-dict} [safe-locale :en])))))
 
 (re-frame/reg-event-db
  :i18n/set-dictionary
  (fn [db [_ dict]]
    (assoc db :dictionary dict)))
+
+(re-frame/reg-event-db
+ :i18n/set-engine-dictionary
+ (fn [db [_ engine-id dict]]
+   (let [eng-kw  (some-> engine-id keyword)
+         want-kw (:i18n/loading-engine-id db)]
+     (if (or (nil? want-kw) (nil? eng-kw) (= want-kw eng-kw))
+       (assoc db
+              :i18n/engine-id eng-kw
+              :i18n/engine-dictionary (when (map? dict) dict))
+       db))))
+
+(re-frame/reg-event-db
+ :i18n/clear-engine-dictionary
+ (fn [db _]
+   (dissoc db :i18n/engine-id :i18n/engine-dictionary :i18n/loading-engine-id)))
+
+(re-frame/reg-event-fx
+ :i18n/load-engine-extensions
+ (fn [{:keys [db]} [_ engine-id]]
+   (if-let [eng-kw (some-> engine-id keyword)]
+     (let [manifest-i18n-url (or (registry/get-engine-i18n-url eng-kw)
+                                 (get-in db [:available-engines eng-kw :i18n-url])
+                                 (get-in db [:available-engines eng-kw :i18n]))]
+       (go
+         (let [bind-dict (try
+                           (let [res  (<! (mesh/do-with-thread!
+                                           :engine-pool
+                                           {:handler   (keyword (name eng-kw) "get-i18n")
+                                            :arguments {}}))
+                                 dict (when (contains? #{"success" :success} (:status res))
+                                        (decode-edn-field res :dictionary-edn :dictionary))]
+                             (when (map? dict) dict))
+                           (catch :default _ nil))
+               http-dict (when (string? manifest-i18n-url)
+                           (try
+                             (let [url (str manifest-i18n-url
+                                            (if (str/includes? manifest-i18n-url "?") "&t=" "?t=")
+                                            (.getTime (js/Date.)))
+                                   res (<! (registry/fetch-edn url))]
+                               (when (map? res) res))
+                             (catch :default _ nil)))
+               merged    (deep-merge-dicts bind-dict http-dict)]
+           (re-frame/dispatch [:i18n/set-engine-dictionary eng-kw (or merged {})])))
+       {:db (assoc db :i18n/loading-engine-id eng-kw)})
+     {:dispatch [:i18n/clear-engine-dictionary]})))
 
 (re-frame/reg-event-db
  :i18n/set-locale
