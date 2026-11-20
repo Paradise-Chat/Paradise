@@ -874,11 +874,14 @@ when we detatch and reload (basically when you hit control + s to save).
 (re-frame/reg-event-fx
  :app/restore-user-session
  (fn [{:keys [db]} [_ user-id]]
-   (let [deep-room (:deep-link-room db)]
+   (let [deep-room      (:deep-link-room db)
+         pending-answer (get-in db [:call :pending-native-answer])]
      (if deep-room
-       {:dispatch-n [[:auth/set-status :logged-in]
-                     [:rooms/select deep-room]
-                     [:sdk/ignite-session]]}
+       {:dispatch-n (cond-> [[:auth/set-status :logged-in]
+                             [:rooms/select deep-room]
+                             [:sdk/ignite-session]]
+                      pending-answer
+                      (conj [:call/flush-pending-native-answer]))}
        (do
          (p/let [[room-id space-id] (p/all [(store/get-setting (str "last_room_" user-id))
                                             (store/get-setting (str "last_space_" user-id))])]
@@ -889,10 +892,14 @@ when we detatch and reload (basically when you hit control + s to save).
                  (re-frame/dispatch [:space/select space-id]))
                (re-frame/dispatch [:auth/set-status :logged-in])
                (re-frame/dispatch [:rooms/select room-id])
-               (re-frame/dispatch [:sdk/ignite-session]))
+               (re-frame/dispatch [:sdk/ignite-session])
+               (when pending-answer
+                 (re-frame/dispatch [:call/flush-pending-native-answer])))
              (do
                (re-frame/dispatch [:auth/set-status :logged-in])
-               (re-frame/dispatch [:sdk/ignite-session]))))
+               (re-frame/dispatch [:sdk/ignite-session])
+               (when pending-answer
+                 (re-frame/dispatch [:call/flush-pending-native-answer])))))
          {})))))
 
 
