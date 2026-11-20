@@ -1,18 +1,13 @@
 
 ** Call Runtime
 
-
 **** Preface
 
-A collection of helper functions and atoms for a call.
-Calling is handled by an externally loaded driver
-(and encoder) in which we can then bind those
-functions against while keep a completely custom
-and protocol agnostic calling solution.
-
+A collection of helper functions and atoms for a call. Calling is handled by an
+externally loaded driver (and optional E2EE encoder worker) against which
+Paradise binds a completely protocol-agnostic calling runtime.
 
 **** Imports
-
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (ns paradise.ui.container.call.runtime
@@ -23,14 +18,9 @@ and protocol agnostic calling solution.
    [paradise.ui.container.call.audio-processor :as audio-processor]))
 #+end_src
 
-
-
 **** Code
 
-
 ***** Atoms
-
-
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (defonce !driver-instance (atom nil))
