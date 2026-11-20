@@ -969,6 +969,16 @@ Some more room icons
 
 (defn folder-minus [props]
   (build-icon-hiccup props folder-minus-shapes))
+
+(def poll-shapes
+  [:g
+   [:rect {:x "3" :y "12" :width "4" :height "8" :rx "1"}]
+   [:rect {:x "10" :y "4" :width "4" :height "16" :rx "1"}]
+   [:rect {:x "17" :y "8" :width "4" :height "12" :rx "1"}]])
+
+(defn poll [props]
+  (build-icon-hiccup (merge {:width "20px" :height "20px"} props) poll-shapes))
+
 #+end_src
 
 
