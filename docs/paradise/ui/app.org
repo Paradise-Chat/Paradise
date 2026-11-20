@@ -700,6 +700,13 @@ This just provides some basic behavior to the back button on Android.
      ;; {:dispatch [:nav/go-back]}
      )))
 
+(re-frame/reg-event-fx
+ :app/visibility-changed
+ (fn [{:keys [db]} [_ visible?]]
+   (let [vis? (boolean visible?)]
+     {:db       (assoc-in db [:ui :app-visible?] vis?)
+      :dispatch [:call/visibility-changed vis?]})))
+
 (defn init-capacitor-listeners! []
   (.addListener App "backButton"
                 (fn [_]
