@@ -20,6 +20,7 @@ too much detail it is headless, so we can theme and customize it without much fr
             [re-frame.core :as re-frame]
             [taoensso.timbre :as log]
             [clojure.string :as str]
+            [paradise.ui.input.voice :refer [voice-recorder-bar]]
             [paradise.ui.input.drafts :refer [attachment-preview]]
             [paradise.ui.input.composer :refer [tiptap-component extract-editor-payload prepare-html-for-editor]]
             [paradise.ui.input.emotes :refer [emoji-sticker-board]]
