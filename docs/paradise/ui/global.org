@@ -754,29 +754,84 @@ provide an avatar color.
   ([id fallback]
    (get-avatar-color (or id fallback))))
 
-(defn avatar [{:keys [id name url size status shape] :as props :or {size 32 shape :circle}}]
-  (let [url-str     (when url (str url))
-        broken?     (and url-str (contains? @!broken-urls url-str))
-        show-image? (and url-str (not (str/blank? url-str)) (not broken?))
-        len         (count name)
-        target      (if (#{:space :squircle :square} shape) 2 1)
-        initials    (if (pos? len) (subs name 0 (min len target)) "?")
-        bg-color    (if (= shape :none) "transparent" (get-avatar-color id name))
-        local-url?  (and url-str (or (str/starts-with? url-str "blob:")
-                                     (str/starts-with? url-str "data:")))
-        thumb-size  (if (<= size 48) 96 256)
-        dom-props   (dissoc props :id :name :url :size :status :shape)]
+(defn- render-mini-member-avatar [member sub-size]
+  (let [m-id       (or (:id member) (:user-id member))
+        m-name     (str (or (:name member) (:display-name member) "?"))
+        m-url      (some-> (or (:url member) (:avatar-url member)) str)
+        broken?    (and m-url (contains? @!broken-urls m-url))
+        show-img?  (and m-url (not (str/blank? m-url)) (not broken?))
+        local-url? (and m-url (or (str/starts-with? m-url "blob:")
+                                  (str/starts-with? m-url "data:")))
+        initial    (if (pos? (count m-name)) (subs m-name 0 1) "?")]
+    [:div.avatar-group-member
+     {:style {:width            sub-size
+              :height           sub-size
+              :background-color (get-avatar-color m-id m-name)}}
+     (if show-img?
+       (if local-url?
+         [:img.avatar-img-layer
+          {:src      m-url
+           :alt      ""
+           :on-error #(swap! !broken-urls conj m-url)}]
+         [media
+          {:uri      m-url
+           :width    64
+           :height   64
+           :method   "crop"
+           :class    "avatar-img-layer"
+           :alt      ""
+           :on-error #(swap! !broken-urls conj m-url)}])
+       [:span.avatar-text
+        {:style {:font-size (str (max 8 (js/Math.round (/ sub-size 2.1))) "px")}}
+        initial])]))
+
+(defn avatar
+  [{:keys [id name url size status shape is-group? group-members]
+    :as   props
+    :or   {size 32 shape :circle}}]
+  (let [url-str       (when url (str url))
+        broken?       (and url-str (contains? @!broken-urls url-str))
+        show-image?   (and url-str (not (str/blank? url-str)) (not broken?))
+        group-stack?  (and (not show-image?) is-group? (seq group-members))
+        len           (count name)
+        target        (if (#{:space :squircle :square} shape) 2 1)
+        initials      (if (pos? len) (subs name 0 (min len target)) "?")
+        bg-color      (cond
+                        (= shape :none) "transparent"
+                        group-stack?    "#2b2d31"
+                        :else           (get-avatar-color id name))
+        local-url?    (and url-str (or (str/starts-with? url-str "blob:")
+                                       (str/starts-with? url-str "data:")))
+        thumb-size    (if (<= size 48) 96 256)
+        sub-size      (max 14 (js/Math.round (* size 0.64)))
+        [m1 m2]       (take 2 group-members)
+        dom-props     (dissoc props :id :name :url :size :status :shape
+                              :is-group? :group-members)]
     (into [:div.avatar-wrapper
            (merge dom-props
-                  {:class (kname shape)
+                  {:class [(kname shape) (when group-stack? "is-group-avatar")]
                    :style (merge (:style dom-props) {:width size :height size})})]
-          [(when-not show-image?
+          [(when (and (not show-image?) (not group-stack?))
              [:div.avatar-placeholder-layer
               {:style {:background-color bg-color}}
               (when-not (= shape :none)
                 [:span.avatar-text
                  {:style {:font-size (str (/ size (if (= shape :circle) 2.2 2.5)) "px")}}
                  initials])])
+
+           (when group-stack?
+             [:div.avatar-group-stack
+              {:style {:background-color bg-color}}
+              (when m1
+                [:div.avatar-group-slot.slot-first
+                 [render-mini-member-avatar m1 sub-size]])
+              (if m2
+                [:div.avatar-group-slot.slot-second
+                 [render-mini-member-avatar m2 sub-size]]
+                [:div.avatar-group-slot.slot-second
+                 [render-mini-member-avatar {:id   (str id "-group")
+                                             :name "+"}
+                  sub-size]])])
 
            (when show-image?
              (if local-url?
@@ -793,7 +848,7 @@ provide an avatar color.
                  :alt      ""
                  :on-error #(swap! !broken-urls conj url-str)}]))
 
-           (when status
+           (when (and status (not is-group?))
              [:div.avatar-status {:class (kname status)}])])))
 #+end_src
 
@@ -869,6 +924,61 @@ also likely not be selectable (as the fallback will be literal text).
 
 .status-indicator {
     z-index: 3;
+}
+
+.avatar-wrapper.circle.is-group-avatar {
+    border-radius: 6px;
+    overflow: visible;
+}
+
+.avatar-group-stack {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+}
+
+.avatar-wrapper.circle.is-group-avatar .avatar-group-stack {
+    background-color: transparent !important;
+}
+
+.avatar-group-slot {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.avatar-group-slot.slot-first {
+    top: 0;
+    left: 0;
+    z-index: 1;
+}
+
+.avatar-wrapper.squircle .avatar-group-slot.slot-first {
+    top: 3px;
+    left: 3px;
+}
+
+.avatar-group-slot.slot-second {
+    bottom: 0;
+    right: 0;
+    z-index: 2;
+}
+
+.avatar-wrapper.squircle .avatar-group-slot.slot-second {
+    bottom: 3px;
+    right: 3px;
+}
+
+.avatar-group-member {
+    position: relative;
+    border-radius: 50%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 1.5px #1e1f22;
 }
 
 
