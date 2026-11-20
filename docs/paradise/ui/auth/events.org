@@ -409,26 +409,35 @@ large enough registry.
 (re-frame/reg-event-fx
  :auth/login-action
  (fn [{:keys [db]} [_ engine-id action-id payload]]
-   (binding/set-active-engine! engine-id)
-   (if-let [pool @state/!engine-pool]
-     (go
-       (try
-         (let [res (<! (main/do-with-pool! pool {:handler :login-action
-                                                 :arguments {:action-id action-id
-                                                             :payload payload}}))
-               status-kw (keyword (:status res))]
-           (case status-kw
-             :redirect (set! (.-href js/window.location) (:url res))
-             :success (re-frame/dispatch [:auth/login-success
-                                          (assoc res :credentials payload
-                                                     :engine-id engine-id)])
-             (re-frame/dispatch [:auth/login-failure (:msg res)])))
-         (catch :default e
-           (re-frame/dispatch [:auth/login-failure (str e)]))))
-     (log/error "Cannot perform action: Engine pool not initialized"))
-
-   {:db (assoc db :auth-status :authenticating
-                  :login-error nil)}))
+   (let [engine-kw (keyword engine-id)]
+     (binding/set-active-engine! engine-kw)
+     (if-let [pool @state/!engine-pool]
+       (go
+         (try
+           (let [res       (<! (main/do-with-pool! pool {:handler   :login-action
+                                                         :arguments {:action-id action-id
+                                                                     :payload   payload}}))
+                 status-kw (keyword (:status res))]
+             (case status-kw
+               :redirect  (if (some? (.-paradiseProxy js/window))
+                            (do
+                              (open-auth-url! {:url (:url res) :external? true})
+                              (re-frame/dispatch [:auth/set-status :logged-out]))
+                            (set! (.-href js/window.location) (:url res)))
+               :success   (re-frame/dispatch [:auth/login-success
+                                              (assoc res
+                                                     :credentials payload
+                                                     :engine-id engine-kw)])
+               :cancelled (re-frame/dispatch [:auth/set-status :logged-out])
+               (re-frame/dispatch [:auth/login-failure (:msg res)])))
+           (catch :default e
+             (re-frame/dispatch [:auth/login-failure (str e)]))))
+       (log/error "Cannot perform action: Engine pool not initialized"))
+     {:db (assoc db
+                 :auth-status :authenticating
+                 :active-engine engine-kw
+                 :login-challenge nil
+                 :login-error nil)})))
 #+end_src
 
 **** Sign-in Page Component
