@@ -475,14 +475,17 @@ loaded through registries (unless mounted locally via dev execution).
     (fn []
       (let [tr                @(re-frame/subscribe [:i18n/tr])
             error             @(re-frame/subscribe [:auth/error])
+            challenge         @(re-frame/subscribe [:auth/challenge])
             status            @(re-frame/subscribe [:auth/status])
             accounts          @(re-frame/subscribe [:settings/available-accounts])
             available-engines @(re-frame/subscribe [:registry/available-engines])
+            proxy-provider    @(re-frame/subscribe [:auth/proxy-provider])
             {:keys [engine show-custom? custom-url auth-data]} @fields
             auth?             (= status :authenticating)
             current-engine    engine
             submit-disabled?  (or auth? (nil? current-engine))
             engine-meta       (get available-engines current-engine)
+            requires-proxy?   (true? (get-in engine-meta [:engine-config :login :requires-proxy]))
             auth-fields       (get-in engine-meta [:engine-config :login :fields] [])
             build-payload     (fn []
                                 (reduce (fn [acc {:keys [id default]}]
@@ -498,19 +501,59 @@ loaded through registries (unless mounted locally via dev execution).
           (when error
             [:div.auth-error-message error])
 
+          (when challenge
+            [:div.auth-challenge-card
+             (when-let [title (:title challenge)]
+               [:div.auth-challenge-title title])
+             (when-let [msg (:message challenge)]
+               [:div.auth-challenge-message msg])
+             (when-let [code (:code challenge)]
+               [:div.auth-challenge-code code])
+             [:div.auth-challenge-actions
+              (when-let [u (:url challenge)]
+                [:<>
+                 [:button.engine-btn
+                  {:type     "button"
+                   :on-click #(open-auth-url! {:url   u
+                                               :title (or (:title challenge) "Sign In")})}
+                  "Open Window"]
+                 [:button.engine-btn
+                  {:type     "button"
+                   :on-click #(open-auth-url! {:url u :external? true})}
+                  "Open in Browser"]])
+              [:button.engine-btn
+               {:type     "button"
+                :on-click #(re-frame/dispatch [:auth/cancel-login])}
+               "Cancel"]]])
+
           (when (seq accounts)
             [:div.account-chooser.mb-6
              [:h3.text-sm.font-bold.mb-2 (tr [:auth/continue-as])]
              [:div.accounts-list
-              (for [acc accounts]
-                ^{:key (:userId acc)}
+              (for [acc   accounts
+                    :let  [item-key (str (or (:engine acc) "default") ":" (:userId acc))
+                           title    (or (not-empty (:label acc))
+                                        (not-empty (:display-name acc))
+                                        (:userId acc))
+                           proto    (some-> (:engine acc) name str/capitalize)
+                           srv      (or (:server-url acc)
+                                        (:server acc)
+                                        (:server_url acc)
+                                        (:base-url acc)
+                                        "")
+                           sub      (cond
+                                      (and proto (not (str/blank? srv))) (str proto " · " srv)
+                                      proto                              proto
+                                      :else                              srv)]]
+                ^{:key item-key}
                 [:div.account-chooser-item
-                 {:on-click #(re-frame/dispatch [:auth/switch-account (:userId acc)])}
+                 {:on-click #(re-frame/dispatch
+                              [:auth/switch-account (:userId acc) (:engine acc)])}
                  [:div.avatar-placeholder [icons/user]]
                  [:div.account-details
-                  [:div.account-id (:userId acc)]
-                  (when-let [server (or (:server acc) (:server_url acc))]
-                    [:div.account-server server])]])]
+                  [:div.account-id title]
+                  (when-not (str/blank? sub)
+                    [:div.account-server sub])]])]
              [:div.divider
               (tr [:auth/divider])]])
 
@@ -554,6 +597,12 @@ loaded through registries (unless mounted locally via dev execution).
                             (let [url (.. e -target -value)]
                               (when (seq url)
                                 (re-frame/dispatch [:engine/fetch-manifest url]))))}]])]
+
+           (when (and requires-proxy? (nil? proxy-provider))
+             [:div.auth-proxy-notice
+              [:div.auth-proxy-notice-title "Host Proxy Extension Required"]
+              [:div.auth-proxy-notice-body
+               "This protocol requires the Paradise Proxy browser extension for cross-origin sign-in and media streaming. Install or enable the extension on this origin to continue."]])
 
            (for [{:keys [id label type default action-id]} auth-fields]
              (if (= type :action)
