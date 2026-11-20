@@ -80,7 +80,8 @@ actual protocol.
   (let [hash-str (some-> (:hash manifest) str)
         local?   (and (string? url)
                       (or (str/includes? url "://localhost")
-                          (str/includes? url "://127.0.0.1")))
+                          (str/includes? url "://127.0.0.1")
+                          (str/includes? url "/local/")))
         tag      (cond
                    (seq hash-str) (subs hash-str 0 (min 12 (count hash-str)))
                    local?         (str (js/Date.now))
@@ -140,19 +141,6 @@ actual protocol.
                               protocol-name)})))))
       (catch :default e
         {:status "error" :msg (or (.-message e) (str e))}))))
-
-(worker/register :list-all-stored-accounts
-                 (fn [_]
-                   (go
-                     (try
-                       (<! (registry/ensure-environment!))
-                       (let [seed-engines (keys (registry/resolve-engines))
-                             accounts     (<p! (session-store/list-all-stored-accounts seed-engines))]
-                         {:status   "success"
-                          :accounts accounts})
-                       (catch :default e
-                         {:status "error"
-                          :msg    (or (.-message e) (str e))})))))
 #+end_src
 
 
@@ -182,6 +170,26 @@ This lets the engine be informed of what engine is being registered
                          {:status "error" :msg (.-message e)})))))
 #+end_src
 
+
+***** Account Handling
+
+Handle ALL accounts regardless of engine.
+This needs to be top-level and outside the actual engines themselves.
+
+#+begin_src clojurescript :tangle ../../../src/paradise/engine/core.cljs
+(worker/register :list-all-stored-accounts
+                 (fn [_]
+                   (go
+                     (try
+                       (<! (registry/ensure-environment!))
+                       (let [seed-engines (keys (registry/resolve-engines))
+                             accounts     (<p! (session-store/list-all-stored-accounts seed-engines))]
+                         {:status   "success"
+                          :accounts accounts})
+                       (catch :default e
+                         {:status "error"
+                          :msg    (or (.-message e) (str e))})))))
+#+end_src
 
 
 **** Thread Initialization
