@@ -171,6 +171,11 @@ not then it is safely ignored.
    (assoc db :active-push-user user-id
              :push-status (if user-id :enabled :disabled))))
 
+(re-frame/reg-event-db
+ :push/set-voip-token
+ (fn [db [_ voip-token]]
+   (assoc db :voip-token voip-token)))
+
 (re-frame/reg-sub
  :push/previews-enabled?
  (fn [db _]
@@ -219,6 +224,7 @@ not then it is safely ignored.
  (fn [{:keys [db]} [_ token]]
    (let [active-user (:active-user-id db)
          old-user    (:active-push-user db)
+         voip-token  (:voip-token db)
          app-id      (resolve-app-id)
          platform    (.getPlatform Capacitor)]
      (go
@@ -227,6 +233,7 @@ not then it is safely ignored.
            (try
              (<p! (.deactivateShadow shadow-device
                                      #js {:pushToken token
+                                          :voipToken (or voip-token "")
                                           :userId    old-user
                                           :appId     app-id
                                           :platform  platform}))
@@ -234,6 +241,7 @@ not then it is safely ignored.
                (log/warn "Silent deactivate cleanup error:" e))))
          (<p! (.activateShadow shadow-device
                                #js {:pushToken token
+                                    :voipToken (or voip-token "")
                                     :pushUrl   (:push-url @!config)
                                     :userId    active-user
                                     :appId     app-id
