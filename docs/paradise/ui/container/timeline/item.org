@@ -20,7 +20,7 @@ It is convenient to define the actual items that make up a timeline.
             [paradise.shared.client.state :as state]
             [cljs.core.async :refer [go <!]]
             [paradise.shared.utils.helpers :refer [sanitize-custom-html hiccup->text format-divider-date format-time linkify-text truncate-name]]
-            [paradise.media.component :refer [media]]
+            [paradise.media.component :refer [media media-native]]
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.ui.container.members :refer [profile-popover-trigger]]
             [virtualizer.client.hydrator :refer [get-cached-react-tree]]
