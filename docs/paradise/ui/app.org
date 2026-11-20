@@ -97,9 +97,9 @@ This also serves as a good example of where to start with modifying the UI
    :auth-status :checking
    :login-error nil
    :client nil
-   :config {:version "0.0.0"}
+   :config config
    :locale :en
-   :dictionary {}
+   :dictionary i18n-data
    :update-available? false}
    )
 #+end_src
