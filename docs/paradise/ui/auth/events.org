@@ -391,8 +391,13 @@ large enough registry.
        (let [engine-kw (keyword (:module-id manifest))
              base-dir  (subs url 0 (inc (clojure.string/last-index-of url "/")))
              js-path   (:path manifest)
-             abs-path  (if (clojure.string/starts-with? js-path "http") js-path (str base-dir js-path))]
-         (re-frame/dispatch [:registry/set-custom-engine engine-kw (assoc manifest :path abs-path)]))
+             abs-path  (if (clojure.string/starts-with? js-path "http") js-path (str base-dir js-path))
+             i18n-path (:i18n manifest)
+             i18n-url  (when (string? i18n-path)
+                         (registry/resolve-relative-url url i18n-path))]
+         (re-frame/dispatch [:registry/set-custom-engine engine-kw
+                             (cond-> (assoc manifest :path abs-path)
+                               i18n-url (assoc :i18n-url i18n-url))]))
        (js/console.error "Failed to fetch custom manifest from:" url)))
    {}))
 
