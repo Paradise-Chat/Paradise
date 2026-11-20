@@ -979,6 +979,11 @@ Some more room icons
 (defn poll [props]
   (build-icon-hiccup (merge {:width "20px" :height "20px"} props) poll-shapes))
 
+(def play-shapes
+  [:polygon {:points "6 4 20 12 6 20 6 4" :fill "currentColor" :stroke "none"}])
+
+(defn play [props]
+  (build-icon-hiccup props play-shapes))
 #+end_src
 
 
