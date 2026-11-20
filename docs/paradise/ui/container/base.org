@@ -18,6 +18,7 @@ This is more or less where the layout and control of the container's contents wi
    [paradise.ui.container.members :refer [member-list]]
    [paradise.ui.container.search :refer [search]]
    [paradise.ui.container.pins :refer [pins]]
+   [paradise.ui.container.threads :refer [threads-forum-view threads-panel]]
    [paradise.shared.utils.svg :as icons]
    [taoensso.timbre :as log]
    [promesa.core :as p]
