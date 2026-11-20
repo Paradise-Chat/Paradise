@@ -153,10 +153,32 @@ is effectively a functioning *stub*.
    (main/do-with-pool! @state/!engine-pool {:handler :paginate-room-list})
    {}))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :rooms/set-preview
- (fn [db [_ room-id preview-data]]
-   (assoc-in db [:room-previews room-id] preview-data)))
+ (fn [{:keys [db]} [_ room-id preview-data]]
+   (let [prev        (get-in db [:room-previews room-id] {})
+         merged      (merge prev preview-data)
+         forum?      (or (boolean (:is-forum? merged))
+                         (contains? (get db :forum-room-overrides #{}) room-id))
+         merged'     (cond-> merged
+                       (contains? preview-data :is-forum?)
+                       (assoc :native-forum? (boolean (:is-forum? preview-data)))
+                       forum?
+                       (assoc :is-forum? true))
+         active-hit? (and (= room-id (:active-room-id db))
+                          forum?
+                          (= (:main-focus db :timeline) :timeline)
+                          (nil? (get-in db [:timeline/jump-target-id room-id])))]
+     (if (= prev merged')
+       {}
+       (cond-> {:db (cond-> (assoc-in db [:room-previews room-id] merged')
+                      active-hit?
+                      (-> (assoc :main-focus :thread)
+                          (assoc-in [:ui :main-focus] :thread)
+                          (cond-> (= (:side-panel db) :threads)
+                            (assoc :side-panel nil))))}
+         active-hit?
+         (assoc :dispatch [:threads/fetch-list room-id false]))))))
 
 (re-frame/reg-sub
  :rooms/preview
