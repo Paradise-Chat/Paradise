@@ -139,4 +139,29 @@ usable configs across the application.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/macros.cljc
 (defmacro load-static-config [path]
   (list 'quote (clojure.edn/read-string (slurp path))))
+
+(defmacro load-relative-edn
+  "Reads an EDN file relative to the compiling ClojureScript source file,
+   falling back to resolving `rel-path` from the current working directory.
+   Returns `{}` if the file is missing or empty."
+  [rel-path]
+  (let [cljs-file (or #?(:clj (some-> (resolve 'cljs.analyzer/*cljs-file*) deref)
+                         :default nil)
+                      (some-> &env :ns :meta :file))
+        src-file  (when cljs-file
+                    (let [f (io/file cljs-file)]
+                      (if (.exists f)
+                        f
+                        (when-let [res (io/resource cljs-file)]
+                          (when (= "file" (.getProtocol res))
+                            (io/file (.toURI res)))))))
+        base-dir  (when src-file (.getParentFile src-file))
+        candidate (when base-dir (.getCanonicalFile (io/file base-dir rel-path)))
+        target    (cond
+                    (and candidate (.exists candidate)) candidate
+                    (.exists (io/file rel-path))        (io/file rel-path)
+                    :else                               nil)
+        raw       (when target (str/trim (slurp target)))
+        parsed    (if (seq raw) (clojure.edn/read-string raw) {})]
+    (list 'quote parsed)))
 #+end_src
