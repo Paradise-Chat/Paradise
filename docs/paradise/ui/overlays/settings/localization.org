@@ -26,11 +26,11 @@ between the i18n options for example.
         locale @(re-frame/subscribe [:i18n/locale])]
     [:div.settings-tab-content
      [:p.settings-subview-lead
-      (tr [:settings.language/description])]
+      (tr [:settings.language-time/description])]
 
      [:div.settings-hub-group
       [:div.settings-hub-group-label
-       (tr [:settings.language/system-label])]
+       (tr [:settings.language-time/system-label])]
       [:div.settings-list
        (for [[id label native]
              [[:en "English" "English"]
