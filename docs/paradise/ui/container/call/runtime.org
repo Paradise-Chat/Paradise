@@ -29,31 +29,23 @@ Paradise binds a completely protocol-agnostic calling runtime.
 (defonce !participants (atom []))
 (defonce !pending-crypto-queue (atom []))
 
-(defonce !voice-threshold (atom 0.12))
+(defonce !voice-threshold (atom 0.004))
 (defonce !voice-gate-enabled? (atom true))
 (defonce !noise-suppression-enabled? (atom true))
 (defonce !audio-processor (atom nil))
-(defonce !local-media-state (atom {:audio false :video false :screen-sharing false}))
 #+end_src
 
 ***** Track & Driver Helpers
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
-(defn driver-active? []
-  (some? @!driver-instance))
-
-(defn live-microphone-enabled? []
-  (and (driver-active?)
-       (boolean (:audio @!local-media-state))))
-
 (defn- clamp01 [x]
   (max 0.0 (min 1.0 (or x 0.0))))
 
 (defn resolve-media-track [^js track]
   (when track
-    (let [candidate (or (.-mediaStreamTrack track)
-                        (some-> (.-track track) .-mediaStreamTrack)
-                        (.-track track)
+    (let [candidate (or (aget track "mediaStreamTrack")
+                        (some-> (aget track "track") (aget "mediaStreamTrack"))
+                        (aget track "track")
                         track)]
       (when (and (exists? js/MediaStreamTrack)
                  (instance? js/MediaStreamTrack candidate))
@@ -75,7 +67,8 @@ Paradise binds a completely protocol-agnostic calling runtime.
       (p/then (fn [resp]
                 (if (.-ok resp)
                   (.text resp)
-                  (p/rejected (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
+                  (p/rejected
+                   (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
       (p/then (fn [code]
                 (let [blob     (js/Blob. #js [code] #js {:type "application/javascript"})
                       blob-url (js/URL.createObjectURL blob)
@@ -88,13 +81,15 @@ Paradise binds a completely protocol-agnostic calling runtime.
     (p/resolved cached)
     (-> (dynamic-import driver-url)
         (p/then (fn [mod]
-                  (let [create-fn (or (.-createCallDriver mod)
-                                      (some-> (.-default mod) .-createCallDriver))]
+                  (let [create-fn (or (when mod (aget mod "createCallDriver"))
+                                      (some-> mod (aget "default") (aget "createCallDriver")))]
                     (if create-fn
                       (do
                         (swap! !loaded-drivers assoc driver-url create-fn)
                         create-fn)
-                      (p/rejected (js/Error. (str "Call driver missing createCallDriver export: " driver-url))))))))))
+                      (p/rejected
+                       (js/Error.
+                        (str "Call driver missing createCallDriver export: " driver-url))))))))))
 
 (defn get-or-create-audio-processor! []
   (or @!audio-processor
