@@ -11,6 +11,7 @@ So there a couple methods that don't mesh perfectly in any one location that for
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
 (ns paradise.shared.utils.helpers
   (:require
+   [cljs.reader :as reader]
    [net :as net]
    [clojure.string :as str]
    [promesa.core :as p]
@@ -504,6 +505,22 @@ We need to be able to convert timestamps to date otherwise people might not be t
           (aset out i (.charCodeAt bin i))
           (recur (inc i))))
       out)))
+
+(defn decode-edn-field
+  "Decodes an EDN-encoded string field (e.g. :options-edn) from a worker payload,
+  falling back to `fallback-key` when absent or unreadable."
+  ([m edn-key]
+   (decode-edn-field m edn-key nil))
+  ([m edn-key fallback-key]
+   (or (when-let [s (get m edn-key)]
+         (when (string? s)
+           (try
+             (reader/read-string s)
+             (catch :default e
+               (log/warn "Failed to parse" edn-key ":" e)
+               nil))))
+       (when fallback-key
+         (get m fallback-key)))))
 #+end_src
 
 
