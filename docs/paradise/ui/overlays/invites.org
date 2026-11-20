@@ -94,7 +94,7 @@ populated based on DMs to give the user a familiar UI.
                                           :size  28
                                           :shape :rounded}]
                                  [:div.invite-user-info
-                                  [:span.name.raw-id "Invite user by ID"]
+                                  [:span.name.raw-id (tr [:invites/invite-user-by-id])]
                                   [:span.sub-name (:user-id item)]]]
                                 (let [room-id      (or (:id item) (:roomId item))
                                       members      @(re-frame/subscribe [:room/members-map room-id])
