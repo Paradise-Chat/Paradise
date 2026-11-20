@@ -11,14 +11,15 @@ pieces.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (ns paradise.shared.client.core
   (:require
-   [paradise.shared.utils.logger :as logger]
-   [re-frame.core :as re-frame]
-   [goog.object]
-   [paradise.ui.app :as app]
+   ["@capacitor/core" :refer [Capacitor CapacitorHttp registerPlugin]]
    ["react" :as react]
-   [re-frame.db :as db]
-   [reagent.core :as r]
-   [promesa.core :as p]
+   [cljs-workers.core :as main]
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! chan go promise-chan put!]]
+   [cljs.core.async.interop :refer-macros [<p!]]
+   [clojure.string :as str]
+   [goog.object :as gobj]
+   [net :as net]
    [paradise.binding.core :as binding]
    [paradise.binding.streams :as streams]
    [paradise.shared.client.state :as state]
