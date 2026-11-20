@@ -45,17 +45,66 @@ Probably needs a better name (and logical grouping)
  :auth/error
  (fn [db _] (:login-error db)))
 
+(re-frame/reg-sub
+ :auth/challenge
+ (fn [db _] (:login-challenge db)))
+
+(re-frame/reg-event-db
+ :auth/set-proxy-provider
+ (fn [db [_ provider]]
+   (assoc db :proxy-provider provider)))
+
+(re-frame/reg-sub
+ :auth/proxy-provider
+ (fn [db _]
+   (or (:proxy-provider db)
+       (when (and (exists? js/window) (some? (.-paradiseProxy js/window)))
+         (or (some-> (.-paradiseProxy js/window) (.-provider)) "host")))))
+
+(re-frame/reg-event-db
+ :auth/set-challenge
+ (fn [db [_ challenge]]
+   (assoc db :login-challenge (when (and (map? challenge) (seq challenge)) challenge))))
+
+(when (exists? js/window)
+  (worker/register
+   :auth-challenge
+   (fn [challenge]
+     (go
+       (re-frame/dispatch [:auth/set-challenge challenge])
+       {:ok true}))))
+
 (re-frame/reg-event-db
  :auth/login-failure
  (fn [db [_ error-msg]]
-   (assoc db :auth-status :logged-out
+   (assoc db
+          :auth-status :logged-out
+          :login-challenge nil
           :login-error error-msg)))
+
+(re-frame/reg-event-fx
+ :auth/cancel-login
+ (fn [{:keys [db]} _]
+   (close-auth-url!)
+   (when-let [pool @state/!engine-pool]
+     (go
+       (<! (main/do-with-pool! pool {:handler   :cancel-login
+                                     :arguments {}}))))
+   {:db (assoc db
+               :auth-status :logged-out
+               :login-challenge nil
+               :login-error nil)}))
 
 
 (re-frame/reg-sub
  :auth/active-user-id
  (fn [db _]
    (:active-user-id db)))
+
+(re-frame/reg-sub
+ :auth/active-engine
+ (fn [db _]
+   (:active-engine db)))
 
 
 (re-frame/reg-event-fx
@@ -74,8 +123,10 @@ Probably needs a better name (and logical grouping)
      {:db (assoc db
                  :auth-status :logged-out
                  :settings/open? false
+                 :login-challenge nil
                  :login-error nil)
       :fx (cond-> [[:dispatch [:settings/close]]
+                   [:dispatch [:i18n/clear-engine-dictionary]]
                    [:dispatch [:engine/clear-media-session {:all? false}]]
                    [:dispatch [:settings/load-accounts]]]
             call-active?
@@ -92,11 +143,12 @@ Probably needs a better name (and logical grouping)
            (let [res       (<! (main/do-with-pool! pool {:handler   :login
                                                          :arguments auth-payload}))
                  status-kw (keyword (:status res))]
-             (if (= status-kw :success)
-               (re-frame/dispatch [:auth/login-success
-                                   (assoc res
-                                          :credentials auth-payload
-                                          :engine-id engine-kw)])
+             (case status-kw
+               :success   (re-frame/dispatch [:auth/login-success
+                                              (assoc res
+                                                     :credentials auth-payload
+                                                     :engine-id engine-kw)])
+               :cancelled (re-frame/dispatch [:auth/set-status :logged-out])
                (re-frame/dispatch [:auth/login-failure (:msg res)])))
            (catch :default e
              (re-frame/dispatch [:auth/login-failure (str e)]))))
@@ -104,6 +156,7 @@ Probably needs a better name (and logical grouping)
      {:db (assoc db
                  :auth-status :authenticating
                  :active-engine engine-kw
+                 :login-challenge nil
                  :login-error nil)})))
 
 (re-frame/reg-event-fx
