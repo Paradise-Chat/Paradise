@@ -25,6 +25,7 @@ https://github.com/matrix-org/matrix-spec-proposals/pull/2545
    [paradise.shared.client.state :as state]
    [reagent.core :as r]
    [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [click-away-wrapper]]
    [paradise.media.component :refer [media]]
    ["emojibase-data/en/data.json" :as emoji-data]
