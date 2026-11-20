@@ -129,7 +129,8 @@ We need a neat manner to load from the different engines we might encounter.
                  (when (and raw (object? raw))
                    (let [tok   (or (gobj/get raw "accessToken")
                                    (gobj/get raw "token"))
-                         url   (or (gobj/get raw "serverUrl")
+                         url   (or (gobj/get entry "serverUrl")
+                                   (gobj/get raw "serverUrl")
                                    (gobj/get raw "apiBase")
                                    "")
                          uname (gobj/get raw "username")
@@ -137,7 +138,7 @@ We need a neat manner to load from the different engines we might encounter.
                                    (gobj/get raw "display_name"))
                          av    (or (gobj/get raw "avatarUrl")
                                    (gobj/get raw "avatar_url"))]
-                     (when (or tok (not (str/blank? (str url))))
+                     (when (or tok (not (str/blank? (str url))) (gobj/get raw "userId"))
                        {:userId       (str uid)
                         :user-id      (str uid)
                         :engine       eng-str
@@ -145,6 +146,8 @@ We need a neat manner to load from the different engines we might encounter.
                         :username     uname
                         :display-name dname
                         :avatar       av
+                        :avatar-url   av
+                        :server-url   url
                         :base-url     url
                         :server       url}))))))
            uids))))
