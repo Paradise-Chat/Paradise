@@ -34,6 +34,8 @@ actual UI components themselves.
    [clojure.string :as str]
    [re-frame.db :as db]
    [paradise.shared.client.state :as state]
+   [paradise.shared.utils.helpers :refer [decode-edn-field]]
+   [paradise.shared.registry :as registry]
    [reagent.core :as r]
    [reagent.dom.client :as rdom]
    [paradise.ui.navigation.spaces.bar :refer [spaces-sidebar]]
@@ -64,7 +66,7 @@ actual UI components themselves.
    [taoensso.tempura :as tempura :refer [tr]]
    [paradise.ui.global :refer [modal-root popover-root context-menu-root make-swipe-handlers]]
    ["@capacitor/app" :refer [App]]
-   [paradise.shared.utils.macros :refer [i18n-data defui]]
+   [paradise.shared.utils.macros :refer [config i18n-data defui]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.navigation.rooms.room-list :refer [room-list]]
    [paradise.ui.container.base :refer [container]]))
