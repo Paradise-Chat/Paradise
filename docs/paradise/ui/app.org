@@ -198,7 +198,10 @@ https://day8.github.io/re-frame/application-state/
 (re-frame/reg-sub
  :app/version
  (fn [db _]
-   (get-in db [:config :version] "Unknown")))
+   (let [cfg (:config db)]
+     (or (when (map? cfg) (:version cfg))
+         (:version config)
+         "Unknown"))))
 #+end_src
 
 
