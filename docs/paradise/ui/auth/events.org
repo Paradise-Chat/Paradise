@@ -258,20 +258,26 @@ Probably needs a better name (and logical grouping)
 (re-frame/reg-event-fx
  :session/nuke-single-account
  (fn [{:keys [db]} [_ target-user-id]]
-   (let [is-active? (= target-user-id (:active-user-id db))]
+   (let [is-active? (= (str target-user-id) (str (:active-user-id db)))]
      (when is-active?
        (set-auth-context! nil nil)
-       (media/clear-media-cache!))
+       (media/clear-media-cache!)
+       (store/set-setting! "last_active_user" nil)
+       (store/set-setting! "last-active-engine" nil))
      (merge
-      {:session/wipe-settings true
-       :fx [[:dispatch [:engine/clear-media-session {:user-id target-user-id}]]
-            [:dispatch [:settings/load-accounts]]]}
+      {:fx (cond-> [[:dispatch [:engine/clear-media-session {:user-id target-user-id}]]
+                    [:dispatch [:settings/load-accounts]]]
+             is-active? (conj [:dispatch [:i18n/clear-engine-dictionary]]))}
       (when is-active?
         {:db (assoc db
                     :auth-status :logged-out
                     :active-user-id nil
+                    :active-room-id nil
                     :auth/session nil
                     :rooms/data {}
+                    :spaces/list []
+                    :timeline-subs {}
+                    :timeline-data {}
                     :timeline/events [])})))))
 
 
