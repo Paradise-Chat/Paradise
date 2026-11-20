@@ -213,6 +213,11 @@ React object that will be hydrated on the other end.
       cached
       (let [new-event (proto/precompile-item t-spec e room-id pretext/pretext-api)]
         (swap! !event-cache assoc eid (assoc new-event :raw e))
+        (when cached
+          (swap! ast/!item-revisions update eid (fnil inc 0))
+          (swap! ast/!ast-node-cache dissoc eid)
+          (swap! !layout-context update-in [room-id :measured]
+                 dissoc eid (keyword eid) (str eid)))
         new-event))))
 
 (defn process-timeline-events [t-spec events room-id]
@@ -271,7 +276,12 @@ sure we actually document the behavior and what it is for future discoverers.
                                           (when (seq edits)
                                             (.postMessage db-port (t/write writer edits)))))
                                       (re-frame/clear-subscription-cache!)
-                                      (queue-defer-check!)))
+                                      (if (or (not= (:locale old-state) (:locale new-state))
+                                              (not= (:dictionary old-state) (:dictionary new-state)))
+                                        (do
+                                          (reset! !event-cache {})
+                                          (process-timeline-redraw!))
+                                        (queue-defer-check!))))
                          (db/set-eve-atom! !local-db)
                          {:status :db-bound-async})))))
 #+end_src
