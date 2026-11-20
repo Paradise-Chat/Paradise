@@ -683,6 +683,71 @@ more meaningfully accurate.
   text-align: left;
 }
 
+.auth-proxy-notice {
+  background-color: var(--bg-input);
+  border: 1px solid rgba(250, 166, 26, 0.55);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  text-align: left;
+}
+
+.auth-proxy-notice-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #faa61a;
+  margin-bottom: 4px;
+}
+
+.auth-proxy-notice-body {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted, #b5bac1);
+}
+
+.auth-challenge-card {
+  background-color: var(--bg-input);
+  border: 1px solid var(--blurple);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  text-align: left;
+}
+
+.auth-challenge-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-normal, #f2f3f5);
+  margin-bottom: 6px;
+}
+
+.auth-challenge-message {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted, #b5bac1);
+  margin-bottom: 10px;
+}
+
+.auth-challenge-code {
+  font-family: monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+  background-color: var(--bg-tertiary);
+  color: #ffffff;
+  user-select: all;
+}
+
+.auth-challenge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .account-chooser-item {
   display: flex;
   align-items: center;
