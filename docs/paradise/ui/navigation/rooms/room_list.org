@@ -26,8 +26,35 @@ Room Lists sauce here.
 
 **** Syncing
 
-
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
+(defn safe-get [obj k-str k-kw]
+  (if (map? obj)
+    (get obj k-kw)
+    (when obj
+      (let [v (aget obj k-str)]
+        (if (undefined? v)
+          (aget obj (name k-kw))
+          v)))))
+
+(defn- room-entry-id [r]
+  (if (map? r)
+    (or (:id r) (:roomId r))
+    (when r
+      (or (aget r "id") (aget r "roomId")))))
+
+(defn- idx-remove-child [idx pid rid]
+  (if (and pid rid)
+    (let [m (dissoc (get idx pid) rid)]
+      (if (empty? m)
+        (dissoc idx pid)
+        (assoc idx pid m)))
+    idx))
+
+(defn- idx-put-child [idx pid rid is-space?]
+  (if (and pid rid)
+    (assoc-in idx [pid rid] {:id rid :is-space? (boolean is-space?)})
+    idx))
+
 (re-frame/reg-event-db
  :rooms/parent-resolved
  (fn [db _]
@@ -36,108 +63,250 @@ Room Lists sauce here.
 (re-frame/reg-event-db
  :room-list/set-home-rooms-sync
  (fn [db [_ rooms]]
-   (assoc db :rooms rooms)))
+   (if (= (:rooms db) rooms)
+     db
+     (assoc db :rooms rooms))))
 
 (re-frame/reg-event-db
  :room-list/set-bg-rooms-sync
  (fn [db [_ rooms-list]]
-   (let [rooms-map (reduce (fn [acc r]
-                             (let [id (or (:id r) (:roomId r))]
-                               (if id
-                                 (assoc acc id r)
-                                 acc)))
-                           {} rooms-list)]
-     (assoc db :rooms-unfiltered-cache rooms-map))))
+   (let [old-cache (:rooms-unfiltered-cache db {})
+         old-idx   (:rooms-manual-children-idx db {})
+         [raw-map next-idx]
+         (reduce
+          (fn [[c-acc i-acc] r]
+            (if-let [id (room-entry-id r)]
+              (let [old-r       (get old-cache id)
+                    prev-parent (when old-r
+                                  (safe-get old-r "first-parent-id" :first-parent-id))
+                    merged-r    (if (and (map? r)
+                                         prev-parent
+                                         (nil? (:first-parent-id r)))
+                                  (assoc r :first-parent-id prev-parent)
+                                  r)
+                    final-r     (if (= old-r merged-r) old-r merged-r)
+                    pid         (safe-get final-r "first-parent-id" :first-parent-id)
+                    is-space?   (boolean (safe-get final-r "isSpace" :isSpace))]
+                [(assoc! c-acc id final-r)
+                 (idx-put-child i-acc pid id is-space?)])
+              [c-acc i-acc]))
+          [(transient {}) {}]
+          rooms-list)
+         rooms-map (persistent! raw-map)
+         cache-eq? (= old-cache rooms-map)
+         idx-eq?   (= old-idx next-idx)]
+     (if (and cache-eq? idx-eq?)
+       db
+       (cond-> db
+         (not cache-eq?) (assoc :rooms-unfiltered-cache rooms-map)
+         (not idx-eq?)   (assoc :rooms-manual-children-idx next-idx))))))
+
+(re-frame/reg-event-db
+ :room-list/patch-bg-rooms-sync
+ (fn [db [_ upserts removals]]
+   (let [old-cache (:rooms-unfiltered-cache db {})
+         old-idx   (:rooms-manual-children-idx db {})
+         [rem-cache rem-idx]
+         (reduce
+          (fn [[c-acc i-acc] raw-id]
+            (let [rid (str raw-id)]
+              (if-let [old-r (get c-acc rid)]
+                (let [old-pid (safe-get old-r "first-parent-id" :first-parent-id)]
+                  [(dissoc c-acc rid)
+                   (idx-remove-child i-acc old-pid rid)])
+                [c-acc i-acc])))
+          [old-cache old-idx]
+          removals)
+         [next-cache next-idx]
+         (reduce
+          (fn [[c-acc i-acc] r]
+            (if-let [id (room-entry-id r)]
+              (let [old-r      (get c-acc id)
+                    old-pid    (when old-r
+                                 (safe-get old-r "first-parent-id" :first-parent-id))
+                    old-space? (when old-r
+                                 (boolean (safe-get old-r "isSpace" :isSpace)))
+                    merged-r   (if (and (map? r)
+                                        old-pid
+                                        (nil? (:first-parent-id r)))
+                                 (assoc r :first-parent-id old-pid)
+                                 r)]
+                (if (= old-r merged-r)
+                  [c-acc i-acc]
+                  (let [new-pid    (safe-get merged-r "first-parent-id" :first-parent-id)
+                        new-space? (boolean (safe-get merged-r "isSpace" :isSpace))
+                        i-acc'     (if (and (some? old-r)
+                                            (= old-pid new-pid)
+                                            (= old-space? new-space?))
+                                     i-acc
+                                     (-> i-acc
+                                         (idx-remove-child old-pid id)
+                                         (idx-put-child new-pid id new-space?)))]
+                    [(assoc c-acc id merged-r) i-acc'])))
+              [c-acc i-acc]))
+          [rem-cache rem-idx]
+          upserts)
+         cache-same? (identical? old-cache next-cache)
+         idx-same?   (identical? old-idx next-idx)]
+     (if (and cache-same? idx-same?)
+       db
+       (cond-> db
+         (not cache-same?) (assoc :rooms-unfiltered-cache next-cache)
+         (not idx-same?)   (assoc :rooms-manual-children-idx next-idx))))))
 #+end_src
-
-
 
 **** Space Tree Flattening
 
-This is just a simple filter method to deduplicate
+This is just a simple filter method to deduplicate.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
 (defn distinct-by [f coll]
-  (let [!seen (atom #{})]
-    (filterv (fn [x]
-               (let [k (f x)]
-                 (if (contains? @!seen k)
-                   false
-                   (do (swap! !seen conj k)
-                       true))))
-             coll)))
+  (loop [xs   (seq coll)
+         seen (transient #{})
+         out  (transient [])]
+    (if xs
+      (let [x (first xs)
+            k (f x)]
+        (if (contains? seen k)
+          (recur (next xs) seen out)
+          (recur (next xs) (conj! seen k) (conj! out x))))
+      (persistent! out))))
 
-(defn safe-get [obj k-str k-kw]
-  (if (map? obj)
-    (get obj k-kw)
-    (let [v (aget obj k-str)]
-      (if (undefined? v)
-        (aget obj (name k-kw))
-        v))))
-
-
+(defn build-manual-children-map [rooms-map]
+  (persistent!
+   (reduce-kv
+    (fn [acc id r]
+      (if-let [pid (safe-get r "first-parent-id" :first-parent-id)]
+        (let [rid  (or id
+                       (safe-get r "id" :id)
+                       (safe-get r "roomId" :roomId))
+              prev (get acc pid [])]
+          (if rid
+            (assoc! acc pid (conj prev {:id        rid
+                                        :is-space? (boolean (safe-get r "isSpace" :isSpace))}))
+            acc))
+        acc))
+    (transient {})
+    rooms-map)))
 #+end_src
-
 
 This provides a method to take the room map and turn it into a usable structure
 to actually visualize our room lists. I'll come back and add more to this when
 I add the call room previewing.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
-
-(defn flatten-tree [rooms-map children-map space-orders closed-drawers previews-map join-mode? parent-id depth]
-  (let [sdk-children    (get children-map parent-id [])
-        manual-children (->> (vals rooms-map)
-                             (filter #(= (safe-get % "first-parent-id" :first-parent-id) parent-id))
-                             (map (fn [r] {:id        (or (safe-get r "id" :id) (safe-get r "roomId" :roomId))
-                                           :is-space? (safe-get r "isSpace" :isSpace)})))
-
-        orders-for-parent (get space-orders parent-id {})
-
-        child-refs      (->> (concat sdk-children manual-children)
-                             (distinct-by :id)
-                             (sort-by #(get orders-for-parent (:id %) "zzzz"))
-                             (vec))]
+(defn- flatten-tree*
+  [!out visited rooms-map children-map manual-children-map
+   space-orders closed-drawers previews-map join-mode? parent-id depth]
+  (let [sdk-children      (get children-map parent-id [])
+        manual-children   (get manual-children-map parent-id [])
+        orders-for-parent (get space-orders parent-id)
+        deduped-refs      (if (empty? manual-children)
+                            (distinct-by :id sdk-children)
+                            (distinct-by :id (concat sdk-children manual-children)))
+        child-refs        (if (seq orders-for-parent)
+                            (vec (sort-by #(get orders-for-parent (:id %) "zzzz") deduped-refs))
+                            deduped-refs)]
     (reduce
      (fn [acc {:keys [id is-space?]}]
-       (let [summary   (get rooms-map id)
-             preview   (get previews-map id)
-             unjoined? (nil? summary)]
-         (if (and unjoined? (not join-mode?))
-           acc
-           (let [item          {:id                         id
+       (if (or (nil? id) (contains? visited id))
+         acc
+         (let [summary   (get rooms-map id)
+               preview   (get previews-map id)
+               unjoined? (nil? summary)]
+           (if (and unjoined? (not join-mode?))
+             acc
+             (let [call-parts  (when summary
+                                 (safe-get summary
+                                           "activeRoomCallParticipants"
+                                           :activeRoomCallParticipants))
+                   r-name      (if summary
+                                 (or (safe-get summary "name" :name) "Loading...")
+                                 (or (:name preview) "Loading..."))
+                   r-avatar    (if summary
+                                 (safe-get summary "avatar" :avatar)
+                                 (or (:avatarUrl preview) (:avatar-url preview)))
+                   unread-cnt  (if summary
+                                 (or (safe-get summary
+                                               "unreadNotificationsCount"
+                                               :unreadNotificationsCount)
+                                     0)
+                                 0)
+                   mention-cnt (if summary
+                                 (or (safe-get summary
+                                               "unreadMentionsCount"
+                                               :unreadMentionsCount)
+                                     0)
+                                 0)
+                   item        {:id                         id
                                 :is-space?                  is-space?
                                 :parent-id                  parent-id
                                 :depth                      depth
                                 :is-unjoined?               unjoined?
-                                :activeRoomCallParticipants (when summary (safe-get summary "activeRoomCallParticipants" :activeRoomCallParticipants))
-                                :name                       (if summary
-                                                              (or (safe-get summary "name" :name) "Loading...")
-                                                              (or (:name preview) "Loading..."))
-                                :avatar                     (if summary
-                                                              (safe-get summary "avatar" :avatar)
-                                                              (or (:avatarUrl preview) (:avatar-url preview)))
-                                :unreadNotificationsCount   (if summary (or (safe-get summary "unreadNotificationsCount" :unreadNotificationsCount) 0) 0)
-                                :unreadMentionsCount        (if summary (or (safe-get summary "unreadMentionsCount" :unreadMentionsCount) 0) 0)}
-                 acc-with-item (conj acc item)]
-
-             (if (and is-space? (not (contains? closed-drawers id)))
-               (into acc-with-item (flatten-tree rooms-map children-map space-orders closed-drawers previews-map join-mode? id (inc depth)))
-               acc-with-item)))))
-     []
+                                :activeRoomCallParticipants call-parts
+                                :name                       r-name
+                                :avatar                     r-avatar
+                                :unreadNotificationsCount   unread-cnt
+                                :unreadMentionsCount        mention-cnt}
+                   acc'        (conj! acc item)]
+               (if (and is-space? (not (contains? closed-drawers id)))
+                 (flatten-tree* acc'
+                                (conj visited id)
+                                rooms-map
+                                children-map
+                                manual-children-map
+                                space-orders
+                                closed-drawers
+                                previews-map
+                                join-mode?
+                                id
+                                (inc depth))
+                 acc'))))))
+     !out
      child-refs)))
 
-
+(defn flatten-tree
+  ([rooms-map children-map space-orders closed-drawers previews-map join-mode? parent-id depth]
+   (flatten-tree rooms-map
+                 children-map
+                 (build-manual-children-map rooms-map)
+                 space-orders
+                 closed-drawers
+                 previews-map
+                 join-mode?
+                 parent-id
+                 depth))
+  ([rooms-map children-map manual-children-map space-orders closed-drawers
+    previews-map join-mode? parent-id depth]
+   (if (nil? parent-id)
+     []
+     (persistent!
+      (flatten-tree* (transient [])
+                     #{parent-id}
+                     rooms-map
+                     children-map
+                     manual-children-map
+                     space-orders
+                     closed-drawers
+                     previews-map
+                     join-mode?
+                     parent-id
+                     depth)))))
 #+end_src
-
 
 **** Room Global Reframe Components
 
-There are our reframe pieces. I'll go into detail on each of them later on. For now this
-is effectively a functioning *stub*.
+There are our reframe pieces. I'll go into detail on each of them later on. For
+now this is effectively a functioning *stub*.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
 (re-frame/reg-sub :rooms/active-id (fn [db _] (:active-room-id db)))
 (re-frame/reg-sub :space-rooms (fn [db _] (vec (or (:space-rooms db) []))))
-(re-frame/reg-sub :rooms/all (fn [db _] (let [rooms (:rooms db)] (if (map? rooms) (vec (vals rooms)) (vec (or rooms []))))))
 
+(re-frame/reg-sub
+ :rooms/all
+ (fn [db _]
+   (let [rooms (:rooms db)]
+     (if (map? rooms)
+       (vec (vals rooms))
+       (vec (or rooms []))))))
 
 (re-frame/reg-sub
  :rooms/active-metadata
@@ -145,7 +314,6 @@ is effectively a functioning *stub*.
  :<- [:rooms/unfiltered-indexed-map]
  (fn [[active-id rooms-map] _]
    (when active-id (get rooms-map active-id))))
-
 
 (re-frame/reg-event-fx
  :room-list/paginate-global
@@ -533,6 +701,10 @@ and file structures.
 (defn- is-call-room? [db room-id]
   (get-in db [:room-previews room-id :is-call?] false))
 
+(defn- is-forum-room? [db room-id]
+  (or (boolean (get-in db [:room-previews room-id :is-forum?]))
+      (contains? (get db :forum-room-overrides #{}) room-id)))
+
 (re-frame/reg-event-fx
  :rooms/hydrate-room
      (fn [{:keys [db]} [_ room-id]]
@@ -586,9 +758,11 @@ and file structures.
          already-loaded?    (get-in db [:room-members room-id :data])
          loading?           (get-in db [:room-members room-id :loading?])
          is-call-room?      (is-call-room? db room-id)
+         is-forum-room?     (is-forum-room? db room-id)
 
          force-lobby?       (:force-lobby? opts)
          focus-override     (:focus-override opts)
+         jump-event-id      (:jump-event-id opts)
          mobile?            (get-in db [:ui :mobile?])
          join-directly?     (if force-lobby? false (not mobile?))
          wipe-call-state?   (not is-call-room?)
@@ -596,23 +770,35 @@ and file structures.
                                  (not= active-call-id room-id)
                                  is-call-room?
                                  (not force-lobby?))
-         current-side-panel (get-in db [:ui :side-panel])
-         side-panel-update  (if (and (= current-side-panel :timeline) (not focus-override)) nil current-side-panel)
-         new-focus          (if is-call-room? :call :timeline)
-         base-db            (-> db
-                                (assoc :active-room-id room-id)
-                                (assoc-in [:ui :sidebar-open?] false)
-                                (assoc-in [:ui :main-focus] new-focus)
-                                (assoc-in [:call :chat-open?] false))
+         current-side-panel (:side-panel db)
+         new-focus          (cond
+                              is-call-room?  :call
+                              (and is-forum-room? (not jump-event-id)) :thread
+                              :else          :timeline)
+         side-panel-update  (cond
+                              (and (= current-side-panel :timeline) (not focus-override)) nil
+                              (and (= current-side-panel :threads) (= new-focus :thread)) nil
+                              :else current-side-panel)
+         base-db            (cond-> (-> db
+                                        (assoc :active-room-id room-id)
+                                        (assoc-in [:ui :sidebar-open?] false)
+                                        (assoc-in [:ui :main-focus] new-focus)
+                                        (assoc-in [:call :chat-open?] false))
+                              jump-event-id
+                              (assoc-in [:timeline/jump-target-id room-id] jump-event-id))
          dispatches         (remove nil?
                                     [(when swapping-calls? [:call/hangup {:wipe-state? wipe-call-state? :room-id active-call-id}])
                                      [:composer/load-draft room-id]
-                                     [:sdk/boot-timeline room-id]
+                                     (cond
+                                       jump-event-id          [:room/boot-focused-timeline room-id jump-event-id]
+                                       (= new-focus :thread)  [:threads/fetch-list room-id false]
+                                       :else                  [:sdk/boot-timeline room-id])
                                      (when (not (or already-loaded? loading?)) [:room/fetch-members room-id])
                                      [:sdk/fetch-room-emotes :room room-id]
                                      [:container/set-main-focus new-focus]
                                      (when focus-override [:container/set-side-panel focus-override])
-                                     (when (and (= current-side-panel :timeline) (nil? side-panel-update)) [:container/set-side-panel nil])
+                                     (when (and (some? current-side-panel) (nil? side-panel-update))
+                                       [:container/set-side-panel nil])
                                      ;;(when is-call-room? [:call/init-widget room-id {:join-directly? join-directly?}])
                                      ])]
      {:db                 base-db

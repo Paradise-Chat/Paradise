@@ -255,15 +255,19 @@ read receipts. This prevents any sort of spamming to the home server.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
 (defn ^:ui message-hover-toolbar [item active-room current-user-id]
-  (let [tr @(re-frame/subscribe [:i18n/tr])
-        react-str (tr [:container.timeline.item/react])
-        reply-str (tr [:container.timeline.item/reply])
-        edit-str  (tr [:container.timeline.item/edit-message])
-        more-str  (tr [:container.timeline.item/more])]
+  (let [tr         @(re-frame/subscribe [:i18n/tr])
+        react-str  (tr [:container.timeline.item/react])
+        reply-str  (tr [:container.timeline.item/reply])
+        thread-str (tr [:container.timeline.item/start-thread])
+        edit-str   (tr [:container.timeline.item/edit-message])
+        more-str   (tr [:container.timeline.item/more])]
     (fn [item active-room current-user-id tr]
-      (let [msg-id (:id item)
-            e-t-id (:event-or-transaction-id item)
-            ]
+      (let [msg-id      (:id item)
+            e-t-id      (or (:event-or-transaction-id item) msg-id)
+            action-room (or (:action-room-id item) active-room)
+            input-scope (or (:input-scope-id item) active-room)
+            in-thread?  (boolean (:in-thread-view? item))
+            th-summary  (:thread-summary item)]
         [:div.message-hover-toolbar
          [:div.toolbar-btn
           {:title    react-str
@@ -272,7 +276,7 @@ read receipts. This prevents any sort of spamming to the home server.
                        (.stopPropagation e)
                        (re-frame/dispatch
                         [:ui/open-popover :reaction-picker
-                         {:room-id active-room
+                         {:room-id action-room
                           :msg-id  e-t-id
                           :x       (.-clientX e)
                           :y       (.-clientY e)
@@ -280,24 +284,34 @@ read receipts. This prevents any sort of spamming to the home server.
                           :height  380}]))}
           [icons/smiley]]
          [:div.toolbar-btn
-          {:title reply-str
+          {:title    reply-str
            :on-click #(re-frame/dispatch
-                       [:input/set-context active-room :reply item])}
+                       [:input/set-context input-scope :reply item])}
           [icons/reply]]
-         (when (:is-own? item)
+         (when-not in-thread?
            [:div.toolbar-btn
-            {:title edit-str
+            {:title    thread-str
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (re-frame/dispatch
+                          [:msg/thread active-room msg-id th-summary item]))}
+            [icons/thread]])
+         (when (and (:is-own? item)
+                    (= (get-in item [:content :tag]) "Message")
+                    (contains? #{"Text" "Notice" "Emote"}
+                               (get-in item [:content :inner :tag])))
+           [:div.toolbar-btn
+            {:title    edit-str
              :on-click #(re-frame/dispatch
-                         [:input/set-context active-room :edit
-                          item])}
+                         [:input/set-context action-room :edit item])}
             [icons/edit]])
          [:div.toolbar-btn
-          {:title more-str
+          {:title    more-str
            :on-click (fn [e]
                        (.stopPropagation e)
                        (let [mx (.-clientX e)
                              my (.-clientY e)]
-
                          (event-menu mx my item active-room current-user-id)))}
           [icons/more]]]))))
 
@@ -327,10 +341,27 @@ read receipts. This prevents any sort of spamming to the home server.
       res)))
 
 
-(defn ^:ui message-text [{:keys [body html]}]
-   (if (seq html)
-    (into [:span.body.formatted] (memoized-sanitize html))
-     [:span.body (linkify-text body)]))
+(defn- hydrate-sanitized-nodes [nodes]
+  (mapv (fn [node]
+          (if (vector? node)
+            (let [tag      (first node)
+                  has-map? (map? (second node))
+                  attrs    (when has-map? (second node))
+                  children (if has-map? (subvec node 2) (subvec node 1))
+                  next-tag (if (= tag "comp:paradise.media.component/media-native")
+                             media-native
+                             tag)
+                  kids     (hydrate-sanitized-nodes children)]
+              (if has-map?
+                (into [next-tag attrs] kids)
+                (into [next-tag] kids)))
+            node))
+        nodes))
+
+(defn ^:ui message-text [{:keys [body caption html]}]
+  (if (seq html)
+    (into [:span.body.formatted] (hydrate-sanitized-nodes (memoized-sanitize html)))
+    (into [:span.body] (linkify-text (or body caption "")))))
 
 #+end_src
 
@@ -422,7 +453,8 @@ read receipts. This prevents any sort of spamming to the home server.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
 (defn ^:ui file-message [event content tr]
-  (let [{:keys [caption source source-map info]} content]
+  (let [{:keys [caption filename source source-map info]} content
+        label (or filename caption (tr [:container.timeline.status/file-download]))]
     [:div.file-attachment-container
      [:div.file-attachment
       [:a {:href      "#"
@@ -432,17 +464,349 @@ read receipts. This prevents any sort of spamming to the home server.
                         (re-frame/dispatch
                          [:media/download {:uri        source
                                            :source-map source-map
-                                           :filename   caption
+                                           :filename   label
                                            :mime-type  (:mimetype info)
-                                           :room-id    (:room_id event)
+                                           :room-id    (or (:room-id event) (:room_id event))
                                            :event-id   (:id event)}]))}
        [:span.file-icon [icons/file]]
-       [:span.file-name (or caption (tr [:container.timeline.status/file-download]))]
+       [:span.file-name label]
        (when-let [size (:size info)]
          [:span.file-size (str "(" (quot size 1024) " KB)")])]]
-     (when (seq (:caption content))
+     (when (and (seq caption) (not= caption filename))
        [:div.media-caption
         [message-text content]])]))
+
+(defn- format-audio-clock [seconds]
+  (let [s   (max 0 (js/Math.floor (or seconds 0)))
+        m   (quot s 60)
+        rem (mod s 60)]
+    (str m ":" (when (< rem 10) "0") rem)))
+
+(defn- normalize-waveform-bars [raw-wf seed-str bar-count]
+  (let [nums (when (sequential? raw-wf)
+               (vec (keep #(when (and (number? %) (not (js/isNaN %)))
+                             (max 0.0 (min 1.0 (double %))))
+                          raw-wf)))]
+    (if (seq nums)
+      (let [src-len (count nums)
+            peak    (max 0.01 (apply max nums))]
+        (mapv (fn [idx]
+                (let [pos (/ (* idx (max 0 (dec src-len))) (max 1 (dec bar-count)))
+                      lo  (int (js/Math.floor pos))
+                      hi  (min (dec src-len) (inc lo))
+                      t   (- pos lo)
+                      v   (+ (* (- 1.0 t) (nth nums lo))
+                             (* t (nth nums hi)))]
+                  (max 0.14 (min 1.0 (/ v peak)))))
+              (range bar-count)))
+      (let [base-h (abs (hash (or seed-str "audio")))]
+        (mapv (fn [idx]
+                (let [mix (bit-xor (* (inc idx) 2654435761) base-h)
+                      n   (/ (double (mod (abs mix) 1000)) 1000.0)]
+                  (+ 0.2 (* 0.68 n))))
+              (range bar-count))))))
+
+(defn ^:react audio-player-card [{:keys [event content active-room]}]
+  (r/with-let [!audio-el (r/atom nil)
+               !playing? (r/atom false)
+               !cur-sec  (r/atom 0.0)
+               !dur-sec  (r/atom 0.0)
+               !rate     (r/atom 1.0)]
+    (let [tr         @(re-frame/subscribe [:i18n/tr])
+          el         @!audio-el
+          playing?   @!playing?
+          cur-sec    @!cur-sec
+          meta-dur   (/ (double (or (get-in content [:info :duration]) 0)) 1000.0)
+          dur-sec    (if (pos? @!dur-sec) @!dur-sec meta-dur)
+          rate       @!rate
+          {:keys [source source-map filename caption info is-voice? waveform]} content
+          clean-mime (or (some-> (:mimetype info) str (str/split #";") first str/trim not-empty)
+                         "audio/ogg")
+          room-id    (or (:room-id event) (:room_id event) active-room)
+          event-id   (:id event)
+          bars       (normalize-waveform-bars waveform (or event-id filename) 42)
+          bar-cnt    (count bars)
+          progress   (if (pos? dur-sec) (max 0.0 (min 1.0 (/ cur-sec dur-sec))) 0.0)
+          title-lbl  (if is-voice?
+                       (tr [:container.timeline.status.audio/voice-message])
+                       (or (not-empty filename)
+                           (not-empty caption)
+                           (tr [:container.timeline.status.audio/audio-file])))
+          toggle!    (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (when-let [node @!audio-el]
+                         (if (.-paused node)
+                           (do
+                             (doseq [other (array-seq (.querySelectorAll js/document "audio"))]
+                               (when (and other (not= other node) (not (.-paused other)))
+                                 (.pause other)))
+                             (-> (.play node)
+                                 (.catch #(js/console.warn "Audio playback failed:" %))))
+                           (.pause node))))
+          seek!      (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (when (and el (pos? dur-sec))
+                         (let [rect  (.getBoundingClientRect (.-currentTarget e))
+                               ratio (max 0.0 (min 1.0 (/ (- (.-clientX e) (.-left rect))
+                                                          (max 1.0 (.-width rect)))))
+                               tgt   (* ratio dur-sec)]
+                           (try
+                             (set! (.-currentTime el) tgt)
+                             (reset! !cur-sec tgt)
+                             (catch :default _ nil)))))
+          cycle-rt!  (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (let [nxt (cond (< rate 1.2) 1.5 (< rate 1.8) 2.0 :else 1.0)]
+                         (reset! !rate nxt)
+                         (when el (set! (.-playbackRate el) nxt))))]
+      [:div.audio-message-card
+       [media {:tag-type           "audio"
+               :uri                source
+               :source-map         source-map
+               :mime-type          clean-mime
+               :room-id            room-id
+               :event-id           event-id
+               :style              {:display "none"}
+               :on-node            #(reset! !audio-el %)
+               :on-loaded-metadata (fn [e]
+                                     (let [d (.-duration (.-currentTarget e))]
+                                       (when (and (number? d) (js/isFinite d) (pos? d))
+                                         (reset! !dur-sec d))))
+               :on-time-update     (fn [e]
+                                     (let [target (.-currentTarget e)
+                                           t      (or (.-currentTime target) 0.0)
+                                           d      (.-duration target)]
+                                       (reset! !cur-sec t)
+                                       (when (and (number? d) (js/isFinite d) (pos? d))
+                                         (reset! !dur-sec d))))
+               :on-play            #(reset! !playing? true)
+               :on-pause           #(reset! !playing? false)
+               :on-ended           (fn [_]
+                                     (when (and (pos? @!cur-sec) (zero? @!dur-sec))
+                                       (reset! !dur-sec @!cur-sec))
+                                     (reset! !playing? false)
+                                     (reset! !cur-sec 0.0))}]
+       [:button.audio-play-btn
+        {:type     "button"
+         :title    (tr (if playing?
+                         [:container.timeline.status.audio/pause]
+                         [:container.timeline.status.audio/play]))
+         :on-click toggle!}
+        (if playing?
+          [icons/pause {:width "16px" :height "16px"}]
+          [icons/play {:width "16px" :height "16px"}])]
+
+       [:div.audio-main-col
+        [:div.audio-top-meta
+         [:span.audio-title-label
+          (if is-voice?
+            [icons/mic {:width "12px" :height "12px"}]
+            [icons/music-note {:width "12px" :height "12px"}])
+          [:span (truncate-name title-lbl 36)]]
+         [:span.audio-time-label
+          (str (format-audio-clock (if (or playing? (pos? cur-sec)) cur-sec dur-sec))
+               (when (and (pos? dur-sec) (or playing? (pos? cur-sec)))
+                 (str " / " (format-audio-clock dur-sec))))]]
+
+        (into
+         [:div.audio-waveform-track {:on-click seek!}]
+         (map-indexed
+          (fn [idx amp]
+            (let [bar-pct (/ (double idx) (max 1 bar-cnt))
+                  played? (and (or playing? (pos? cur-sec)) (<= bar-pct progress))]
+              ^{:key idx}
+              [:span.audio-waveform-bar
+               {:class (when played? "is-played")
+                :style {:height (str (max 16 (int (js/Math.round (* amp 100)))) "%")}}]))
+          bars))]
+
+       [:div.audio-actions-col
+        [:button.audio-speed-btn
+         {:type     "button"
+          :on-click cycle-rt!}
+         (str rate "x")]
+        (when-not is-voice?
+          [:button.audio-download-btn
+           {:type     "button"
+            :title    (tr [:container.timeline.status/file-download])
+            :on-click (fn [e]
+                        (.preventDefault e)
+                        (.stopPropagation e)
+                        (re-frame/dispatch
+                         [:media/download {:uri        source
+                                           :source-map source-map
+                                           :filename   (or filename caption "audio")
+                                           :mime-type  (:mimetype info)
+                                           :room-id    room-id
+                                           :event-id   event-id}]))}
+           [icons/download {:width "14px" :height "14px"}]])]])))
+
+(defn ^:ui audio-message [event content active-room]
+  (let [{:keys [caption filename is-voice?]} content]
+    [:div.audio-attachment-container
+     [audio-player-card {:event       event
+                         :content     content
+                         :active-room active-room}]
+     (when (and (seq caption) (not is-voice?) (not= caption filename))
+       [:div.media-caption
+        [message-text content]])]))
+
+(defn ^:ui location-message [content tr]
+  (let [geo-uri (or (:geo-uri content) (:uri content) "")
+        body    (or (not-empty (:description content))
+                    (not-empty (:body content))
+                    (not-empty geo-uri)
+                    (tr [:container.timeline.status/open-location]))
+        coords  (when-let [[_ lat lon] (re-find #"geo:([+-]?[0-9.]+),([+-]?[0-9.]+)" (str geo-uri))]
+                  {:lat lat :lon lon})
+        map-url (if coords
+                  (str "https://www.openstreetmap.org/?mlat=" (:lat coords)
+                       "&mlon=" (:lon coords) "#map=15/" (:lat coords) "/" (:lon coords))
+                  nil)]
+    (if map-url
+      [:a.location-message-card
+       {:href map-url :target "_blank" :rel "noopener noreferrer"}
+       [icons/map-pin {:width "18px" :height "18px"}]
+       [:span.location-message-label body]]
+      [:div.location-message-card
+       [icons/map-pin {:width "18px" :height "18px"}]
+       [:span.location-message-label body]])))
+
+(re-frame/reg-event-fx
+ :sdk/vote-poll
+ (fn [_ [_ room-id poll-id answer-ids]]
+   (when (and room-id poll-id @state/!engine-pool)
+     (main/do-with-pool! @state/!engine-pool
+                         {:handler   :vote-poll
+                          :arguments {:room-id    room-id
+                                      :poll-id    poll-id
+                                      :answer-ids (vec answer-ids)}}))
+   {}))
+
+(re-frame/reg-event-fx
+ :sdk/end-poll
+ (fn [_ [_ room-id poll-id]]
+   (when (and room-id poll-id @state/!engine-pool)
+     (main/do-with-pool! @state/!engine-pool
+                         {:handler   :end-poll
+                          :arguments {:room-id room-id
+                                      :poll-id poll-id}}))
+   {}))
+
+(defn ^:ui poll-message [item poll-inner active-room]
+  (let [tr           @(re-frame/subscribe [:i18n/tr])
+        my-profile   @(re-frame/subscribe [:sdk/profile])
+        my-id        (some-> (:user-id my-profile) str)
+        poll-id      (:id item)
+        question     (:question poll-inner "")
+        answers      (vec (:answers poll-inner []))
+        max-sel      (max 1 (int (or (:max-selections poll-inner) 1)))
+        multi?       (> max-sel 1)
+        undisclosed? (= (keyword (or (:kind poll-inner) :disclosed)) :undisclosed)
+        end-ts       (:end-ts poll-inner)
+        ended?       (or (boolean (:ended? poll-inner))
+                         (boolean (and (number? end-ts) (pos? end-ts) (<= end-ts (js/Date.now)))))
+        show-res?    (or (not undisclosed?) ended?)
+        votes-map    (:votes poll-inner {})
+        counts-map   (:vote-counts poll-inner {})
+        derived-mine (keep (fn [[oid uids]]
+                             (when (and my-id (contains? (set (map str uids)) my-id))
+                               (str oid)))
+                           votes-map)
+        my-votes-set (into (set (map str (:my-votes poll-inner []))) derived-mine)
+        opt-count    (fn [oid]
+                       (int (or (get counts-map oid)
+                                (get counts-map (keyword oid))
+                                (when-let [vs (or (get votes-map oid)
+                                                  (get votes-map (keyword oid)))]
+                                  (count vs))
+                                0)))
+        total-votes  (int (or (:total-votes poll-inner)
+                              (reduce + 0 (map #(opt-count (str (:id %))) answers))))
+        subtitle     (cond
+                       ended?
+                       (tr [:container.timeline.status.poll/ended])
+
+                       undisclosed?
+                       (tr [:container.timeline.status.poll/undisclosed-hint])
+
+                       multi?
+                       (if (>= max-sel (count answers))
+                         (tr [:container.timeline.status.poll/multi-any])
+                         (tr [:container.timeline.status.poll/multi-choice] [max-sel]))
+
+                       :else
+                       (tr [:container.timeline.status.poll/single-choice]))
+        vote-label   (if (= total-votes 1)
+                       (tr [:container.timeline.status.poll/one-vote])
+                       (tr [:container.timeline.status.poll/many-votes] [total-votes]))]
+    [:div.poll-card
+     {:class (when ended? "is-ended")}
+     [:div.poll-card-header
+      [:div.poll-question-row
+       [:span.poll-icon-badge [icons/poll {:width "16px" :height "16px"}]]
+       [:span.poll-question-text question]]
+      [:div.poll-subtitle subtitle]]
+
+     (into
+      [:div.poll-options-list]
+      (mapv
+       (fn [{:keys [id text]}]
+         (let [oid       (str id)
+               selected? (contains? my-votes-set oid)
+               cnt       (opt-count oid)
+               pct       (if (and show-res? (pos? total-votes))
+                           (int (js/Math.round (* 100.0 (/ (double cnt) (double total-votes)))))
+                           0)]
+           ^{:key oid}
+           [:button.poll-option-row
+            {:type     "button"
+             :disabled ended?
+             :class    (str (when selected? "is-selected ")
+                            (when ended? "is-ended"))
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (when-not ended?
+                           (let [next-set (if multi?
+                                            (if selected?
+                                              (disj my-votes-set oid)
+                                              (if (< (count my-votes-set) max-sel)
+                                                (conj my-votes-set oid)
+                                                my-votes-set))
+                                            (if selected?
+                                              #{}
+                                              #{oid}))]
+                             (re-frame/dispatch
+                              [:sdk/vote-poll active-room poll-id (vec next-set)]))))}
+            (when show-res?
+              [:span.poll-option-fill
+               {:style {:width (str pct "%")}}])
+            [:span.poll-option-check
+             {:class (str (if multi? "is-checkbox " "is-radio ")
+                          (when selected? "is-checked"))}
+             (when selected?
+               [icons/check {:width "11px" :height "11px"}])]
+            [:span.poll-option-label text]
+            (when show-res?
+              [:span.poll-option-stats
+               [:span.poll-option-pct (str pct "%")]
+               [:span.poll-option-cnt (str "(" cnt ")")]])]))
+       answers))
+
+     [:div.poll-card-footer
+      [:span.poll-total-votes vote-label]
+      (when (and (not ended?) (:is-own? item))
+        [:button.poll-end-btn
+         {:type     "button"
+          :on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch [:sdk/end-poll active-room poll-id]))}
+         (tr [:container.timeline.status.poll/end-poll])])]]))
 #+end_src
 
 
@@ -665,6 +1029,365 @@ working on deferred rendered components.
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* Audio & Voice Message Player */
+.audio-attachment-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 410px;
+  margin-top: 2px;
+}
+
+.audio-message-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 62px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--surface-2, #2b2d31);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.09));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
+}
+
+.audio-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  background: var(--brand-primary, #5865f2);
+  color: #ffffff;
+  cursor: pointer;
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(88, 101, 242, 0.35);
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.audio-play-btn:hover {
+  filter: brightness(1.1);
+}
+
+.audio-play-btn:active {
+  transform: scale(0.96);
+}
+
+.audio-main-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-top-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.74rem;
+}
+
+.audio-title-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: var(--text-secondary, #b5bac1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-time-label {
+  color: var(--text-muted, #949ba4);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.audio-waveform-track {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.audio-waveform-bar {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background-color 0.12s ease;
+}
+
+.audio-waveform-bar.is-played {
+  background: var(--brand-primary, #5865f2);
+}
+
+.audio-waveform-track:hover .audio-waveform-bar:not(.is-played) {
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.audio-actions-col {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.audio-speed-btn {
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  background: var(--bg-tertiary, #1e1f22);
+  color: var(--text-secondary, #b5bac1);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.audio-speed-btn:hover {
+  background: var(--surface-3, #35373c);
+  color: var(--text-primary, #f2f3f5);
+}
+
+.audio-download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #949ba4);
+  cursor: pointer;
+}
+
+.audio-download-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #f2f3f5);
+}
+
+/* Interactive Poll Card */
+.poll-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 460px;
+  margin-top: 3px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--surface-2, #2b2d31);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.09));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+}
+
+.poll-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.poll-question-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.poll-icon-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--brand-primary, #5865f2);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.poll-question-text {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-primary, #f2f3f5);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.poll-subtitle {
+  font-size: 0.76rem;
+  color: var(--text-muted, #949ba4);
+}
+
+.poll-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.poll-option-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.09));
+  background: var(--bg-tertiary, #1e1f22);
+  color: var(--text-primary, #f2f3f5);
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.poll-option-row:hover:not(:disabled) {
+  border-color: rgba(88, 101, 242, 0.55);
+}
+
+.poll-option-row.is-selected {
+  border-color: var(--brand-primary, #5865f2);
+}
+
+.poll-option-row:disabled {
+  cursor: default;
+}
+
+.poll-option-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: rgba(88, 101, 242, 0.18);
+  pointer-events: none;
+  transition: width 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.poll-option-row.is-selected .poll-option-fill {
+  background: rgba(88, 101, 242, 0.28);
+}
+
+.poll-option-check {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+  flex-shrink: 0;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.poll-option-check.is-radio {
+  border-radius: 50%;
+}
+
+.poll-option-check.is-checkbox {
+  border-radius: 5px;
+}
+
+.poll-option-check.is-checked {
+  background: var(--brand-primary, #5865f2);
+  border-color: var(--brand-primary, #5865f2);
+}
+
+.poll-option-label {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  font-weight: 550;
+  word-break: break-word;
+}
+
+.poll-option-stats {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.poll-option-pct {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-primary, #f2f3f5);
+}
+
+.poll-option-cnt {
+  font-size: 0.74rem;
+  color: var(--text-muted, #949ba4);
+}
+
+.poll-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+  font-size: 0.76rem;
+  color: var(--text-muted, #949ba4);
+}
+
+.poll-total-votes {
+  font-weight: 600;
+}
+
+.poll-end-btn {
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  background: var(--bg-tertiary, #1e1f22);
+  color: var(--text-secondary, #b5bac1);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.poll-end-btn:hover {
+  background: var(--surface-3, #35373c);
+  color: var(--text-primary, #f2f3f5);
+}
+
+/* Emote & Location Messages */
+.timeline-emote-line {
+  font-style: italic;
+  color: var(--text-secondary, #b5bac1);
+}
+
+.emote-prefix {
+  font-weight: 600;
+}
+
+.location-message-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: var(--surface-2, #2b2d31);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  color: var(--brand-primary, #8ea1ff);
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.location-message-card:hover {
+  background: var(--surface-3, #35373c);
 }
 
 #+end_src
@@ -892,41 +1615,93 @@ library itself some context of deferred components...
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
-(defn render-message-content [tr msg-type-tag content-map in-reply-to event]
-  (let [is-edited? (:is-edited? content-map)
-        raw-body   (:body content-map)
-        room-id    (:room-id event)]
-    [:div.message-render-container
-     [reply-container tr in-reply-to room-id]
-     (case msg-type-tag
-       "Text"    [message-text content-map]
-       "Notice"  [message-text content-map]
-       "Image"   [image-message event content-map]
-       "Video"   [video-message event content-map]
-       "Sticker" [sticker-message event content-map]
-       "Gallery" [gallery-message event content-map]
-       "File"    [file-message event content-map tr]
-       [:span.body (tr [:container.timeline.status/unsupported] [msg-type-tag])])
-     (when is-edited?
-       [:span.timeline-edited-label (tr [:container.timeline.status/edited])])
-     [message-link-preview msg-type-tag raw-body]]))
+(defn render-message-content
+  ([tr msg-type-tag content-map in-reply-to event]
+   (render-message-content tr msg-type-tag content-map in-reply-to event (:room-id event)))
+  ([tr msg-type-tag content-map in-reply-to event active-room]
+   (let [is-edited? (:is-edited? content-map)
+         raw-body   (:body content-map)
+         room-id    (or (:room-id event) active-room)]
+     [:div.message-render-container
+      [reply-container tr in-reply-to room-id]
+      (case msg-type-tag
+        "Text"     [message-text content-map]
+        "Notice"   [message-text content-map]
+        "Emote"    [:div.timeline-emote-line
+                    [:span.emote-prefix (str "* " (:sender-name event) " ")]
+                    [message-text content-map]]
+        "Image"    [image-message event content-map]
+        "Video"    [video-message event content-map]
+        "Audio"    [audio-message event content-map room-id]
+        "Location" [location-message content-map tr]
+        "Sticker"  [sticker-message event content-map]
+        "Gallery"  [gallery-message event content-map]
+        "File"     [file-message event content-map tr]
+        [:span.body (tr [:container.timeline.status/unsupported] [msg-type-tag])])
+      (when is-edited?
+        [:span.timeline-edited-label (tr [:container.timeline.status/edited])])
+      [message-link-preview msg-type-tag raw-body room-id]])))
 
 (defn ^:ui timeline-body [item content active-room is-editing-this?]
   (let [{:keys [tag inner in-reply-to]} content
-        tr               @(re-frame/subscribe [:i18n/tr])]
-
+        tr @(re-frame/subscribe [:i18n/tr])]
     [:div.timeline-body
      (cond
        is-editing-this?
        [inline-editor item active-room]
-       (= tag "Sticker") [render-message-content tr "Sticker" inner in-reply-to item]
-       (= tag "Redacted") [:span.redacted (tr [:container.timeline.status/redacted])]
-       (= tag "UnableToDecrypt") [:span.decryption-error (tr [:container.timeline.status/decryption-error])]
+
+       (= tag "Poll")
+       [:div.message-render-container
+        [reply-container tr in-reply-to (or (:room-id item) active-room)]
+        [poll-message item inner active-room]]
+
+       (= tag "Sticker")
+       [render-message-content tr "Sticker" inner in-reply-to item active-room]
+
+       (= tag "Redacted")
+       [:span.redacted (tr [:container.timeline.status/redacted])]
+
+       (= tag "UnableToDecrypt")
+       [:span.decryption-error (tr [:container.timeline.status/decryption-error])]
+
        (or (= tag "Message") (= tag "Notice") (= tag "Emote"))
        (let [{m-tag :tag m-content :content} (if (= tag "Message") inner content)]
-         [render-message-content tr (or m-tag "Text") m-content in-reply-to item])
-       :else [:span.unknown (tr [:container.timeline.status/unknown-kind] [tag]) (str "Unknown message kind: " tag)])]))
+         [render-message-content tr (or m-tag tag "Text") m-content in-reply-to item active-room])
 
+       :else
+       [:span.unknown (tr [:container.timeline.status/unknown-kind] [tag])])]))
+
+
+(defn ^:ui thread-summary-pill [active-room item]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        summary     (:thread-summary item)
+        reply-count (or (:reply-count summary) 0)]
+    (when (and (map? summary)
+               (not (:in-thread-view? item))
+               (or (pos? reply-count)
+                   (not-empty (:title summary))
+                   (not-empty (str (:thread-id summary "")))))
+      (let [count-label (cond
+                          (= reply-count 1) (tr [:container.threads/one-reply])
+                          (pos? reply-count) (tr [:container.threads/many-replies] [reply-count])
+                          :else (or (not-empty (:title summary))
+                                    (tr [:container.threads/view-thread])))
+            snippet     (or (when-let [lb (not-empty (:latest-body summary))]
+                              (if-let [ls (not-empty (:latest-sender summary))]
+                                (str (truncate-name ls 14) ": " lb)
+                                lb))
+                            (when (pos? reply-count)
+                              (not-empty (:title summary))))]
+        [:div.timeline-thread-summary-pill
+         {:on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch
+                       [:msg/thread active-room (:id item) summary item]))}
+         [icons/thread {:width "14px" :height "14px"}]
+         [:span.timeline-thread-summary-count count-label]
+         (when snippet
+           [:span.timeline-thread-summary-snippet snippet])]))))
 
 (defn ^:ui event-tile-render [item]
   (let [active-room  @(re-frame/subscribe [:rooms/active-id])
@@ -935,7 +1710,9 @@ library itself some context of deferred components...
         my-id        (:user-id my-profile)]
     (fn [item]
       (let [{:keys [id sender-id sender-name sender-avatar content-tag content type reactions ts is-own? merge-with-prev?]} item
-            is-editing-this? @(re-frame/subscribe [:input/is-editing-event? active-room id])
+            action-room      (or (:action-room-id item) active-room)
+            input-scope      (or (:input-scope-id item) active-room)
+            is-editing-this? @(re-frame/subscribe [:input/is-editing-event? action-room id])
             custom-tags      @(re-frame/subscribe [:room/power-level-tags active-room])
             members-map      @(re-frame/subscribe [:room/members-map active-room])
             member-data      (get members-map sender-id)
@@ -950,7 +1727,11 @@ library itself some context of deferred components...
              {:can-edit? is-own?
               :enabled? is-mobile?
               :on-action (fn [action]
-                           (re-frame/dispatch [:input/set-context active-room action item]))
+                           (re-frame/dispatch
+                            [:input/set-context
+                             (if (= action :edit) action-room input-scope)
+                             action
+                             item]))
               :wrapper-props (merge (long-press-props
                                      #(event-menu %1 %2 item active-room my-id))
                                     {:class (str "timeline-message is-message"
@@ -961,13 +1742,14 @@ library itself some context of deferred components...
               [message-hover-toolbar item active-room my-id]
               (when-not merge-with-prev?
                 [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
-              [timeline-body item content active-room is-editing-this?]
+              [timeline-body item content action-room is-editing-this?]
               (when (seq reactions)
                 [reaction-row {:reactions reactions
                                :my-id my-id
                                :members-map members-map
-                               :active-room active-room
-                               :event-id (:event-or-transaction-id item)}])]]
+                               :active-room action-room
+                               :event-id (or (:event-or-transaction-id item) id)}])
+              [thread-summary-pill active-room item]]]
             [:<>
              [sub-virtual-items content-tag item sender-name]]))))))
 
