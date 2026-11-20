@@ -1,0 +1,678 @@
+
+** Inline Voice Recorder
+
+**** Preface
+
+Provides an inline ~WebAudio~ + ~MediaRecorder~ Voice Message recorder
+(~voice-recorder-bar~) shared between the different composers in the
+app.
+
+The difficulty is ensuring we provide enough format support for
+major protocols. This is one of those few instances where we can
+reasonably just provide handling for different formats in the core.
+
+
+**** Imports
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
+(ns paradise.ui.input.voice
+  (:require
+   [cljs-workers.core :as main]
+   [cljs.core.async :refer [<! go]]
+   [clojure.string :as str]
+   [paradise.shared.client.state :as state]
+   [paradise.shared.utils.helpers :refer [uint8->base64]]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.container.call.audio-processor :as audio-processor]
+   [paradise.ui.container.call.runtime :as call-rtc]
+   [paradise.ui.overlays.base :refer [modal-component]]
+   [promesa.core :as p]
+   [re-frame.core :as re-frame]
+   [re-frame.db :as rf-db]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
+#+end_src
+
+
+**** Re-frame Event
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
+(re-frame/reg-event-fx
+ :sdk/send-voice-message
+ (fn [_ [_ {:keys [room-id thread-id root-event-id is-new? title
+                   buffer buffer-b64 mime filename size duration-ms waveform]}]]
+   (let [b64 (cond
+               (and (string? buffer-b64) (not (str/blank? buffer-b64)))
+               buffer-b64
+
+               buffer
+               (let [u8 (if (instance? js/Uint8Array buffer) buffer (js/Uint8Array. buffer))]
+                 (when (pos? (.-byteLength u8))
+                   (uint8->base64 u8)))
+
+               :else nil)]
+     (when (and room-id (not (str/blank? b64)) @state/!engine-pool)
+       (let [pool @state/!engine-pool]
+         (go
+           (try
+             (let [res (<! (main/do-with-pool!
+                            pool
+                            {:handler   :send-voice-message
+                             :arguments {:room-id       room-id
+                                         :thread-id     thread-id
+                                         :root-event-id root-event-id
+                                         :is-new?       (boolean is-new?)
+                                         :title         title
+                                         :buffer-b64    b64
+                                         :mime          mime
+                                         :filename      filename
+                                         :size          size
+                                         :duration-ms   duration-ms
+                                         :waveform      (vec waveform)}}))]
+               (when-not (contains? #{"success" :success} (:status res))
+                 (log/error "Voice message send failed:" (:msg res))))
+             (catch :default e
+               (log/error "Voice message exception:" e)))))))
+   {}))
+#+end_src
+
+
+
+**** Helper Functions
+
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
+(defonce ^:private ogg-crc-table
+  (let [tbl (js/Uint32Array. 256)]
+    (dotimes [i 256]
+      (loop [r (unsigned-bit-shift-right (bit-shift-left i 24) 0)
+             b 0]
+        (if (< b 8)
+          (let [r2 (if (not (zero? (bit-and r 0x80000000)))
+                     (bit-xor (bit-shift-left r 1) 0x04C11DB7)
+                     (bit-shift-left r 1))]
+            (recur (unsigned-bit-shift-right r2 0) (inc b)))
+          (aset tbl i r))))
+    tbl))
+
+(defn- ogg-crc32 [u8]
+  (let [len (.-length u8)]
+    (loop [i 0 crc 0]
+      (if (< i len)
+        (let [idx (bit-and (bit-xor (unsigned-bit-shift-right crc 24) (aget u8 i)) 0xFF)
+              nxt (bit-xor (bit-shift-left crc 8) (aget ogg-crc-table idx))]
+          (recur (inc i) (unsigned-bit-shift-right nxt 0)))
+        crc))))
+
+(defn- opus-packet-samples [pkt]
+  (let [n (.-length pkt)]
+    (if (zero? n)
+      0
+      (let [toc    (aget pkt 0)
+            cfg    (unsigned-bit-shift-right toc 3)
+            fsz    (cond
+                     (>= cfg 16) (nth [120 240 480 960] (bit-and cfg 3))
+                     (>= cfg 12) (if (zero? (bit-and cfg 1)) 480 960)
+                     :else       (nth [480 960 1920 2880] (bit-and cfg 3)))
+            ccode  (bit-and toc 3)
+            fcount (case ccode
+                     0     1
+                     (1 2) 2
+                     3     (if (> n 1) (max 1 (bit-and (aget pkt 1) 0x3F)) 1))]
+        (* fsz fcount)))))
+
+(defn- build-ogg-page [header-type granule serial seq-num packets]
+  (let [seg-bytes (let [arr #js []]
+                    (doseq [pkt packets]
+                      (loop [rem (.-length pkt)]
+                        (if (>= rem 255)
+                          (do (.push arr 255) (recur (- rem 255)))
+                          (.push arr rem))))
+                    arr)
+        n-segs    (.-length seg-bytes)
+        body-len  (reduce + 0 (map #(.-length %) packets))
+        hdr-len   (+ 27 n-segs)
+        page      (js/Uint8Array. (+ hdr-len body-len))
+        dv        (js/DataView. (.-buffer page))]
+    (aset page 0 0x4F) (aset page 1 0x67) (aset page 2 0x67) (aset page 3 0x53)
+    (aset page 4 0)
+    (aset page 5 header-type)
+    (.setUint32 dv 6 (unsigned-bit-shift-right (bit-and granule 0xFFFFFFFF) 0) true)
+    (.setUint32 dv 10 (unsigned-bit-shift-right (js/Math.floor (/ granule 4294967296.0)) 0) true)
+    (.setUint32 dv 14 serial true)
+    (.setUint32 dv 18 seq-num true)
+    (.setUint32 dv 22 0 true)
+    (aset page 26 n-segs)
+    (dotimes [i n-segs]
+      (aset page (+ 27 i) (aget seg-bytes i)))
+    (loop [off hdr-len pkts packets]
+      (when-let [p (first pkts)]
+        (.set page p off)
+        (recur (+ off (.-length p)) (rest pkts))))
+    (.setUint32 dv 22 (ogg-crc32 page) true)
+    page))
+
+(defn- make-default-opus-head [channels]
+  (let [b  (js/Uint8Array. 19)
+        dv (js/DataView. (.-buffer b))]
+    (dotimes [i 8]
+      (aset b i (.charCodeAt "OpusHead" i)))
+    (aset b 8 1)
+    (aset b 9 (max 1 (min 2 (int (or channels 1)))))
+    (.setUint16 dv 10 312 true)
+    (.setUint32 dv 12 48000 true)
+    (.setInt16 dv 16 0 true)
+    (aset b 18 0)
+    b))
+
+(defn- make-opus-tags []
+  (let [vendor "Paradise"
+        vlen   (count vendor)
+        b      (js/Uint8Array. (+ 16 vlen))
+        dv     (js/DataView. (.-buffer b))]
+    (dotimes [i 8]
+      (aset b i (.charCodeAt "OpusTags" i)))
+    (.setUint32 dv 8 vlen true)
+    (dotimes [i vlen]
+      (aset b (+ 12 i) (.charCodeAt vendor i)))
+    (.setUint32 dv (+ 12 vlen) 0 true)
+    b))
+
+(defn- ebml-vint-width [b0 max-w]
+  (loop [lz 0]
+    (cond
+      (>= lz max-w) nil
+      (not (zero? (bit-and b0 (unsigned-bit-shift-right 0x80 lz)))) (inc lz)
+      :else (recur (inc lz)))))
+
+(defn- read-ebml-id [u8 pos limit]
+  (when (< pos limit)
+    (when-let [w (ebml-vint-width (aget u8 pos) 4)]
+      (when (<= (+ pos w) limit)
+        (loop [k 0 acc 0.0]
+          (if (< k w)
+            (recur (inc k) (+ (* acc 256.0) (aget u8 (+ pos k))))
+            [(long acc) (+ pos w)]))))))
+
+(defn- read-ebml-size [u8 pos limit]
+  (when (< pos limit)
+    (let [s0 (aget u8 pos)]
+      (when-let [w (ebml-vint-width s0 8)]
+        (when (<= (+ pos w) limit)
+          (let [mask       (dec (unsigned-bit-shift-right 0x80 (dec w)))
+                first-bits (bit-and s0 mask)
+                unknown?   (and (= first-bits mask)
+                                (loop [k 1]
+                                  (if (< k w)
+                                    (if (= (aget u8 (+ pos k)) 0xFF)
+                                      (recur (inc k))
+                                      false)
+                                    true)))]
+            (if unknown?
+              [-1 (+ pos w)]
+              (loop [k 1 acc (double first-bits)]
+                (if (< k w)
+                  (recur (inc k) (+ (* acc 256.0) (aget u8 (+ pos k))))
+                  [(long acc) (+ pos w)])))))))))
+
+(defn- extract-block-opus-frames! [out-arr u8 start end]
+  (when-let [[_ p1] (read-ebml-size u8 start end)]
+    (when (<= (+ p1 3) end)
+      (let [flags  (aget u8 (+ p1 2))
+            fpos   (+ p1 3)
+            lacing (bit-and (unsigned-bit-shift-right flags 1) 0x03)]
+        (case lacing
+          0
+          (when (< fpos end)
+            (.push out-arr (.subarray u8 fpos end)))
+
+          1
+          (when (< fpos end)
+            (let [fcnt (inc (aget u8 fpos))]
+              (loop [idx 0 cur (inc fpos) sizes []]
+                (if (< idx (dec fcnt))
+                  (when-let [[f-sz nxt-cur]
+                             (loop [p cur sz 0]
+                               (when (< p end)
+                                 (let [b (aget u8 p)]
+                                   (if (= b 255)
+                                     (recur (inc p) (+ sz 255))
+                                     [(+ sz b) (inc p)]))))]
+                    (recur (inc idx) nxt-cur (conj sizes f-sz)))
+                  (loop [s-seq sizes off cur]
+                    (if-let [sz (first s-seq)]
+                      (when (<= (+ off sz) end)
+                        (.push out-arr (.subarray u8 off (+ off sz)))
+                        (recur (rest s-seq) (+ off sz)))
+                      (when (< off end)
+                        (.push out-arr (.subarray u8 off end)))))))))
+
+          2
+          (when (< fpos end)
+            (let [fcnt  (inc (aget u8 fpos))
+                  start (inc fpos)
+                  rem   (- end start)
+                  fsize (quot rem (max 1 fcnt))]
+              (when (pos? fsize)
+                (dotimes [i fcnt]
+                  (let [s (+ start (* i fsize))
+                        e (if (= i (dec fcnt)) end (+ s fsize))]
+                    (when (< s e)
+                      (.push out-arr (.subarray u8 s e))))))))
+
+          3
+          (when (< fpos end)
+            (let [fcnt (inc (aget u8 fpos))]
+              (when-let [[sz0 p-after0] (read-ebml-size u8 (inc fpos) end)]
+                (when (>= sz0 0)
+                  (loop [idx 1 cur p-after0 prev sz0 sizes [sz0]]
+                    (if (< idx (dec fcnt))
+                      (let [b0 (if (< cur end) (aget u8 cur) 0)
+                            w  (ebml-vint-width b0 8)]
+                        (when (and w (<= (+ cur w) end))
+                          (let [mask (dec (unsigned-bit-shift-right 0x80 (dec w)))
+                                raw  (loop [k 1 acc (double (bit-and b0 mask))]
+                                       (if (< k w)
+                                         (recur (inc k) (+ (* acc 256.0) (aget u8 (+ cur k))))
+                                         (long acc)))
+                                bias (dec (js/Math.pow 2 (dec (* 7 w))))
+                                nxt  (+ prev (- raw (long bias)))]
+                            (recur (inc idx) (+ cur w) nxt (conj sizes nxt)))))
+                      (loop [s-seq sizes off cur]
+                        (if-let [sz (first s-seq)]
+                          (when (and (pos? sz) (<= (+ off sz) end))
+                            (.push out-arr (.subarray u8 off (+ off sz)))
+                            (recur (rest s-seq) (+ off sz)))
+                          (when (< off end)
+                            (.push out-arr (.subarray u8 off end)))))))))))
+
+          nil)))))
+
+(def ^:private ebml-master-ids
+  #{0x18538067 0x1654AE6B 0xAE 0xE1 0x1F43B675 0xA0})
+
+(defn- remux-webm-opus->ogg [ab]
+  (try
+    (let [u8  (js/Uint8Array. ab)
+          len (.-length u8)]
+      (cond
+        (and (>= len 4)
+             (= (aget u8 0) 0x4F) (= (aget u8 1) 0x67)
+             (= (aget u8 2) 0x67) (= (aget u8 3) 0x53))
+        {:buffer ab :mime "audio/ogg" :ext "ogg"}
+
+        (and (>= len 4)
+             (= (aget u8 0) 0x1A) (= (aget u8 1) 0x45)
+             (= (aget u8 2) 0xDF) (= (aget u8 3) 0xA3))
+        (let [!opus-head (atom nil)
+              !channels  (atom 1)
+              packets    #js []]
+          (loop [pos 0]
+            (when (< pos len)
+              (when-let [[eid p1] (read-ebml-id u8 pos len)]
+                (when-let [[esize data-pos] (read-ebml-size u8 p1 len)]
+                  (if (contains? ebml-master-ids eid)
+                    (recur data-pos)
+                    (when (and (>= esize 0) (<= (+ data-pos esize) len))
+                      (let [end-pos (+ data-pos esize)]
+                        (case eid
+                          0x63A2
+                          (when (and (>= esize 19)
+                                     (= (aget u8 data-pos) 0x4F)
+                                     (= (aget u8 (inc data-pos)) 0x70))
+                            (reset! !opus-head (.slice u8 data-pos end-pos)))
+
+                          0x9F
+                          (when (pos? esize)
+                            (reset! !channels (aget u8 (dec end-pos))))
+
+                          (0xA3 0xA1)
+                          (extract-block-opus-frames! packets u8 data-pos end-pos)
+
+                          nil)
+                        (recur end-pos))))))))
+          (let [pkt-cnt (.-length packets)]
+            (if (pos? pkt-cnt)
+              (let [head     (or @!opus-head (make-default-opus-head @!channels))
+                    pre-skip (.getUint16 (js/DataView. (.-buffer head)
+                                                       (.-byteOffset head)
+                                                       (.-byteLength head))
+                                         10 true)
+                    tags     (make-opus-tags)
+                    serial   (bit-or 1 (rand-int 0x7FFFFFFF))
+                    pages    #js [(build-ogg-page 0x02 0 serial 0 [head])
+                                  (build-ogg-page 0x00 0 serial 1 [tags])]]
+                (loop [idx 0 seq-n 2 gran 0 batch [] segs 0]
+                  (if (< idx pkt-cnt)
+                    (let [pkt    (aget packets idx)
+                          p-segs (inc (quot (.-length pkt) 255))
+                          p-samp (opus-packet-samples pkt)]
+                      (if (and (seq batch) (> (+ segs p-segs) 240))
+                        (do
+                          (.push pages (build-ogg-page 0x00 gran serial seq-n batch))
+                          (recur idx (inc seq-n) gran [] 0))
+                        (recur (inc idx) seq-n (+ gran p-samp) (conj batch pkt) (+ segs p-segs))))
+                    (when (seq batch)
+                      (.push pages (build-ogg-page 0x04 (max gran (inc pre-skip)) serial seq-n batch)))))
+                (let [tot-bytes (reduce + 0 (map #(.-length %) (array-seq pages)))
+                      out       (js/Uint8Array. tot-bytes)]
+                  (loop [p-idx 0 off 0]
+                    (when (< p-idx (.-length pages))
+                      (let [pg (aget pages p-idx)]
+                        (.set out pg off)
+                        (recur (inc p-idx) (+ off (.-length pg))))))
+                  {:buffer (.-buffer out) :mime "audio/ogg" :ext "ogg"}))
+              nil)))
+
+        :else nil))
+    (catch :default e
+      (log/warn "WebM->Ogg remux fallback:" e)
+      nil)))
+
+(defn- pick-recorder-mime []
+  (let [candidates ["audio/ogg;codecs=opus"
+                    "audio/webm;codecs=opus"
+                    "audio/webm"
+                    "audio/mp4"]]
+    (if (and (exists? js/MediaRecorder) (fn? (.-isTypeSupported js/MediaRecorder)))
+      (or (some #(when (.isTypeSupported js/MediaRecorder %) %) candidates) "")
+      "")))
+
+(defn- resample-waveform [samples target-len]
+  (let [cnt (count samples)]
+    (if (zero? cnt)
+      (vec (repeat target-len 0.2))
+      (let [peak (max 0.02 (apply max samples))]
+        (mapv (fn [i]
+                (let [pos (/ (* i (max 0 (dec cnt))) (max 1 (dec target-len)))
+                      lo  (int (js/Math.floor pos))
+                      hi  (min (dec cnt) (inc lo))
+                      t   (- pos lo)
+                      v   (+ (* (- 1.0 t) (nth samples lo))
+                             (* t (nth samples hi)))]
+                  (max 0.08 (min 1.0 (/ v peak)))))
+              (range target-len))))))
+
+(defn- format-rec-timer [ms]
+  (let [sec (max 0 (quot (or ms 0) 1000))
+        m   (quot sec 60)
+        s   (mod sec 60)]
+    (str m ":" (when (< s 10) "0") s)))
+
+(defn- acquire-voice-stream! [device-id]
+  (let [base-audio {:echoCancellation true
+                    :noiseSuppression false
+                    :autoGainControl  true
+                    :channelCount     1
+                    :sampleRate       48000}]
+    (if (seq device-id)
+      (-> (.getUserMedia js/navigator.mediaDevices
+                         (clj->js {:audio (assoc base-audio :deviceId {:exact device-id})
+                                   :video false}))
+          (p/catch
+           (fn [_]
+             (.getUserMedia js/navigator.mediaDevices
+                            (clj->js {:audio base-audio :video false})))))
+      (.getUserMedia js/navigator.mediaDevices
+                     (clj->js {:audio base-audio :video false})))))
+
+(defn- cleanup-recorder-session! [!session]
+  (when-let [{:keys [timer stream rec-stream processor audio-ctx recorder]} @!session]
+    (reset! !session nil)
+    (when timer (js/clearInterval timer))
+    (when recorder
+      (try
+        (when (not= (.-state recorder) "inactive")
+          (.stop recorder))
+        (catch :default _ nil)))
+    (when processor
+      (when-let [destroy (aget processor "destroy")]
+        (-> (destroy) (p/catch (fn [_] nil)))))
+    (when rec-stream
+      (doseq [t (array-seq (.getTracks rec-stream))]
+        (try (.stop t) (catch :default _ nil))))
+    (when stream
+      (doseq [t (array-seq (.getTracks stream))]
+        (try (.stop t) (catch :default _ nil))))
+    (when (and audio-ctx (not= "closed" (.-state audio-ctx)))
+      (-> (.close audio-ctx) (p/catch (fn [_] nil))))))
+#+end_src
+
+
+**** Voice Recorder Bar
+
+
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
+(defn ^:react voice-recorder-bar [{:keys [room-id thread-id root-event-id is-new? title on-close]}]
+  (r/with-let [!elapsed-ms (r/atom 0)
+               !live-bars  (r/atom (vec (repeat 28 0.12)))
+               !all-peaks  (atom [])
+               !chunks     (atom [])
+               !sending?   (r/atom false)
+               !cancelled? (atom false)
+               !session    (atom nil)
+               _           (let [db         @rf-db/app-db
+                                 device-id  (get-in db [:settings :call-devices :audioinput])
+                                 threshold  (get-in db [:settings :voice-threshold]
+                                                    @call-rtc/!voice-threshold)
+                                 noise-sup? (get-in db [:settings :noise-suppression-enabled?]
+                                                    @call-rtc/!noise-suppression-enabled?)
+                                 gate-on?   @call-rtc/!voice-gate-enabled?]
+                             (-> (p/let [stream    (acquire-voice-stream! device-id)
+                                         raw-track (aget (.getAudioTracks stream) 0)
+                                         AudioCtx  (or (.-AudioContext js/window)
+                                                       (.-webkitAudioContext js/window))
+                                         actx      (when AudioCtx (AudioCtx.))
+                                         _         (if (and actx (= (.-state actx) "suspended"))
+                                                     (-> (.resume actx) (p/catch (fn [_] nil)))
+                                                     (p/resolved nil))
+                                         processor (when (and actx raw-track)
+                                                     (let [proc (audio-processor/create-processor
+                                                                 {:threshold     threshold
+                                                                  :gate-enabled? gate-on?
+                                                                  :hangover-ms   180})]
+                                                       (when-let [set-ns (aget proc "setNoiseSuppressionEnabled")]
+                                                         (set-ns noise-sup?))
+                                                       proc))
+                                         proc-ok?  (if processor
+                                                     (-> (.init processor #js {:audioContext actx
+                                                                               :track        raw-track})
+                                                         (p/then (fn [_] true))
+                                                         (p/catch
+                                                          (fn [err]
+                                                            (log/warn "Voice note processor fallback to raw mic:" err)
+                                                            false)))
+                                                     (p/resolved false))]
+                                   (if @!cancelled?
+                                     (do
+                                       (when processor
+                                         (when-let [destroy (aget processor "destroy")]
+                                           (-> (destroy) (p/catch (fn [_] nil)))))
+                                       (doseq [t (array-seq (.getTracks stream))]
+                                         (try (.stop t) (catch :default _ nil)))
+                                       (when (and actx (not= "closed" (.-state actx)))
+                                         (-> (.close actx) (p/catch (fn [_] nil)))))
+                                     (let [out-track  (when proc-ok?
+                                                        (.-processedTrack processor))
+                                           rec-stream (if out-track
+                                                        (js/MediaStream. #js [out-track])
+                                                        stream)
+                                           mime       (pick-recorder-mime)
+                                           rec        (if (str/blank? mime)
+                                                        (js/MediaRecorder. rec-stream)
+                                                        (js/MediaRecorder. rec-stream #js {:mimeType mime}))
+                                           analyser   (when (and (not out-track) actx)
+                                                        (let [src (.createMediaStreamSource actx stream)
+                                                              an  (.createAnalyser actx)]
+                                                          (set! (.-fftSize an) 256)
+                                                          (.connect src an)
+                                                          an))
+                                           buf        (when analyser
+                                                        (js/Uint8Array. (.-frequencyBinCount analyser)))
+                                           started    (js/Date.now)
+                                           timer      (js/setInterval
+                                                       (fn []
+                                                         (reset! !elapsed-ms (- (js/Date.now) started))
+                                                         (let [amp (cond
+                                                                     out-track
+                                                                     (let [get-lvl (aget processor "getLevel")
+                                                                           is-open (aget processor "isGateOpen")
+                                                                           lvl     (if get-lvl (get-lvl) 0.0)
+                                                                           open?   (if is-open (is-open) true)]
+                                                                       (if open?
+                                                                         (max 0.14 (min 1.0 (* lvl 3.8)))
+                                                                         0.10))
+
+                                                                     (and analyser buf)
+                                                                     (do
+                                                                       (.getByteTimeDomainData analyser buf)
+                                                                       (let [n   (.-length buf)
+                                                                             sum (loop [i 0 acc 0.0]
+                                                                                   (if (< i n)
+                                                                                     (let [v (/ (- (aget buf i) 128.0) 128.0)]
+                                                                                       (recur (inc i) (+ acc (* v v))))
+                                                                                     acc))
+                                                                             rms (js/Math.sqrt (/ sum (max 1 n)))]
+                                                                         (max 0.12 (min 1.0 (* rms 3.6)))))
+
+                                                                     :else 0.12)]
+                                                           (swap! !all-peaks conj amp)
+                                                           (swap! !live-bars
+                                                                  #(conj (subvec (vec %) 1) amp))))
+                                                       85)]
+                                       (.addEventListener rec "dataavailable"
+                                                          (fn [ev]
+                                                            (when (and (.-data ev) (pos? (.. ev -data -size)))
+                                                              (swap! !chunks conj (.-data ev)))))
+                                       (.start rec 150)
+                                       (reset! !session {:recorder   rec
+                                                         :stream     stream
+                                                         :rec-stream (when out-track rec-stream)
+                                                         :processor  processor
+                                                         :audio-ctx  actx
+                                                         :mime       (or (not-empty (.-mimeType rec))
+                                                                         mime
+                                                                         "audio/webm")
+                                                         :started    started
+                                                         :timer      timer}))))
+                                 (p/catch
+                                  (fn [err]
+                                    (log/error "Microphone access denied for voice message:" err)
+                                    (when on-close (on-close))))))]
+    (let [tr         @(re-frame/subscribe [:i18n/tr])
+          threshold  @(re-frame/subscribe [:settings/voice-threshold])
+          noise-sup? @(re-frame/subscribe [:settings/noise-suppression-enabled?])
+          _          (when-let [proc (:processor @!session)]
+                       (when-let [set-th (aget proc "setThreshold")]
+                         (set-th threshold))
+                       (when-let [set-ns (aget proc "setNoiseSuppressionEnabled")]
+                         (set-ns noise-sup?)))
+          elapsed-ms @!elapsed-ms
+          live-bars  @!live-bars
+          sending?   @!sending?
+          cancel!    (fn []
+                       (reset! !cancelled? true)
+                       (cleanup-recorder-session! !session)
+                       (when on-close (on-close)))
+          finish!    (fn []
+                       (when-let [{:keys [recorder mime started]} @!session]
+                         (when-not sending?
+                           (reset! !sending? true)
+                           (let [dur-ms (max 400 (- (js/Date.now) started))
+                                 wf     (resample-waveform @!all-peaks 48)
+                                 done!  (fn []
+                                          (let [raw-mime (or (some-> mime str (str/split #";") first str/trim not-empty)
+                                                             "audio/ogg")
+                                                blob     (js/Blob. (to-array @!chunks) #js {:type raw-mime})
+                                                raw-ext  (cond
+                                                           (str/includes? raw-mime "ogg") "ogg"
+                                                           (str/includes? raw-mime "mp4") "m4a"
+                                                           :else                          "webm")]
+                                            (-> (.arrayBuffer blob)
+                                                (p/then
+                                                 (fn [ab]
+                                                   (when (pos? (.-byteLength ab))
+                                                     (let [remuxed  (remux-webm-opus->ogg ab)
+                                                           send-ab  (or (:buffer remuxed) ab)
+                                                           send-u8  (if (instance? js/Uint8Array send-ab)
+                                                                      send-ab
+                                                                      (js/Uint8Array. send-ab))
+                                                           send-m   (or (:mime remuxed) raw-mime)
+                                                           send-ext (or (:ext remuxed) raw-ext)]
+                                                       (when (pos? (.-byteLength send-u8))
+                                                         (re-frame/dispatch
+                                                          [:sdk/send-voice-message
+                                                           {:room-id       room-id
+                                                            :thread-id     thread-id
+                                                            :root-event-id root-event-id
+                                                            :is-new?       is-new?
+                                                            :title         title
+                                                            :buffer-b64    (uint8->base64 send-u8)
+                                                            :mime          send-m
+                                                            :filename      (str "voice-message." send-ext)
+                                                            :size          (.-byteLength send-u8)
+                                                            :duration-ms   dur-ms
+                                                            :waveform      wf}]))))
+                                                   (cleanup-recorder-session! !session)
+                                                   (when on-close (on-close))))
+                                                (p/catch
+                                                 (fn [e]
+                                                   (log/error "Voice blob error:" e)
+                                                   (cleanup-recorder-session! !session)
+                                                   (when on-close (on-close)))))))]
+                             (if (= (.-state recorder) "inactive")
+                               (done!)
+                               (do
+                                 (.addEventListener recorder "stop" (fn [_] (done!)) #js {:once true})
+                                 (try
+                                   (when (= (.-state recorder) "recording")
+                                     (.requestData recorder))
+                                   (catch :default _ nil))
+                                 (.stop recorder)))))))]
+      [:div.voice-recorder-bar
+       [:button.voice-rec-cancel-btn
+        {:type     "button"
+         :title    (tr [:composer/voice-cancel])
+         :disabled sending?
+         :on-click cancel!}
+        [icons/trash {:width "16px" :height "16px"}]]
+
+       [:div.voice-rec-status
+        [:span.voice-rec-dot]
+        [:span.voice-rec-timer (format-rec-timer elapsed-ms)]]
+
+       (into
+        [:div.voice-rec-waveform]
+        (map-indexed
+         (fn [idx amp]
+           ^{:key idx}
+           [:span.voice-rec-bar
+            {:style {:height (str (max 16 (int (js/Math.round (* amp 100)))) "%")}}])
+         live-bars))
+
+       [:button.voice-rec-send-btn
+        {:type     "button"
+         :title    (tr [:composer/voice-send])
+         :disabled sending?
+         :on-click finish!}
+        [icons/send {:width "16px" :height "16px"}]]])
+    (finally
+      (reset! !cancelled? true)
+      (cleanup-recorder-session! !session))))
+#+end_src
+
+
+
+
+**** CSS
+
+#+begin_src clojurescript :tangle ../../../../css/voice-recorder.css
+
+#+end_src
+
+
+
