@@ -165,8 +165,9 @@ Probably needs a better name (and logical grouping)
    (let [resolved-engine (or (some-> engine-id keyword)
                              (:active-engine db)
                              :matrix)
-         token (:token session-data)
-         server-url (:server-url session-data)]
+         token           (or (:token session-data) (:accessToken session-data))
+         server-url      (or (:server-url session-data) (:base-url session-data))]
+     (close-auth-url!)
      (media/clear-media-cache!)
      (register-sw!)
      (when (and token server-url)
@@ -179,15 +180,21 @@ Probably needs a better name (and logical grouping)
        (engines/init-engine-streams! resolved-engine))
      {:db (assoc db
                  :auth-status :logged-in
+                 :login-challenge nil
                  :active-user-id user-id
                  :active-engine resolved-engine
+                 :active-room-id nil
                  :rooms/data {}
+                 :timeline-subs {}
+                 :timeline-data {}
                  :timeline/events []
                  :auth/session session-data)
-      :fx (cond-> [[:dispatch [:engine/sync-media-session
+      :fx (cond-> [[:dispatch [:i18n/load-engine-extensions resolved-engine]]
+                   [:dispatch [:engine/sync-media-session
                                {:user-id    user-id
                                 :server-url server-url
                                 :token      token}]]
+                   [:dispatch [:settings/load-accounts]]
                    [:dispatch [:app/load-settings-by-stage :login]]
                    [:dispatch [:app/restore-user-session user-id]]
                    [:dispatch [:push/check-status]]]
