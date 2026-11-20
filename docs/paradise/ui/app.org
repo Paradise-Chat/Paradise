@@ -26,6 +26,8 @@ actual UI components themselves.
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
 (ns paradise.ui.app
   (:require
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
    [re-frame.core :as re-frame]
    [taoensso.timbre :as log]
    [promesa.core :as p]
@@ -41,9 +43,13 @@ actual UI components themselves.
    [paradise.ui.overlays.settings.base]
    [paradise.ui.overlays.invites]
    [paradise.ui.overlays.creation]
+   [paradise.ui.overlays.emotes-manager]
+   [paradise.ui.overlays.permissions-roles]
+   [paradise.ui.overlays.polls]
    [paradise.ui.overlays.quick-switcher]
    [paradise.ui.overlays.lightbox]
    [paradise.ui.overlays.rooms]
+   [paradise.ui.overlays.room-settings]
    [paradise.ui.overlays.profiles]
    [paradise.ui.overlays.reactions]
    [paradise.ui.overlays.tray :as tray]
