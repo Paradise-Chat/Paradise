@@ -496,7 +496,7 @@ Now before we define the panel we may want to define media buttons...
 
 (re-frame/reg-event-fx
  :rooms/create-room
- (fn [{:keys [db]} [_ {:keys [name topic visibility is-encrypted history-visibility is-space parent-space-id on-error]}]]
+ (fn [{:keys [db]} [_ {:keys [name topic visibility is-encrypted history-visibility is-space is-forum is-call parent-space-id on-error]}]]
    (go
      (let [pool @state/!engine-pool
            res  (<! (main/do-with-pool! pool {:handler :create-room
@@ -505,9 +505,16 @@ Now before we define the panel we may want to define media buttons...
                                                           :visibility         visibility
                                                           :is-encrypted       is-encrypted
                                                           :history-visibility history-visibility
-                                                          :is-space           is-space}}))]
+                                                          :is-space           is-space
+                                                          :is-forum           (boolean is-forum)
+                                                          :is-call            (boolean is-call)
+                                                          :space-id           parent-space-id}}))]
        (if (= (:status res) "success")
          (let [new-room-id (:room-id res)]
+           (when is-forum
+             (re-frame/dispatch [:rooms/mark-forum-room new-room-id true]))
+           (when is-call
+             (re-frame/dispatch [:rooms/set-preview new-room-id {:is-call? true :is-forum? false}]))
            (when parent-space-id
              (let [add-res (<! (main/do-with-pool! pool {:handler :space-add-child
                                                          :arguments {:space-id parent-space-id
@@ -662,6 +669,12 @@ ever do this once per room.
  :room/is-call?
  (fn [db [_ room-id]]
    (get-in db [:room-previews room-id :is-call?])))
+
+(re-frame/reg-sub
+ :room/is-forum?
+ (fn [db [_ room-id]]
+   (or (boolean (get-in db [:room-previews room-id :is-forum?]))
+       (contains? (get db :forum-room-overrides #{}) room-id))))
 #+end_src
 
 
@@ -701,24 +714,31 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/entry.cljs
 (defn room-item [_initial-props]
   (r/with-let [!attempted? (atom false)]
-    (fn [{:keys [id name indent is-space? is-closed? is-dm? has-call?
-                 active-room unread? highlight? notif-count
-                 call-participants avatar-url space-id active-filter open-menu-fn]}]
-      (let [active?       (= id active-room)
-            tr            @(re-frame/subscribe [:i18n/tr])
-            is-call?      @(re-frame/subscribe [:room/is-call? id])
-            profile       @(re-frame/subscribe [:sdk/profile])
-            my-id         (:user-id profile)
-            needs-members? (or (and is-dm? (not avatar-url)) has-call?)
-            members-map   @(re-frame/subscribe [:room/members-map id])
-            mem-fetching? @(re-frame/subscribe [:room/members-loading? id])
-            mem-tried?    @(re-frame/subscribe [:room/members-attempted? id])
-            membership    @(re-frame/subscribe [:room/membership id])
-            mem-loading?  @(re-frame/subscribe [:room/membership-loading? id])
-            mem-attempted? @(re-frame/subscribe [:room/membership-attempted? id])
-            security      @(re-frame/subscribe [:room/security id])
-            sec-loading?  @(re-frame/subscribe [:room/security-loading? id])
-            sec-attempted? @(re-frame/subscribe [:room/security-attempted? id])]
+    (fn [{:keys [id name indent is-space? is-closed? is-dm? is-group-dm?
+                 recipient-avatars has-call? active-room unread? highlight?
+                 notif-count call-participants avatar-url space-id
+                 active-filter open-menu-fn]}]
+      (let [active?         (= id active-room)
+            tr              @(re-frame/subscribe [:i18n/tr])
+            is-call?        @(re-frame/subscribe [:room/is-call? id])
+            is-forum?       @(re-frame/subscribe [:room/is-forum? id])
+            profile         @(re-frame/subscribe [:sdk/profile])
+            my-id           (:user-id profile)
+            needs-members?  (or has-call?
+                                (and is-dm?
+                                     (not avatar-url)
+                                     (if is-group-dm?
+                                       (empty? recipient-avatars)
+                                       true)))
+            members-map     @(re-frame/subscribe [:room/members-map id])
+            mem-fetching?   @(re-frame/subscribe [:room/members-loading? id])
+            mem-tried?      @(re-frame/subscribe [:room/members-attempted? id])
+            membership      @(re-frame/subscribe [:room/membership id])
+            mem-loading?    @(re-frame/subscribe [:room/membership-loading? id])
+            mem-attempted?  @(re-frame/subscribe [:room/membership-attempted? id])
+            security        @(re-frame/subscribe [:room/security id])
+            sec-loading?    @(re-frame/subscribe [:room/security-loading? id])
+            sec-attempted?  @(re-frame/subscribe [:room/security-attempted? id])]
 
         (when (and id (not is-space?) (not security) (not sec-loading?) (not sec-attempted?))
           (re-frame/dispatch [:room/fetch-security id]))
@@ -733,14 +753,42 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
         (when (and id (not membership) (not mem-loading?) (not mem-attempted?))
           (re-frame/dispatch [:room/fetch-membership id]))
 
-        (let [other-user            (when (and is-dm? (seq members-map))
+        (let [other-users           (when (and is-dm? (seq members-map))
                                       (->> (vals members-map)
-                                           (remove #(= (:user-id %) my-id))
-                                           first))
-              final-avatar          (or avatar-url (:avatar-url other-user))
-              final-name            (if (when is-dm? other-user)
+                                           (remove #(= (:user-id %) my-id))))
+              group-dm?             (boolean (or is-group-dm? (> (count other-users) 1)))
+              other-user            (when (and is-dm? (not group-dm?))
+                                      (first other-users))
+              final-avatar          (if group-dm?
+                                      avatar-url
+                                      (or avatar-url (:avatar-url other-user)))
+              final-name            (cond
+                                      group-dm?
+                                      (if (and (or (str/blank? name) (= name "Loading..."))
+                                               (seq other-users))
+                                        (str/join ", " (map :display-name other-users))
+                                        name)
+
+                                      (and is-dm? other-user)
                                       (:display-name other-user)
+
+                                      :else
                                       name)
+              group-members         (when group-dm?
+                                      (or (seq recipient-avatars)
+                                          (let [peers (mapv (fn [u]
+                                                              {:id   (:user-id u)
+                                                               :name (:display-name u)
+                                                               :url  (:avatar-url u)})
+                                                            other-users)]
+                                            (if (and (= (count peers) 1) my-id)
+                                              (conj peers
+                                                    {:id   my-id
+                                                     :name (or (:display-name profile)
+                                                               (:username profile)
+                                                               "Me")
+                                                     :url  (:avatar-url profile)})
+                                              peers))))
               final-membership      (or membership "joined")
               resolved-participants (map (fn [p]
                                            (let [p-id        (or (:userId p) p)
@@ -794,8 +842,17 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
                 is-call?
                 [icons/speaker {:has-call? has-call?}]
 
-                (and (= active-filter "people") (or is-dm? (not space-id)))
-                [avatar {:id id :name final-name :url final-avatar :size 24 :status :online}]
+                is-forum?
+                [icons/thread]
+
+                (or is-dm? (and (= active-filter "people") (not space-id)))
+                [avatar (cond-> {:id   id
+                                 :name final-name
+                                 :url  final-avatar
+                                 :size 24}
+                          group-dm?       (assoc :is-group? true
+                                                 :group-members group-members)
+                          (not group-dm?) (assoc :status :online))]
 
                 :else
                 [icons/dynamic-room-hash {:is-public?    (:is-public? security)
@@ -893,6 +950,8 @@ need out.
           room-name   (or (:name r) "Loading...")
           space?      (or (:is-space? r) (:isSpace r))
           dm?         (or (:is-direct? r) (:isDirect r) (:is-direct r))
+          group-dm?   (boolean (or (:isGroupDm r) (:is-group-dm? r)))
+          recip-avs   (or (:recipientAvatars r) (:recipient-avatars r))
           parent-id   (or (:parent-id r) (:isParent r))
           notif-count (or (:notification-count r) (:unreadNotificationsCount r) 0)
           high-count  (or (:highlight-count r) (:unreadMentionsCount r) 0)
@@ -921,6 +980,8 @@ need out.
                    :indent            (* depth 12)
                    :is-space?         space?
                    :is-dm?            dm?
+                   :is-group-dm?      group-dm?
+                   :recipient-avatars recip-avs
                    :is-closed?        (contains? closed-drawers id)
                    :has-call?         (seq call-parts)
                    :active-room       active-room
