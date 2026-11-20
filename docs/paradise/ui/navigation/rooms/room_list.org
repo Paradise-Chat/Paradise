@@ -187,38 +187,50 @@ is effectively a functioning *stub*.
 
 (re-frame/reg-event-db
  :rooms/toggle-join-mode
-       (fn [db _]
-        (update db :room-list/join-mode? not)))
+ (fn [db _]
+   (update db :room-list/join-mode? not)))
 
 (re-frame/reg-sub
  :rooms/join-mode?
-       (fn [db _]
-        (get db :room-list/join-mode? false)))
+ (fn [db _]
+   (get db :room-list/join-mode? false)))
 
 (re-frame/reg-sub
  :rooms/previews-map
-       (fn [db _]
-        (get db :room-previews {})))
-
+ (fn [db _]
+   (get db :room-previews {})))
 #+end_src
-
 
 **** Room Reframe Subscriptions
 
-Important to note that the Rust sdk delivers the resulting rooms in order
-of recent activity. So if we use a broad stroke to handle all of them we lose
-this valuable data. Instead we want to provide a simple 'parsed' map for
-the DMs list or All rooms list as these are best served fresh first.
-For the space rooms themselves we want to flatten as we have described
-above.
+Important to note that the Rust sdk delivers the resulting rooms in order of
+recent activity. So if we use a broad stroke to handle all of them we lose this
+valuable data. Instead we want to provide a simple 'parsed' map for the DMs list
+or All rooms list as these are best served fresh first. For the space rooms
+themselves we want to flatten as we have described above.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
+(re-frame/reg-sub
+ :rooms/unfiltered-indexed-map
+ (fn [db _]
+   (get db :rooms-unfiltered-cache {})))
 
-(re-frame/reg-sub :rooms/unfiltered-indexed-map (fn [db _] (get db :rooms-unfiltered-cache {})))
+(re-frame/reg-sub
+ :rooms/manual-children-idx
+ (fn [db _]
+   (get db :rooms-manual-children-idx {})))
 
-
+(re-frame/reg-sub
+ :rooms/manual-children-map
+ :<- [:rooms/manual-children-idx]
+ (fn [manual-idx _]
+   (persistent!
+    (reduce-kv
+     (fn [acc pid children-by-id]
+       (assoc! acc pid (vec (vals children-by-id))))
+     (transient {})
+     manual-idx))))
 
 (re-frame/reg-sub :rooms/ordered-list (fn [db _] (get db :rooms [])))
-
 
 (re-frame/reg-sub :rooms/space-orders (fn [db _] (get db :space-orders {})))
 
@@ -231,21 +243,41 @@ above.
                (if id
                  (assoc acc id room)
                  acc)))
-           {} rooms-list)))
+           {}
+           rooms-list)))
 
 (re-frame/reg-event-db
  :rooms/apply-parent-resolution
  (fn [db [_ room-id first-parent-id]]
-   (-> db
-       (assoc-in [:rooms-unfiltered-cache room-id :first-parent-id] first-parent-id)
-       (update :rooms (fn [rooms]
-                        (if (sequential? rooms)
-                          (mapv (fn [r]
-                                  (if (= (:id r) room-id)
-                                    (assoc r :first-parent-id first-parent-id)
-                                    r))
-                                rooms)
-                          rooms))))))
+   (let [old-r         (get-in db [:rooms-unfiltered-cache room-id])
+         cached-parent (when old-r
+                         (safe-get old-r "first-parent-id" :first-parent-id))
+         is-space?     (boolean (when old-r
+                                  (safe-get old-r "isSpace" :isSpace)))
+         rooms         (:rooms db)
+         home-needs?   (and (sequential? rooms)
+                            (some #(and (= (:id %) room-id)
+                                        (not= (:first-parent-id %) first-parent-id))
+                                  rooms))]
+     (if (and (= cached-parent first-parent-id) (not home-needs?))
+       db
+       (cond-> db
+         (not= cached-parent first-parent-id)
+         (-> (assoc-in [:rooms-unfiltered-cache room-id :first-parent-id] first-parent-id)
+             (update :rooms-manual-children-idx
+                     (fn [idx]
+                       (-> (or idx {})
+                           (idx-remove-child cached-parent room-id)
+                           (idx-put-child first-parent-id room-id is-space?)))))
+
+         home-needs?
+         (update :rooms
+                 (fn [rs]
+                   (mapv (fn [r]
+                           (if (= (:id r) room-id)
+                             (assoc r :first-parent-id first-parent-id)
+                             r))
+                         rs))))))))
 
 (re-frame/reg-sub
  :rooms/current-view
@@ -253,21 +285,27 @@ above.
  :<- [:rooms/ordered-list]
  :<- [:rooms/unfiltered-indexed-map]
  :<- [:space-children/map]
+ :<- [:rooms/manual-children-map]
  :<- [:rooms/space-orders]
  :<- [:rooms/closed-drawers]
  :<- [:rooms/previews-map]
  :<- [:rooms/join-mode?]
- (fn [[active-id ordered-list indexed-map children-map space-orders closed-drawers previews-map join-mode?] _]
-  (if-not active-id
-   ordered-list
-   (flatten-tree indexed-map children-map space-orders closed-drawers previews-map join-mode? active-id 0))))
-
-
+ (fn [[active-id ordered-list indexed-map children-map manual-children-map
+       space-orders closed-drawers previews-map join-mode?] _]
+   (if-not active-id
+     ordered-list
+     (flatten-tree indexed-map
+                   children-map
+                   manual-children-map
+                   space-orders
+                   closed-drawers
+                   previews-map
+                   join-mode?
+                   active-id
+                   0))))
 #+end_src
 
-
 **** Reframe Drawers
-
 
 ***** CSS
 
@@ -306,7 +344,6 @@ above.
 }
 #+end_src
 
-
 ***** Reframe components
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
@@ -315,43 +352,114 @@ above.
  (fn [db [_ drawer-id]]
    (update-in db [:ui :closed-drawers]
               (fn [closed]
-                (if (contains? closed drawer-id) (disj closed drawer-id) (conj (or closed #{}) drawer-id))))))
+                (if (contains? closed drawer-id)
+                  (disj closed drawer-id)
+                  (conj (or closed #{}) drawer-id))))))
 
 (re-frame/reg-sub :rooms/closed-drawers (fn [db _] (get-in db [:ui :closed-drawers] #{})))
 #+end_src
 
-
 **** Notifications and unread data
 
 So notification handling is actually a fairly annoying process if we want the
-smooth visual users expect. We need to bubble up the unread count for every
-room within a space. This meant we needed to have the parent-child relationships
-mapped out and then flatten them into a calculatable total.
-The parent-child mapping process is documented above, but amusingly is
-one of the more complex aspects of spaces and rooms.
+smooth visual users expect. We need to bubble up the unread count for every room
+within a space. This meant we needed to have the parent-child relationships
+mapped out and then flatten them into a calculatable total. The parent-child
+mapping process is documented above, but amusingly is one of the more complex
+aspects of spaces and rooms.
 
 To a much easier degree, we need to also calculate the unread count for DMs.
 This is mostly useful for presenting that info on the space bar cleanly.
-Otherwise we would just re-use (and probably should see if we can)
-the method we have for all other rooms.
+Otherwise we would just re-use (and probably should see if we can) the method we
+have for all other rooms.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
-(re-frame/reg-sub
-                                   :space/unread-stats
-                                   :<- [:rooms/unfiltered-indexed-map]
-                                   :<- [:space-children/map]
-                                   :<- [:rooms/space-orders]
-                                   (fn [[rooms-map children-map space-orders] [_ space-id]]
-                                    (let [rooms-in-space (flatten-tree rooms-map children-map space-orders #{} {} false space-id 0)
+(def ^:private empty-unread-stats
+  {:unread?     false
+   :notif-count 0
+   :mentions    0
+   :highlight?  false})
 
-                                          stats (reduce (fn [acc room]
-                                                         (-> acc
-                                                          (update :notifs + (get room :unreadNotificationsCount 0))
-                                                          (update :mentions + (get room :unreadMentionsCount 0))))
-    {:notifs 0 :mentions 0} rooms-in-space)]
-                                        {:unread? (pos? (:notifs stats))
-                                         :notif-count (:notifs stats)
-                                         :mentions (:mentions stats)
-                                         :highlight? (pos? (:mentions stats))})))
+(defn- space-unread-totals [rooms-map children-map manual-children-map root-space-id]
+  (loop [cs      nil
+         stack   [root-space-id]
+         visited #{root-space-id}
+         seen-r  (transient #{})
+         notifs  0
+         ments   0]
+    (if cs
+      (let [{:keys [id is-space?]} (first cs)]
+        (if (or (nil? id) (contains? seen-r id))
+          (recur (next cs) stack visited seen-r notifs ments)
+          (let [summary  (get rooms-map id)
+                sr'      (conj! seen-r id)
+                r-notifs (if summary
+                           (or (safe-get summary
+                                         "unreadNotificationsCount"
+                                         :unreadNotificationsCount)
+                               0)
+                           0)
+                r-ments  (if summary
+                           (or (safe-get summary
+                                         "unreadMentionsCount"
+                                         :unreadMentionsCount)
+                               0)
+                           0)
+                next-stk (if (and is-space? (not (contains? visited id)))
+                           (conj stack id)
+                           stack)
+                next-vis (if is-space? (conj visited id) visited)]
+            (recur (next cs)
+                   next-stk
+                   next-vis
+                   sr'
+                   (+ notifs r-notifs)
+                   (+ ments r-ments)))))
+      (if (empty? stack)
+        (if (and (zero? notifs) (zero? ments))
+          empty-unread-stats
+          {:unread?     (pos? notifs)
+           :notif-count notifs
+           :mentions    ments
+           :highlight?  (pos? ments)})
+        (let [curr-id  (peek stack)
+              stack'   (pop stack)
+              sdk-ch   (get children-map curr-id)
+              man-ch   (get manual-children-map curr-id)
+              combined (cond
+                         (and (seq sdk-ch) (seq man-ch)) (concat sdk-ch man-ch)
+                         (seq sdk-ch)                    sdk-ch
+                         :else                           man-ch)]
+          (recur (seq combined) stack' visited seen-r notifs ments))))))
+
+(defn- build-spaces-unread-stats-map [spaces rooms-map children-map manual-children-map]
+  (let [space-ids (into (set (keep :id spaces))
+                        (concat (keys children-map) (keys manual-children-map)))]
+    (persistent!
+     (reduce
+      (fn [acc sid]
+        (if sid
+          (assoc! acc sid (space-unread-totals rooms-map
+                                               children-map
+                                               manual-children-map
+                                               sid))
+          acc))
+      (transient {})
+      space-ids))))
+
+(re-frame/reg-sub
+ :spaces/unread-stats-map
+ :<- [:spaces/all]
+ :<- [:rooms/unfiltered-indexed-map]
+ :<- [:space-children/map]
+ :<- [:rooms/manual-children-map]
+ (fn [[spaces rooms-map children-map manual-children-map] _]
+   (build-spaces-unread-stats-map spaces rooms-map children-map manual-children-map)))
+
+(re-frame/reg-sub
+ :space/unread-stats
+ :<- [:spaces/unread-stats-map]
+ (fn [stats-map [_ space-id]]
+   (get stats-map space-id empty-unread-stats)))
 
 (re-frame/reg-sub
  :rooms/active-dm-pops
@@ -359,24 +467,53 @@ the method we have for all other rooms.
  (fn [rooms-map _]
    (->> (vals rooms-map)
         (keep (fn [raw-room]
-                (let [r           (if (map? raw-room) raw-room (js->clj raw-room :keywordize-keys true))
-                      is-dm?      (or (:is-direct? r) (:isDirect r) (:is-direct r))
-                      msg-count   (or (:unread-messages-count r) (:unreadMessagesCount r) 0)
-                      mentions    (or (:highlight-count r) (:unreadMentionsCount r) 0)
-                      ts          (or (:last_message_ts r) (:lastMessageTs r) 0)]
-                  (when (and is-dm? (pos? msg-count))
-                    {:id          (or (:id r) (:roomId r))
-                     :name        (or (:name r) "Loading...")
-                     :avatar-url  (or (:avatar r) (:avatarUrl r))
-                     :is-dm?      true
-                     :unread?     true
-                     :highlight?  (pos? mentions)
-                     :mentions    mentions
-                     :msg-count   msg-count
-                     :ts          ts}))))
+                (let [is-dm?     (or (safe-get raw-room "is-direct?" :is-direct?)
+                                     (safe-get raw-room "isDirect" :isDirect)
+                                     (safe-get raw-room "is-direct" :is-direct))
+                      is-spam?   (boolean (or (safe-get raw-room "isSpam" :isSpam)
+                                              (safe-get raw-room "is-spam?" :is-spam?)))
+                      membership (some-> (or (safe-get raw-room "membership" :membership)
+                                             "Joined")
+                                         str)
+                      invited?   (= (.toLowerCase membership) "invited")
+                      msg-count  (when (and is-dm? (not is-spam?) (not invited?))
+                                   (or (safe-get raw-room
+                                                 "unread-messages-count"
+                                                 :unread-messages-count)
+                                       (safe-get raw-room
+                                                 "unreadMessagesCount"
+                                                 :unreadMessagesCount)
+                                       0))]
+                  (when (and is-dm? (not is-spam?) (not invited?) (pos? msg-count))
+                    (let [mentions (or (safe-get raw-room "highlight-count" :highlight-count)
+                                       (safe-get raw-room
+                                                 "unreadMentionsCount"
+                                                 :unreadMentionsCount)
+                                       0)
+                          ts       (or (safe-get raw-room "last_message_ts" :last_message_ts)
+                                       (safe-get raw-room "lastMessageTs" :lastMessageTs)
+                                       0)]
+                      {:id                (or (safe-get raw-room "id" :id)
+                                              (safe-get raw-room "roomId" :roomId))
+                       :name              (or (safe-get raw-room "name" :name) "Loading...")
+                       :avatar-url        (or (safe-get raw-room "avatar" :avatar)
+                                              (safe-get raw-room "avatarUrl" :avatarUrl))
+                       :is-dm?            true
+                       :is-group-dm?      (boolean (or (safe-get raw-room "isGroupDm" :isGroupDm)
+                                                       (safe-get raw-room "is-group-dm?" :is-group-dm?)))
+                       :recipient-avatars (or (safe-get raw-room
+                                                        "recipientAvatars"
+                                                        :recipientAvatars)
+                                              (safe-get raw-room
+                                                        "recipient-avatars"
+                                                        :recipient-avatars))
+                       :unread?           true
+                       :highlight?        (pos? mentions)
+                       :mentions          mentions
+                       :msg-count         msg-count
+                       :ts                ts})))))
         (sort-by :ts >)
-        (map #(dissoc % :ts)))))
-
+        (mapv #(dissoc % :ts)))))
 #+end_src
 
 
