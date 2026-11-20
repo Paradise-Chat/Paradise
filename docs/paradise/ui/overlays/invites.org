@@ -151,7 +151,7 @@ populated based on DMs to give the user a familiar UI.
          [:input.form-input.quick-switcher-input
           {:type "text"
            :auto-focus true
-           :placeholder (tr [:invites.room/placeholder-rooms])
+           :placeholder (tr [:invites/placeholder-rooms])
            :value @query
            :on-change (fn [e]
                         (reset! query (.. e -target -value))
@@ -167,7 +167,7 @@ populated based on DMs to give the user a familiar UI.
           [selectable-list
            {:items          final-items
             :selected-index @selected-index
-            :empty-text     (tr [:invites.room/empty-rooms])
+            :empty-text     (tr [:invites/empty-rooms])
             :item-class     "quick-switcher-item"
             :key-fn         #(or (:room-id %) (:id %) (:roomId %))
             :on-highlight   #(reset! selected-index %)

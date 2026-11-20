@@ -13,11 +13,14 @@ can establish a nice baseline and work from there
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/creation.cljs
 (ns paradise.ui.overlays.creation
   (:require
-   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
-   [re-frame.core :as re-frame]
-   [reagent.core :as r]
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
-   [paradise.ui.overlays.base :refer [modal-component popover-component]]))
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
+   [paradise.ui.overlays.base :refer [modal-component popover-component]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]))
 #+end_src
 
 
