@@ -13,6 +13,7 @@ In addition to that, it provides input/output selections and testing.
 (ns paradise.ui.overlays.settings.voice-video
   (:require
    [paradise.shared.client.session-store :as store]
+   [paradise.shared.utils.helpers :refer [clamp01]]
    [paradise.ui.container.call.runtime :as call-rtc]
    [promesa.core :as p]
    [re-frame.core :as re-frame]
@@ -419,9 +420,6 @@ In addition to that, it provides input/output selections and testing.
         [:option {:value (.-deviceId device)}
          (media-device-label device fallback-label idx)])
       devices))]])
-
-(defn- clamp01 [x]
-  (max 0.0 (min 1.0 x)))
 
 (defn- amplitude->meter
   [amplitude]
