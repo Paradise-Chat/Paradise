@@ -120,7 +120,8 @@ another space (unless the user has made them set as global).
                                                    :let [sc  (clean-shortcode raw-k)
                                                          uri (or (:uri v) (:url v))]
                                                    :when (and (seq sc) uri)]
-                                               [sc {:id               (or (:id v) (str pack-id ":" sc))
+                                               [sc {:id               (or (:id v) (:emote-id v) (str pack-id ":" sc))
+                                                    :emote-id         (:emote-id v)
                                                     :shortcode        sc
                                                     :uri              uri
                                                     :url              uri
@@ -217,6 +218,8 @@ We then initialize them as a 'pack'
     (fn [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
       (let [tr             @tr-sub
             custom-packs   @(re-frame/subscribe [:emoji/active-set])
+            active-space   @(re-frame/subscribe [:spaces/active-id])
+            active-room    @(re-frame/subscribe [:rooms/active-id])
             is-mobile?     @(re-frame/subscribe [:ui/mobile?])
             packs          (merge categorized-system-packs custom-packs)
             sorted-ids     (sort-by (fn [id]
@@ -280,6 +283,16 @@ We then initialize them as a 'pack'
                                (when-not is-searching?
                                  ^{:key "sidebar"}
                                  [:div.emoji-sidebar
+                                  [:div.sidebar-pack-item.add-emote-btn
+                                   {:title    (tr [:settings.emotes/add-custom-tooltip])
+                                    :on-click (fn [e]
+                                                (.stopPropagation e)
+                                                (when on-close (on-close))
+                                                (re-frame/dispatch [:ui/close-popover])
+                                                (if-let [tgt (or active-space active-room)]
+                                                  (re-frame/dispatch [:rooms/open-settings tgt :emotes])
+                                                  (re-frame/dispatch [:settings/open :emotes])))}
+                                   [icons/plus {:width "18px" :height "18px"}]]
                                   (for [pack-id sorted-ids]
                                     (let [pack-data (get packs pack-id)
                                           pname     (or (:name pack-data) (str pack-id))
