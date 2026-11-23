@@ -985,6 +985,7 @@ also likely not be selectable (as the fallback will be literal text).
     width: 100%;
     height: 100%;
     object-fit: cover;
+    overflow: hidden;
     z-index: 2;
     border-radius: inherit;
 }
@@ -998,6 +999,7 @@ also likely not be selectable (as the fallback will be literal text).
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: hidden;
     z-index: 1;
     border-radius: inherit;
 }
@@ -1013,7 +1015,10 @@ also likely not be selectable (as the fallback will be literal text).
     overflow: hidden;
 }
 
-.avatar-wrapper.circle { border-radius: 50%; }
+.avatar-wrapper.circle {
+    border-radius: 50%;
+    overflow: visible;
+}
 .avatar-wrapper.space  { border-radius: 8px; }
 .avatar-wrapper.square { border-radius: 0; }
 .avatar-wrapper.flat, .avatar-wrapper.none {
@@ -1028,6 +1033,88 @@ also likely not be selectable (as the fallback will be literal text).
     color: white;
     font-weight: 600;
     text-transform: uppercase;
+}
+
+.avatar-status {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    z-index: 4;
+    border-radius: 50%;
+    box-sizing: border-box;
+    border: 2.5px solid var(--surface-1, #2b2d31);
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.avatar-status.status-sm {
+    width: 11px;
+    height: 11px;
+    right: -2px;
+    bottom: -2px;
+    border-width: 2px;
+}
+
+.avatar-status.status-md {
+    width: 14px;
+    height: 14px;
+    right: -2px;
+    bottom: -2px;
+    border-width: 2.5px;
+}
+
+.avatar-status.status-lg {
+    width: 20px;
+    height: 20px;
+    right: 0;
+    bottom: 0;
+    border-width: 3.5px;
+}
+
+.avatar-status.online {
+    background-color: #23a55a;
+}
+
+.avatar-status.away {
+    background-color: #f0b232;
+}
+
+.avatar-status.away::after {
+    content: "";
+    position: absolute;
+    top: 12%;
+    left: 12%;
+    width: 52%;
+    height: 52%;
+    border-radius: 50%;
+    background-color: var(--surface-1, #2b2d31);
+}
+
+.avatar-status.dnd {
+    background-color: #f23f43;
+}
+
+.avatar-status.dnd::after {
+    content: "";
+    width: 62%;
+    height: 24%;
+    min-height: 1.5px;
+    border-radius: 2px;
+    background-color: #ffffff;
+}
+
+.avatar-status.offline {
+    background-color: #80848e;
+}
+
+.avatar-status.offline::after {
+    content: "";
+    width: 48%;
+    height: 48%;
+    border-radius: 50%;
+    background-color: var(--surface-1, #2b2d31);
 }
 
 .status-indicator {
