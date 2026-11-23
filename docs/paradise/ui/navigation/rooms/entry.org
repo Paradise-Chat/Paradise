@@ -775,7 +775,7 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/entry.cljs
 (defn room-item [_initial-props]
   (r/with-let [!attempted? (atom false)]
-    (fn [{:keys [id name indent is-space? is-closed? is-dm? is-group-dm?
+    (fn [{:keys [id name indent is-space? is-closed? is-dm? is-group-dm? dm-peer-id
                  recipient-avatars has-call? active-room unread? highlight?
                  notif-count call-participants avatar-url space-id
                  active-filter open-menu-fn]}]
@@ -783,14 +783,15 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
             tr              @(re-frame/subscribe [:i18n/tr])
             is-call?        @(re-frame/subscribe [:room/is-call? id])
             is-forum?       @(re-frame/subscribe [:room/is-forum? id])
+            typing-raw      @(re-frame/subscribe [:room/typing-users id])
             profile         @(re-frame/subscribe [:sdk/profile])
             my-id           (:user-id profile)
+            my-name         (:display-name profile)
             needs-members?  (or has-call?
                                 (and is-dm?
-                                     (not avatar-url)
                                      (if is-group-dm?
-                                       (empty? recipient-avatars)
-                                       true)))
+                                       (and (not avatar-url) (empty? recipient-avatars))
+                                       (or (not avatar-url) (nil? dm-peer-id)))))
             members-map     @(re-frame/subscribe [:room/members-map id])
             mem-fetching?   @(re-frame/subscribe [:room/members-loading? id])
             mem-tried?      @(re-frame/subscribe [:room/members-attempted? id])
@@ -823,6 +824,23 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
                                    :my-id        my-id
                                    :avatar-url   avatar-url
                                    :name         name})
+              peer-id               (when-not group-dm?
+                                      (or dm-peer-id (:user-id other-user)))
+              peer-status           @(re-frame/subscribe
+                                      [:presence/user peer-id (:presence other-user)])
+              typing-ids            (if (map? typing-raw) (:users typing-raw) typing-raw)
+              others-typing         (filterv #(and (not= % my-id)
+                                                   (or (nil? my-name) (not= % my-name)))
+                                             (or typing-ids []))
+              is-typing?            (and (not is-space?) (boolean (seq others-typing)))
+              typing-names          (when is-typing?
+                                      (mapv #(or (:display-name (get members-map %)) %)
+                                            others-typing))
+              typing-tooltip        (when (seq typing-names)
+                                      (get-status-string
+                                       tr
+                                       [:container.timeline.status.typing]
+                                       typing-names))
               group-members         (when group-dm?
                                       (or (seq recipient-avatars)
                                           (let [peers (mapv (fn [u]
@@ -872,7 +890,8 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
               (merge {:style           {:padding-left (str indent "px")}
                       :class           [(when active? "active")
                                         (when unread? "has-unread")
-                                        (when highlight? "has-highlight")]
+                                        (when highlight? "has-highlight")
+                                        (when is-typing? "is-typing")]
                       :on-pointer-up   #(do
                                           (.preventDefault %)
                                           (.stopPropagation %))
@@ -895,13 +914,13 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
                 [icons/thread]
 
                 (or is-dm? (and (= active-filter "people") (not space-id)))
-                [avatar (cond-> {:id   id
+                [avatar (cond-> {:id   (or peer-id id)
                                  :name final-name
                                  :url  final-avatar
                                  :size 24}
-                          group-dm?       (assoc :is-group? true
-                                                 :group-members group-members)
-                          (not group-dm?) (assoc :status :online))]
+                          group-dm?                        (assoc :is-group? true
+                                                                  :group-members group-members)
+                          (and (not group-dm?) peer-status) (assoc :status peer-status))]
 
                 :else
                 [icons/dynamic-room-hash {:is-public?    (:is-public? security)
@@ -927,6 +946,12 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
                               (.stopPropagation e)
                               (re-frame/dispatch [:rooms/open-settings id]))}
                  [icons/settings {:animate :spin}]]]
+               (when is-typing?
+                 [:div.room-typing-indicator
+                  {:title typing-tooltip}
+                  [:span.room-typing-dot]
+                  [:span.room-typing-dot]
+                  [:span.room-typing-dot]])
                (when has-call?
                  [:div.call-participants.hide-on-desktop
                   (for [p resolved-participants]
@@ -1000,6 +1025,7 @@ need out.
           space?      (or (:is-space? r) (:isSpace r))
           dm?         (or (:is-direct? r) (:isDirect r) (:is-direct r))
           group-dm?   (boolean (or (:isGroupDm r) (:is-group-dm? r)))
+          dm-peer-id  (or (:dmPeerId r) (:dm-peer-id r))
           recip-avs   (or (:recipientAvatars r) (:recipient-avatars r))
           parent-id   (or (:parent-id r) (:isParent r))
           notif-count (or (:notification-count r) (:unreadNotificationsCount r) 0)
@@ -1030,6 +1056,7 @@ need out.
                    :is-space?         space?
                    :is-dm?            dm?
                    :is-group-dm?      group-dm?
+                   :dm-peer-id        dm-peer-id
                    :recipient-avatars recip-avs
                    :is-closed?        (contains? closed-drawers id)
                    :has-call?         (seq call-parts)
