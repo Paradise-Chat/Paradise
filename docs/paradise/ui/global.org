@@ -18,9 +18,9 @@ them collected together
    [clojure.string :as str]
    [reagent.core :as r]
    [paradise.ui.overlays.base :refer [modal-component popover-component context-menu-component]]
+   [paradise.shared.utils.helpers :refer [local-media-url?]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.media.component :refer [media]]
-   ))
+   [paradise.media.component :refer [media]]))
 #+end_src
 
 
@@ -729,11 +729,14 @@ provide an avatar color.
 (def avatar-colors
   ["#5865f2" "#3ba55c" "#faa61a" "#ed4245" "#eb459e" "#9b59b6"])
 
-(defn get-avatar-color [id]
-  (if-not id
-    (first avatar-colors)
-    (let [hash (reduce #(+ %1 (.charCodeAt %2 0)) 0 (str id))]
-      (nth avatar-colors (mod hash (count avatar-colors))))))
+(defn get-avatar-color
+  ([id]
+   (if-not id
+     (first avatar-colors)
+     (let [hash (reduce #(+ %1 (.charCodeAt %2 0)) 0 (str id))]
+       (nth avatar-colors (mod hash (count avatar-colors))))))
+  ([id fallback]
+   (get-avatar-color (or id fallback))))
 #+end_src
 
 ****** Avatar function
@@ -745,23 +748,13 @@ provide an avatar color.
 
 (defonce !broken-urls (r/atom #{}))
 
-(defn get-avatar-color
-  ([id]
-   (if-not id
-     (first avatar-colors)
-     (let [hash (reduce #(+ %1 (.charCodeAt %2 0)) 0 (str id))]
-       (nth avatar-colors (mod hash (count avatar-colors))))))
-  ([id fallback]
-   (get-avatar-color (or id fallback))))
-
 (defn- render-mini-member-avatar [member sub-size]
   (let [m-id       (or (:id member) (:user-id member))
         m-name     (str (or (:name member) (:display-name member) "?"))
         m-url      (some-> (or (:url member) (:avatar-url member)) str)
         broken?    (and m-url (contains? @!broken-urls m-url))
         show-img?  (and m-url (not (str/blank? m-url)) (not broken?))
-        local-url? (and m-url (or (str/starts-with? m-url "blob:")
-                                  (str/starts-with? m-url "data:")))
+        local-url? (and m-url (local-media-url? m-url))
         initial    (if (pos? (count m-name)) (subs m-name 0 1) "?")]
     [:div.avatar-group-member
      {:style {:width            sub-size
@@ -800,8 +793,7 @@ provide an avatar color.
                         (= shape :none) "transparent"
                         group-stack?    "#2b2d31"
                         :else           (get-avatar-color id name))
-        local-url?    (and url-str (or (str/starts-with? url-str "blob:")
-                                       (str/starts-with? url-str "data:")))
+        local-url?    (and url-str (local-media-url? url-str))
         thumb-size    (if (<= size 48) 96 256)
         sub-size      (max 14 (js/Math.round (* size 0.64)))
         [m1 m2]       (take 2 group-members)
