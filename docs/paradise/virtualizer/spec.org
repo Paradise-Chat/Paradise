@@ -21,35 +21,17 @@ outlining the spec for it we can make it easier to digest.
             [virtualizer.worker.ast :as ast]
             [paradise.virtualizer.state :as state]
             [paradise.ui.container.timeline.item :refer [event-tile-render]]
-            [paradise.shared.utils.helpers :refer [format-divider-date
-                                                   process-raw-event
-                                                   sanitize-custom-html
-                                                   linkify-text]]))
+            [paradise.shared.utils.helpers :refer [extract-first-url
+                                                   format-divider-date
+                                                   linkify-text
+                                                   memoized-sanitize
+                                                   process-raw-event]]))
 #+end_src
 
 
 
 
 **** Code
-
-***** Sanitization Cache
-
-#+begin_src clojurescript :tangle ../../../src/paradise/virtualizer/spec.cljs
-(defonce !sanitize-cache (atom {}))
-
-(defn memoized-sanitize [html]
-  (if-let [hit (get @!sanitize-cache html)]
-    hit
-    (let [res (sanitize-custom-html html)]
-      (swap! !sanitize-cache
-             (fn [m]
-               (let [m' (assoc m html res)]
-                 (if (> (count m') 300)
-                   (dissoc m' (first (keys m')))
-                   m'))))
-      res)))
-#+end_src
-
 
 **** ID Helpers
 
@@ -79,11 +61,6 @@ outlining the spec for it we can make it easier to digest.
         (:event_id e)
         (:event-id e)
         (:internal-id e))))
-
-(defn extract-first-url [text]
-  (when text
-    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
-      (str/replace match #"[.,:;!?]$" ""))))
 #+end_src
 
 
