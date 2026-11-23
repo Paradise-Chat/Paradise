@@ -466,6 +466,8 @@ Making sure this is dynamic, but abstract is important for now.
 @import "invites.css";
 @import "creation.css";
 @import "polls.css";
+@import "emotes-manager.css";
+@import "permissions-roles.css";
 
 
 html, body {
@@ -667,6 +669,7 @@ html, body {
 
 
 .desktop-titlebar ~ .app-root,
+.desktop-titlebar ~ .auth-page-container,
 .desktop-titlebar ~ .login-screen,
 .desktop-titlebar ~ .booting-screen {
     height: calc(100vh - 32px) !important;
@@ -858,6 +861,9 @@ when we detatch and reload (basically when you hit control + s to save).
 (defonce root (atom nil))
 
 (defn mount-root []
+  (when (and (exists? js/document) (exists? js/Capacitor))
+    (when-let [doc-el (.-documentElement js/document)]
+      (.setAttribute doc-el "data-platform" (.getPlatform js/Capacitor))))
   (re-frame/dispatch [:ui/switch-theme])
   (re-frame/clear-subscription-cache!)
   (let [container (.getElementById js/document "root")]
