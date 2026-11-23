@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld("paradiseTray", {
         ipcRenderer.invoke("paradise:set-tray-menu", items),
     setTooltip: (tooltip: string) =>
         ipcRenderer.invoke("paradise:set-tray-tooltip", tooltip),
+    setCloseToTray: (enabled: boolean) =>
+        ipcRenderer.invoke("paradise:set-close-to-tray", Boolean(enabled)),
     onAction: (callback: (actionId: string) => void) => {
         const listener = (_event: any, actionId: string) => callback(actionId);
         ipcRenderer.on("paradise:tray-action", listener);
