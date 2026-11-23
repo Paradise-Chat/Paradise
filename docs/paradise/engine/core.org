@@ -27,7 +27,7 @@ and enables us to support multiple protocols and not just Matrix.
             [paradise.shared.client.session-store :as session-store]
             [paradise.shared.registry :as registry]
             [paradise.shared.sci-runner.engine :as sci]
-            [shadow.esm :refer [dynamic-import]]))
+            [paradise.shared.worker-loader :as worker-loader]))
 #+end_src
 
 
