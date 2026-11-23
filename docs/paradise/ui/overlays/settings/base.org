@@ -70,6 +70,35 @@ file.
    "call_voice_threshold"   {:event :settings/hydrate-voice-threshold   :default 0.12     :stage :boot}
    "call_noise_suppression" {:event :settings/hydrate-noise-suppression :default true     :stage :boot}
    "encrypted_search_crawler" {:event :search/hydrate-crawler-enabled   :default true     :stage :login}})
+   "submit_on_enter"          {:event :settings/hydrate-submit-on-enter   :default nil      :stage :boot}
+(defn default-submit-on-enter? []
+  (let [platform (when (exists? Capacitor) (.getPlatform Capacitor))]
+    (not (or (contains? #{"android" "ios"} platform)
+             (and (exists? js/window)
+                  (<= (.-innerWidth js/window) 768)
+                  (exists? js/window.matchMedia)
+                  (.-matches (js/window.matchMedia "(pointer: coarse)")))))))
+
+(re-frame/reg-event-db
+ :settings/hydrate-submit-on-enter
+ (fn [db [_ saved-val]]
+   (assoc db :settings/submit-on-enter
+          (when (boolean? saved-val) saved-val))))
+
+(re-frame/reg-event-fx
+ :settings/set-submit-on-enter
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [val (boolean enabled?)]
+     {:db       (assoc db :settings/submit-on-enter val)
+      :dispatch [:settings/save "submit_on_enter" val]})))
+
+(re-frame/reg-sub
+ :settings/submit-on-enter?
+ (fn [db _]
+   (let [v (:settings/submit-on-enter db)]
+     (if (boolean? v)
+       v
+       (default-submit-on-enter?)))))
 
 (re-frame/reg-event-fx
  :settings/load
