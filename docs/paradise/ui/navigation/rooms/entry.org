@@ -176,8 +176,55 @@ actions, and such. Generally they'll only be visible when hovered.
     .room-item:hover .room-hover-actions {
         display: flex;
     }
-    .room-item:hover .notification-badge {
+    .room-item:hover .notification-badge,
+    .room-item:hover .room-typing-indicator {
         display: none;
+    }
+}
+
+.room-item.is-typing .room-name {
+    padding-right: 36px;
+}
+
+.room-typing-indicator {
+    position: relative;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 5px 7px;
+    margin-right: 8px;
+    border-radius: 10px;
+    background-color: #1e1f22;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+.room-typing-dot {
+    width: 4.5px;
+    height: 4.5px;
+    border-radius: 50%;
+    background-color: #f2f3f5;
+    animation: roomTypingBounce 1.2s infinite ease-in-out;
+}
+
+.room-typing-dot:nth-child(2) {
+    animation-delay: 0.18s;
+}
+
+.room-typing-dot:nth-child(3) {
+    animation-delay: 0.36s;
+}
+
+@keyframes roomTypingBounce {
+    0%, 60%, 100% {
+        transform: translateY(0);
+        opacity: 0.45;
+    }
+    30% {
+        transform: translateY(-2.5px);
+        opacity: 1;
     }
 }
 
