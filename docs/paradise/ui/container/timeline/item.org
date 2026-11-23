@@ -19,7 +19,14 @@ It is convenient to define the actual items that make up a timeline.
             [cljs-workers.core :as main]
             [paradise.shared.client.state :as state]
             [cljs.core.async :refer [go <!]]
-            [paradise.shared.utils.helpers :refer [sanitize-custom-html hiccup->text format-divider-date format-time linkify-text truncate-name]]
+            [paradise.shared.utils.helpers :refer [extract-first-url
+                                                   format-divider-date
+                                                   format-duration-seconds
+                                                   format-time
+                                                   hiccup->text
+                                                   linkify-text
+                                                   memoized-sanitize
+                                                   truncate-name]]
             [paradise.media.component :refer [media media-native]]
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.ui.container.members :refer [profile-popover-trigger]]
@@ -327,20 +334,6 @@ read receipts. This prevents any sort of spamming to the home server.
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
-(def sanitize-cache (atom {}))
-
-(defn memoized-sanitize [html]
-  (if-let [hit (get @sanitize-cache html)]
-    hit
-    (let [res (sanitize-custom-html html)]
-      (swap! sanitize-cache (fn [m]
-                              (let [m' (assoc m html res)]
-                                (if (> (count m') 300)
-                                  (dissoc m' (first (keys m')))
-                                  m'))))
-      res)))
-
-
 (defn- hydrate-sanitized-nodes [nodes]
   (mapv (fn [node]
           (if (vector? node)
@@ -476,12 +469,6 @@ read receipts. This prevents any sort of spamming to the home server.
        [:div.media-caption
         [message-text content]])]))
 
-(defn- format-audio-clock [seconds]
-  (let [s   (max 0 (js/Math.floor (or seconds 0)))
-        m   (quot s 60)
-        rem (mod s 60)]
-    (str m ":" (when (< rem 10) "0") rem)))
-
 (defn- normalize-waveform-bars [raw-wf seed-str bar-count]
   (let [nums (when (sequential? raw-wf)
                (vec (keep #(when (and (number? %) (not (js/isNaN %)))
@@ -607,9 +594,9 @@ read receipts. This prevents any sort of spamming to the home server.
             [icons/music-note {:width "12px" :height "12px"}])
           [:span (truncate-name title-lbl 36)]]
          [:span.audio-time-label
-          (str (format-audio-clock (if (or playing? (pos? cur-sec)) cur-sec dur-sec))
+          (str (format-duration-seconds (if (or playing? (pos? cur-sec)) cur-sec dur-sec))
                (when (and (pos? dur-sec) (or playing? (pos? cur-sec)))
-                 (str " / " (format-audio-clock dur-sec))))]]
+                 (str " / " (format-duration-seconds dur-sec))))]]
 
         (into
          [:div.audio-waveform-track {:on-click seek!}]
@@ -870,11 +857,6 @@ Could be a bit more generic given the insight gleamed
 working on deferred rendered components.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
-(defn extract-first-url [text]
-  (when text
-    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
-      (clojure.string/replace match #"[.,:;!?]$" ""))))
-
 
 (re-frame/reg-event-fx
  :media/url-preview-success
