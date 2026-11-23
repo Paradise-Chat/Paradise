@@ -496,12 +496,16 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
         sort-type    @(re-frame/subscribe [:room/member-sort-type active-room])
         counts       @(re-frame/subscribe [:room/member-counts active-room])
         loading?     @(re-frame/subscribe [:room/members-loading? active-room])
+        attempted?   @(re-frame/subscribe [:room/members-attempted? active-room])
         groups       @(re-frame/subscribe [:room/member-groups active-room])
         group-counts (:counts groups)
         group-labels (:labels groups)
         flat-members (:flat-members groups)]
 
-    (when (and (not loading?) (empty? @(re-frame/subscribe [:room/members active-room])))
+    (when (and active-room
+               (not loading?)
+               (not attempted?)
+               (empty? @(re-frame/subscribe [:room/members active-room])))
       (re-frame/dispatch [:room/fetch-members active-room])
       (re-frame/dispatch [:room/fetch-power-level-tags active-room]))
 
