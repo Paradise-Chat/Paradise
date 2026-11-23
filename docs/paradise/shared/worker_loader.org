@@ -1,0 +1,93 @@
+
+** Worker Protocol Loader
+
+**** Preface
+
+Shared runtime dynamic-import and handler-installation logic used by both the
+engine worker (=paradise.engine.core=) and the media worker pool
+(=paradise.media.core=). Centralizes cache-busting import URL versioning,
+handler snapshot diffing, and namespaced + unqualified handler registration.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../src/paradise/shared/worker_loader.cljs
+(ns ^:virtualizer/skip paradise.shared.worker-loader
+  (:require [cljs-workers.worker :as worker]
+            [cljs.core.async :refer [<! go]]
+            [cljs.core.async.interop :refer-macros [<p!]]
+            [clojure.string :as str]
+            [paradise.shared.registry :as registry]
+            [shadow.esm :refer [dynamic-import]]))
+#+end_src
+
+**** Dynamic Import & Handler Installation
+
+#+begin_src clojurescript :tangle ../../../src/paradise/shared/worker_loader.cljs
+(defn versioned-import-url
+  "Appends a manifest hash or timestamp cache-buster query param when appropriate."
+  [url manifest]
+  (let [hash-str (some-> (:hash manifest) str)
+        local?   (and (string? url)
+                      (or (str/includes? url "://localhost")
+                          (str/includes? url "://127.0.0.1")
+                          (str/includes? url "/local/")))
+        tag      (cond
+                   (seq hash-str) (subs hash-str 0 (min 12 (count hash-str)))
+                   local?         (str (js/Date.now))
+                   :else          nil)]
+    (if (and (string? url) tag)
+      (str url (if (str/includes? url "?") "&v=" "?v=") tag)
+      url)))
+
+(defn install-protocol-handlers!
+  "Registers captured worker handlers under both their unqualified and protocol-namespaced keys."
+  [protocol-name captured]
+  (let [namespaced (into {}
+                         (map (fn [[k f]]
+                                [(keyword protocol-name (name k)) f]))
+                         captured)]
+    (swap! worker/handlers merge captured namespaced)))
+
+(defn ensure-protocol-handlers!
+  "Ensures the protocol's worker module is dynamically imported, diffs and caches
+  any handlers it registers into `!handlers-cache`, and activates them.
+  Optional `:on-before-switch` runs once the registry URL is verified."
+  ([!handlers-cache protocol]
+   (ensure-protocol-handlers! !handlers-cache protocol nil))
+  ([!handlers-cache protocol {:keys [on-before-switch on-loaded]}]
+   (go
+     (<! (registry/ensure-environment!))
+     (try
+       (let [protocol-name (name protocol)
+             proto-kw      (keyword protocol-name)
+             url           (registry/get-engine-url protocol-name)
+             manifest      (registry/get-engine-manifest protocol-name)]
+         (if-not url
+           {:status "error"
+            :msg    (str "Unknown protocol or missing registry URL: " protocol-name)}
+           (do
+             (when on-before-switch
+               (on-before-switch proto-kw))
+             (if-let [cached (get @!handlers-cache proto-kw)]
+               (install-protocol-handlers! protocol-name cached)
+               (let [imp-url  (versioned-import-url url manifest)
+                     before   @worker/handlers
+                     _        (<p! (dynamic-import imp-url))
+                     after    @worker/handlers
+                     captured (into {}
+                                    (keep (fn [[k f]]
+                                            (when (not (identical? (get before k) f))
+                                              [(keyword (name k)) f])))
+                                    after)]
+                 (swap! !handlers-cache assoc proto-kw captured)
+                 (when on-loaded
+                   (on-loaded proto-kw captured))
+                 (install-protocol-handlers! protocol-name captured)))
+             {:status        "success"
+              :protocol-name protocol-name
+              :proto-kw      proto-kw
+              :url           url})))
+       (catch :default e
+         {:status "error"
+          :msg    (or (.-message e) (str e))})))))
+#+end_src
