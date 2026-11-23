@@ -213,14 +213,6 @@ We want to be sure with the reframe components that we don't call unnecessarily.
 locale and dictionary allows us to only ever update strings if we explicitly change the
 displayed language.
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/app.cljs
-(defn- deep-merge-dicts [& maps]
-  (apply merge-with
-         (fn [a b]
-           (if (and (map? a) (map? b))
-             (deep-merge-dicts a b)
-             b))
-         (remove nil? maps)))
-
 (re-frame/reg-sub
  :i18n/locale
  (fn [db _] (:locale db)))
