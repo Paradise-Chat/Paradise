@@ -65,4 +65,22 @@ This allows us to neatly create states and provide a single component to the mai
 (defmethod context-menu-component :plugin-portal [_]
   (fn [{:keys [render-fn] :as props}]
     [render-fn props]))
+
+(defn ^:ui context-menu-items
+  "Renders a list of `{:keys [id label dispatch action class-name icon]}` context menu entries."
+  [items]
+  [:<>
+   (for [{:keys [id label dispatch action class-name icon]} items]
+     ^{:key (or id label)}
+     [:div.context-menu-item
+      {:class    class-name
+       :on-click (fn [e]
+                   (.stopPropagation e)
+                   (when dispatch
+                     (re-frame/dispatch dispatch))
+                   (when action
+                     (action))
+                   (re-frame/dispatch [:ui/close-context-menu]))}
+      (when icon [:span.item-icon icon])
+      [:span.item-label label]])])
 #+end_src
