@@ -26,20 +26,37 @@ live here.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/advanced.cljs
 (defn ^:ui advanced-preferences-view []
   (r/with-let [_ (re-frame/dispatch [:search/refresh-index-status])]
-    (let [tr          @(re-frame/subscribe [:i18n/tr])
-          policy      @(re-frame/subscribe [:settings/media-preview-policy])
-          previews-on? (= policy :on)
-          crawler-on? @(re-frame/subscribe [:settings/encrypted-search-crawler])
-          idx-status  @(re-frame/subscribe [:search/index-status])
-          supported?  (:supported? idx-status)
-          idx-count   (:indexed-events idx-status 0)
-          rooms-done  (:rooms-done idx-status 0)
-          rooms-total (:rooms-total idx-status 0)]
+    (let [tr              @(re-frame/subscribe [:i18n/tr])
+          policy          @(re-frame/subscribe [:settings/media-preview-policy])
+          previews-on?    (= policy :on)
+          submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
+          crawler-on?     @(re-frame/subscribe [:settings/encrypted-search-crawler])
+          idx-status      @(re-frame/subscribe [:search/index-status])
+          supported?      (:supported? idx-status)
+          idx-count       (:indexed-events idx-status 0)
+          rooms-done      (:rooms-done idx-status 0)
+          rooms-total     (:rooms-total idx-status 0)]
       [:<>
        [:div.settings-hub-group
         [:div.settings-hub-group-label
          (tr [:settings.advanced/prefs-subheading])]
         [:div.settings-hub-group-card
+         [:div.settings-card-row.is-toggle
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/submit-on-enter-title])]
+           [:div.settings-row-description
+            (tr [:settings.advanced/submit-on-enter-description])]]
+          [:label.settings-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   (boolean submit-enter?)
+             :on-change #(re-frame/dispatch
+                          [:settings/set-submit-on-enter
+                           (.. % -target -checked)])}]
+           [:div.settings-toggle-track
+            [:div.settings-toggle-knob]]]]
+
          [:div.settings-card-row.is-toggle
           [:div.settings-row-text
            [:div.settings-row-title
