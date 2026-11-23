@@ -23,10 +23,10 @@ and Nostr in both layout modes:
    [clojure.string :as str]
    [paradise.shared.client.session-store :as store]
    [paradise.shared.client.state :as state]
-   [paradise.shared.utils.helpers :refer [extract-metadata
-                                          file->array-buffer
+   [paradise.shared.utils.helpers :refer [file->array-buffer
                                           format-time
                                           get-file
+                                          ok-status?
                                           truncate-name
                                           unregister-file!]]
    [paradise.shared.utils.svg :as icons]
@@ -34,6 +34,7 @@ and Nostr in both layout modes:
    [paradise.ui.container.timeline.hydrator :refer [!local-timeline-data]]
    [paradise.ui.container.timeline.item :refer [event-tile-render]]
    [paradise.ui.global :refer [avatar]]
+   [paradise.ui.input.base :refer [handle-files!]]
    [paradise.ui.input.composer :refer [extract-editor-payload tiptap-component]]
    [paradise.ui.input.drafts :refer [attachment-preview]]
    [paradise.ui.input.voice :refer [voice-recorder-bar]]
@@ -48,9 +49,6 @@ and Nostr in both layout modes:
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/threads.cljs
 (def ^:private forum-overrides-key "forum_room_overrides_v1")
 
-(defn- ok-status? [s]
-  (contains? #{"success" :success} s))
-
 (defn thread-draft-key [room-id thread-id]
   (str room-id "::thread::" thread-id))
 
@@ -64,16 +62,6 @@ and Nostr in both layout modes:
                      (:root-body summary)
                      "")]
         (not-empty (truncate-name (str/replace (str/trim body) #"\s+" " ") 48)))))
-
-(defn- handle-thread-files! [draft-key files]
-  (doseq [raw-file files]
-    (when raw-file
-      (-> (extract-metadata raw-file)
-          (p/then (fn [att]
-                    (when att
-                      (re-frame/dispatch [:composer/add-attachment draft-key att]))))
-          (p/catch (fn [e]
-                     (log/error "Thread attachment metadata error:" e)))))))
 
 (defn- filter-and-sort-forum-items [items query sort-mode]
   (let [q        (str/lower-case (str/trim (str query "")))
@@ -565,13 +553,16 @@ and Nostr in both layout modes:
 (defn ^:ui thread-composer [room-id active-thread tr]
   (r/with-let [!editor           (r/atom nil)
                !recording-voice? (r/atom false)]
-    (let [recording?  @!recording-voice?
-          thread-id   (:thread-id active-thread)
-          draft-key   (thread-draft-key room-id thread-id)
-          attachments @(re-frame/subscribe [:composer/attachments draft-key])
-          loaded-text @(re-frame/subscribe [:composer/loaded-text draft-key])
-          cached-html @(re-frame/subscribe [:composer/cached-html draft-key])
-          context     @(re-frame/subscribe [:input/context draft-key])
+    (let [is-mobile?   @(re-frame/subscribe [:ui/mobile?])
+          recording?   @!recording-voice?
+          thread-id    (:thread-id active-thread)
+          draft-key    (thread-draft-key room-id thread-id)
+          attachments  @(re-frame/subscribe [:composer/attachments draft-key])
+          loaded-text  @(re-frame/subscribe [:composer/loaded-text draft-key])
+          cached-html  @(re-frame/subscribe [:composer/cached-html draft-key])
+          has-content? @(re-frame/subscribe [:composer/has-content? draft-key])
+          submit-enter? @(re-frame/subscribe [:settings/submit-on-enter?])
+          context      @(re-frame/subscribe [:input/context draft-key])
           submit!     (fn []
                         (when-let [ed @!editor]
                           (let [{:keys [text html] :as payload} (extract-editor-payload ed)
@@ -626,13 +617,14 @@ and Nostr in both layout modes:
                                                       []
                                                       (range (or (.-length files) 0)))]
                                     (when (seq fvec)
-                                      (handle-thread-files! draft-key fvec))
+                                      (handle-files! draft-key fvec))
                                     (set! (.-value (.-target e)) "")))}]
             [icons/plus]]
            [:div.timeline-editor-container
             [:> tiptap-component
              #js {:activeId      draft-key
                   :key           (str "thread-ed-" draft-key)
+                  :enterSubmits  submit-enter?
                   :loadedText    loaded-text
                   :cachedHtml    cached-html
                   :onChange      (fn [text html]
@@ -646,21 +638,23 @@ and Nostr in both layout modes:
                                                       []
                                                       (range (or (.-length files) 0)))]
                                      (when (seq fvec)
-                                       (handle-thread-files! draft-key fvec))))
+                                       (handle-files! draft-key fvec))))
                   :placeholder   (tr [:container.threads/reply-placeholder])
                   :onEditorReady #(reset! !editor %)}]]
-           [:button.timeline-mic-btn
-            {:type     "button"
-             :title    (tr [:composer/record-voice-tooltip])
-             :on-click #(reset! !recording-voice? true)}
-            [icons/mic {:width "20px" :height "20px"}]]
-           [:button.timeline-send-btn
-            {:type     "button"
-             :on-click (fn [e]
-                         (.preventDefault e)
-                         (.stopPropagation e)
-                         (submit!))}
-            [icons/send]]])]])))
+           (when (or (not is-mobile?) (not has-content?))
+             [:button.timeline-mic-btn
+              {:type     "button"
+               :title    (tr [:composer/record-voice-tooltip])
+               :on-click #(reset! !recording-voice? true)}
+              [icons/mic {:width "20px" :height "20px"}]])
+           (when (or (not is-mobile?) has-content?)
+             [:button.timeline-send-btn
+              {:type     "button"
+               :on-click (fn [e]
+                           (.preventDefault e)
+                           (.stopPropagation e)
+                           (submit!))}
+              [icons/send]])])]])))
 
 (defn ^:ui thread-conversation-view
   ([room-id active-thread tr]
@@ -758,10 +752,11 @@ and Nostr in both layout modes:
     (let [draft-key   (forum-post-draft-key room-id)
           post-title  (:forum-post-title room-state "")
           posting?    (:forum-posting? room-state false)
-          attachments @(re-frame/subscribe [:composer/attachments draft-key])
-          loaded-text @(re-frame/subscribe [:composer/loaded-text draft-key])
-          cached-html @(re-frame/subscribe [:composer/cached-html draft-key])
-          submit!     (fn []
+          attachments   @(re-frame/subscribe [:composer/attachments draft-key])
+          loaded-text   @(re-frame/subscribe [:composer/loaded-text draft-key])
+          cached-html   @(re-frame/subscribe [:composer/cached-html draft-key])
+          submit-enter? @(re-frame/subscribe [:settings/submit-on-enter?])
+          submit!       (fn []
                         (when-let [ed @!editor]
                           (let [{:keys [text html] :as payload} (extract-editor-payload ed)
                                 can-post? (and (not posting?)
@@ -810,13 +805,14 @@ and Nostr in both layout modes:
                                                     []
                                                     (range (or (.-length files) 0)))]
                                   (when (seq fvec)
-                                    (handle-thread-files! draft-key fvec))
+                                    (handle-files! draft-key fvec))
                                   (set! (.-value (.-target e)) "")))}]
           [icons/plus]]
          [:div.timeline-editor-container
           [:> tiptap-component
            #js {:activeId      draft-key
                 :key           (str "forum-ed-" draft-key)
+                :enterSubmits  submit-enter?
                 :loadedText    loaded-text
                 :cachedHtml    cached-html
                 :onChange      (fn [text html]
@@ -830,7 +826,7 @@ and Nostr in both layout modes:
                                                     []
                                                     (range (or (.-length files) 0)))]
                                    (when (seq fvec)
-                                     (handle-thread-files! draft-key fvec))))
+                                     (handle-files! draft-key fvec))))
                 :placeholder   (tr [:container.threads/post-body-placeholder])
                 :onEditorReady #(reset! !editor %)}]]]]
 
