@@ -309,6 +309,13 @@ component slots
                plugin-refs)]
      {:dispatch-n (vec dispatches)})))
 
+(defn- cleanup-plugin-resources! [plugin-id]
+  (when plugin-id
+    (remove-css! (str "plugin-css-" (name plugin-id)))
+    (paradise.shared.client.registry/remove-plugin-overrides! plugin-id)
+    (paradise.shared.client.registry/remove-plugin-slots! plugin-id)
+    (rf/dispatch [:i18n/remove-plugin-dictionary plugin-id])))
+
 (rf/reg-event-fx
  :plugins/toggle-plugin
  (fn [{:keys [db]} [_ url enabled?]]
@@ -316,10 +323,8 @@ component slots
          new-disabled (if enabled? (disj disabled url) (conj disabled url))
          plugin       (->> (:plugins/active db) (vals) (filter #(= (:source-url %) url)) first)
          plugin-id    (:id plugin)]
-     (when (and (not enabled?) plugin-id)
-       (remove-css! (str "plugin-css-" (name plugin-id)))
-       (paradise.shared.client.registry/remove-plugin-overrides! plugin-id)
-       (paradise.shared.client.registry/remove-plugin-slots! plugin-id))
+     (when (not enabled?)
+       (cleanup-plugin-resources! plugin-id))
 
      {:db (assoc db :plugins/disabled-urls new-disabled)
       :fx (cond-> [[:dispatch [:settings/save "disabled_plugin_urls" (clj->js (vec new-disabled))]]]
@@ -356,10 +361,7 @@ component slots
          new-urls     (vec (remove #(= % url) current-urls))
          plugin       (->> (:plugins/active db) (vals) (filter #(= (:source-url %) url)) first)
          plugin-id    (:id plugin)]
-     (when plugin-id
-       (remove-css! (str "plugin-css-" (name plugin-id)))
-       (paradise.shared.client.registry/remove-plugin-overrides! plugin-id)
-       (paradise.shared.client.registry/remove-plugin-slots! plugin-id))
+     (cleanup-plugin-resources! plugin-id)
 
      {:db (-> db
               (assoc :plugins/installed-urls new-urls)
