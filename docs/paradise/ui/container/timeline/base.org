@@ -361,7 +361,7 @@ uses the mini-buffer. A nice status indicator.
  :sdk/clear-stale-typing
  (fn [db [_ room-id]]
    (let [data (get-in db [:typing-users room-id])]
-     (if (and data (> (- (js/Date.now) (:last-update data)) 6000))
+     (if (and data (> (- (js/Date.now) (:last-update data)) 30000))
        (update db :typing-users dissoc room-id)
        db))))
 
@@ -372,17 +372,23 @@ uses the mini-buffer. A nice status indicator.
      (if (empty? users)
        {:db (update db :typing-users dissoc room-id)}
        {:db (assoc-in db [:typing-users room-id]
-                      {:users users
+                      {:users       users
                        :last-update (js/Date.now)})
-        :dispatch-later [{:ms 7000
+        :dispatch-later [{:ms       31000
                           :dispatch [:sdk/clear-stale-typing room-id]}]}))))
 
 (re-frame/reg-sub
+ :typing/map
+ (fn [db _]
+   (get db :typing-users {})))
+
+(re-frame/reg-sub
  :room/typing-users
- (fn [db [_ room-id]]
-   (let [data (get-in db [:typing-users room-id])]
+ :<- [:typing/map]
+ (fn [typing-map [_ room-id]]
+   (let [data (get typing-map room-id)]
      (if (and data
-              (< (- (js/Date.now) (:last-update data)) 6000))
+              (< (- (js/Date.now) (:last-update data)) 30000))
        (:users data)
        []))))
 #+end_src
