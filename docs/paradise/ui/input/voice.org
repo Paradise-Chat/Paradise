@@ -22,7 +22,7 @@ reasonably just provide handling for different formats in the core.
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
    [paradise.shared.client.state :as state]
-   [paradise.shared.utils.helpers :refer [uint8->base64]]
+   [paradise.shared.utils.helpers :refer [format-duration-ms uint8->base64]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.container.call.audio-processor :as audio-processor]
    [paradise.ui.container.call.runtime :as call-rtc]
@@ -396,12 +396,6 @@ reasonably just provide handling for different formats in the core.
                   (max 0.08 (min 1.0 (/ v peak)))))
               (range target-len))))))
 
-(defn- format-rec-timer [ms]
-  (let [sec (max 0 (quot (or ms 0) 1000))
-        m   (quot sec 60)
-        s   (mod sec 60)]
-    (str m ":" (when (< s 10) "0") s)))
-
 (defn- acquire-voice-stream! [device-id]
   (let [base-audio {:echoCancellation true
                     :noiseSuppression false
@@ -643,7 +637,7 @@ reasonably just provide handling for different formats in the core.
 
        [:div.voice-rec-status
         [:span.voice-rec-dot]
-        [:span.voice-rec-timer (format-rec-timer elapsed-ms)]]
+        [:span.voice-rec-timer (format-duration-ms elapsed-ms)]]
 
        (into
         [:div.voice-rec-waveform]
