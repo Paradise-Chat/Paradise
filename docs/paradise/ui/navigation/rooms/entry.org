@@ -22,7 +22,7 @@ So this is where we'll start allowing that logic to live.
    [paradise.shared.client.state :as state]
    [cljs.core.async :refer [go <!]]
    [taoensso.timbre :as log]
-   [paradise.shared.utils.helpers :refer [resolve-dm-display]]
+   [paradise.shared.utils.helpers :refer [get-status-string resolve-dm-display]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar long-press-props]]))
 #+end_src
