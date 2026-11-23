@@ -72,6 +72,7 @@ file.
    "call_noise_suppression"   {:event :settings/hydrate-noise-suppression :default true     :stage :boot}
    "submit_on_enter"          {:event :settings/hydrate-submit-on-enter   :default nil      :stage :boot}
    "close_to_tray"            {:event :settings/hydrate-close-to-tray     :default true     :stage :boot}
+   "user_presence"            {:event :presence/hydrate-own-status        :default "online" :stage :login}
    "encrypted_search_crawler" {:event :search/hydrate-crawler-enabled     :default true     :stage :login}})
 
 (defn default-submit-on-enter? []
