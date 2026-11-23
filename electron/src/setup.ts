@@ -1036,6 +1036,7 @@ export class ElectronCapacitorApp {
     private SplashScreen: CapacitorSplashScreen | null = null;
     private TrayIcon: Tray | null = null;
     private CustomTrayItems: DynamicTrayItem[] = [];
+    private CloseToTrayEnabled = true;
     private CapacitorFileConfig: CapacitorElectronConfig;
     private TrayMenuTemplate: (MenuItem | MenuItemConstructorOptions)[] = [
         new MenuItem({ label: "Quit App", role: "quit" }),
@@ -1099,6 +1100,14 @@ export class ElectronCapacitorApp {
 
     getCustomURLScheme(): string {
         return this.customScheme;
+    }
+
+    getCloseToTrayEnabled(): boolean {
+        return this.CloseToTrayEnabled;
+    }
+
+    setCloseToTrayEnabled(enabled: boolean): void {
+        this.CloseToTrayEnabled = Boolean(enabled);
     }
 
     updateTrayMenu(customItems: DynamicTrayItem[] = this.CustomTrayItems): void {
@@ -1332,6 +1341,15 @@ export class ElectronCapacitorApp {
                     this.TrayIcon.setToolTip(tooltip || app.getName());
                 }
                 return true;
+            }
+        );
+
+        ipcMain.removeHandler("paradise:set-close-to-tray");
+        ipcMain.handle(
+            "paradise:set-close-to-tray",
+            (_event, enabled: boolean) => {
+                this.setCloseToTrayEnabled(Boolean(enabled));
+                return this.getCloseToTrayEnabled();
             }
         );
 
