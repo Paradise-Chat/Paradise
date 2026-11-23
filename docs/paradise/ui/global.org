@@ -950,7 +950,14 @@ provide an avatar color.
                  :on-error #(swap! !broken-urls conj url-str)}]))
 
            (when (and status (not is-group?))
-             [:div.avatar-status {:class (kname status)}])])))
+             (when-let [norm-status (normalize-presence status)]
+               (let [size-cls (cond
+                                (<= size 26) "status-sm"
+                                (<= size 44) "status-md"
+                                :else        "status-lg")]
+                 [:div.avatar-status
+                  {:class [(kname norm-status) size-cls]
+                   :title (presence-label norm-status)}])))])))
 #+end_src
 
 
