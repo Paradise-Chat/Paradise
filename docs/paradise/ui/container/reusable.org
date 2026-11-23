@@ -93,8 +93,17 @@ so we'll keep them nicely collected here.
         [:button.header-icon-btn
          {:title (tr [:container.header/search])
           :class (when (= side-panel :search) "active")
-          :on-click #(re-frame/dispatch [:container/set-side-panel :search])}
+          :on-click #(re-frame/dispatch [:container/set-side-panel
+                                         (if (= side-panel :search) nil :search)])}
          [icons/search]]
+
+        (when (and (or (not is-dm?) is-group-dm?)
+                   (not= main-focus :thread))
+          [:button.header-icon-btn
+           {:title    (tr [:container.header/threads])
+            :class    (when (= side-panel :threads) "active")
+            :on-click #(re-frame/dispatch [:threads/toggle-panel active-id])}
+           [icons/thread]])
 
         [:button.header-icon-btn
          {:title (tr [:container.header/pinned-messages])
