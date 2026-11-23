@@ -293,6 +293,7 @@ be used.
          [:div.inline-editor-box
           [:> tiptap-component
            #js {:activeId      active-id
+                :enterSubmits  true
                 :loadedText    initial-text
                 :onEditorReady #(reset! !editor %)
                 :onSend        (fn [_ _] (save-edit!))}]]
@@ -316,35 +317,65 @@ Ideally, we should break this apart more later.
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
-(defn ^:ui timeline-send-button [{:keys [submit-message! active-id]}]
+(defn ^:ui timeline-send-button [{:keys [submit-message! active-id class]}]
   [:button.timeline-send-btn
-   {:on-click (fn [e]
+   {:type     "button"
+    :class    class
+    :on-click (fn [e]
                 (.preventDefault e)
                 (.stopPropagation e)
                 (submit-message!))}
    [plugins/plugin-slot :composer-send {:room-id active-id}]
    [icons/send]])
 
-(defn ^:ui timeline-emoji-button [{:keys [on-click room-id]}]
+(defn ^:ui timeline-emoji-button [{:keys [on-click active? room-id]}]
   [:button.timeline-emoji-btn
-   {:on-click (fn [e]
+   {:type     "button"
+    :class    (when active? "is-active")
+    :on-click (fn [e]
                 (.stopPropagation e)
                 (when on-click (on-click)))}
    [icons/smiley]
    [plugins/plugin-slot :composer-emojis {:room-id room-id}]])
 
 (defn ^:ui message-input []
-  (r/with-let [!editor      (r/atom nil)
-               !sug-command (r/atom nil)]
+  (r/with-let [!editor              (r/atom nil)
+               !sug-command         (r/atom nil)
+               !recording-voice?    (r/atom false)
+               !mobile-actions-open? (r/atom false)
+               !rec-room            (r/atom nil)]
     (fn []
       (let [active-id       @(re-frame/subscribe [:rooms/active-id])
+            _               (when (not= @!rec-room active-id)
+                              (reset! !rec-room active-id)
+                              (when @!mobile-actions-open?
+                                (reset! !mobile-actions-open? false))
+                              (when @!recording-voice?
+                                (reset! !recording-voice? false)))
+            is-mobile?      @(re-frame/subscribe [:ui/mobile?])
+            recording?      @!recording-voice?
+            tray-open?      @!mobile-actions-open?
             uploading?      @(re-frame/subscribe [:input/uploading?])
             attachments     @(re-frame/subscribe [:composer/attachments active-id])
             loaded-text     @(re-frame/subscribe [:composer/loaded-text active-id])
             cached-html     @(re-frame/subscribe [:composer/cached-html active-id])
+            has-content?    @(re-frame/subscribe [:composer/has-content? active-id])
+            submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
             context         @(re-frame/subscribe [:input/context active-id])
             picker-open?    (inline-emoji-open?)
             tr              @(re-frame/subscribe [:i18n/tr])
+            on-pick-files!  (fn [e]
+                              (let [files      (.. e -target -files)
+                                    file-array (reduce (fn [acc i]
+                                                         (if-let [f (aget files i)]
+                                                           (conj acc f)
+                                                           acc))
+                                                       []
+                                                       (range (or (.-length files) 0)))]
+                                (reset! !mobile-actions-open? false)
+                                (when (seq file-array)
+                                  (handle-files! active-id file-array))
+                                (set! (.-value (.-target e)) "")))
             submit-message! (fn []
                               (when-let [ed @!editor]
                                 (let [{:keys [text html] :as payload} (extract-editor-payload ed)
@@ -353,11 +384,40 @@ Ideally, we should break this apart more later.
                                                     (seq attachments))]
                                   (if can-send?
                                     (do
+                                      (reset! !mobile-actions-open? false)
                                       (re-frame/dispatch [:composer/submit active-id payload])
                                       (-> ed .chain .clearContent .run)
                                       true)
-                                    false))))]
+                                    false))))
+            editor-node     [:> tiptap-component
+                             #js {:activeId          active-id
+                                  :key               (str "editor-" active-id)
+                                  :enterSubmits      submit-enter?
+                                  :loadedText        loaded-text
+                                  :cachedHtml        cached-html
+                                  :onChange          (fn [text html]
+                                                       (when @!mobile-actions-open?
+                                                         (reset! !mobile-actions-open? false))
+                                                       (re-frame/dispatch
+                                                        [:composer/on-change active-id text html]))
+                                  :onSend            (fn [_ _] (submit-message!))
+                                  :onFiles           (fn [files]
+                                                       (let [file-array
+                                                             (reduce
+                                                              (fn [acc i]
+                                                                (if-let [f (aget files i)]
+                                                                  (conj acc f)
+                                                                  acc))
+                                                              []
+                                                              (range (or (.-length files) 0)))]
+                                                         (when (seq file-array)
+                                                           (handle-files! active-id file-array))))
+                                  :placeholder       (tr [:composer/placeholder])
+                                  :onEditorReady     #(reset! !editor %)
+                                  :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
+                                  :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
         [:div.timeline-input-outer
+         {:class (when is-mobile? "is-mobile-composer")}
          [suggestion-menu]
          (when picker-open?
            [emoji-sticker-board
@@ -392,70 +452,127 @@ Ideally, we should break this apart more later.
                [:span (tr [:composer/replying-to] [sender-name])]]
               [:button.context-cancel-btn
                {:on-click #(re-frame/dispatch [:input/clear-context active-id])} [icons/exit]]]))
-         [:div.timeline-input-wrapper
-          (when (seq attachments)
-            [:div.composer-attachments
-             (doall
-              (map-indexed (fn [idx att]
-                             ^{:key (str "att-" idx)}
-                             [attachment-preview active-id att idx])
-                           attachments))])
-          (when uploading?
-            ^{:key "upload-indicator"}
-            [:div.upload-indicator
-             [:span.upload-text (tr [:composer/uploading])]
-             [:div.upload-progress-bar [:div.upload-progress-fill]]])
-          ^{:key "composer-input-row"}
-          [:div.timeline-input-row
-           [:label.timeline-upload-btn
-            {:title (tr [:composer/upload-tooltip])}
-            [:input {:type      "file"
-                     :multiple  true
-                     :style     {:display "none"}
-                     :on-change (fn [e]
-                                  (let [files      (.. e -target -files)
-                                        file-array (reduce (fn [acc i]
-                                                             (if-let [f (aget files i)]
-                                                               (conj acc f)
-                                                               acc))
-                                                           []
-                                                           (range (or (.-length files) 0)))]
-                                    (when (seq file-array)
-                                      (handle-files! active-id file-array))
-                                    (set! (.-value (.-target e)) "")))}]
-            [icons/plus]]
-           [:div.timeline-editor-container
-            [:> tiptap-component
-             #js {:activeId          active-id
-                  :key               (str "editor-" active-id)
-                  :loadedText        loaded-text
-                  :cachedHtml        cached-html
-                  :onChange          (fn [text html]
-                                       (re-frame/dispatch [:composer/on-change active-id text html]))
-                  :onSend            (fn [_ _] (submit-message!))
-                  :onFiles           (fn [files]
-                                       (let [file-array (reduce (fn [acc i]
-                                                                  (if-let [f (aget files i)]
-                                                                    (conj acc f)
-                                                                    acc))
-                                                                []
-                                                                (range (or (.-length files) 0)))]
-                                         (when (seq file-array)
-                                           (handle-files! active-id file-array))))
-                  :placeholder       (tr [:composer/placeholder])
-                  :onEditorReady     #(reset! !editor %)
-                  :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
-                  :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
-           [plugins/plugin-slot :composer-actions {:room-id active-id}]
-           [timeline-emoji-button {:on-click #(if picker-open?
-                                                (re-frame/dispatch [:ui/close-popover])
-                                                (re-frame/dispatch [:ui/open-popover :inline-emoji {}]))
-                                   :active?  picker-open?
-                                   :room-id  active-id}]
-           [timeline-send-button {:submit-message! submit-message!
-                                  :active-id       active-id
-                                  :editor          @!editor
-                                  :attachments     attachments}]]]]))))
+         (if is-mobile?
+           [:<>
+            (when (or (seq attachments) uploading?)
+              [:div.mobile-composer-staging
+               (when (seq attachments)
+                 [:div.composer-attachments
+                  (doall
+                   (map-indexed (fn [idx att]
+                                  ^{:key (str "att-" idx)}
+                                  [attachment-preview active-id att idx])
+                                attachments))])
+               (when uploading?
+                 [:div.upload-indicator
+                  [:span.upload-text (tr [:composer/uploading])]
+                  [:div.upload-progress-bar [:div.upload-progress-fill]]])])
+            (when tray-open?
+              [:<>
+               [:div.mobile-composer-tray-backdrop
+                {:on-click #(reset! !mobile-actions-open? false)}]
+               [:div.mobile-composer-tray
+                [:label.mobile-tray-action
+                 [:input {:type      "file"
+                          :multiple  true
+                          :style     {:display "none"}
+                          :on-change on-pick-files!}]
+                 [:span.mobile-tray-icon [icons/file {:width "18px" :height "18px"}]]
+                 [:span.mobile-tray-label (tr [:composer/upload-tooltip])]]
+                [:button.mobile-tray-action
+                 {:type     "button"
+                  :on-click (fn []
+                              (reset! !mobile-actions-open? false)
+                              (re-frame/dispatch [:ui/open-modal :create-poll {:room-id active-id}]))}
+                 [:span.mobile-tray-icon [icons/poll {:width "18px" :height "18px"}]]
+                 [:span.mobile-tray-label (tr [:composer.polls/modal-title])]]
+                [:div.mobile-tray-plugins
+                 {:on-click #(reset! !mobile-actions-open? false)}
+                 [plugins/plugin-slot :composer-actions {:room-id active-id}]]]])
+            (if recording?
+              [:div.timeline-input-wrapper.is-mobile-voice
+               [voice-recorder-bar
+                {:room-id  active-id
+                 :on-close #(reset! !recording-voice? false)}]]
+              [:div.mobile-composer-bar
+               [:button.mobile-composer-plus-btn
+                {:type     "button"
+                 :class    (when tray-open? "is-open")
+                 :title    (tr [:composer/upload-tooltip])
+                 :on-click (fn [e]
+                             (.stopPropagation e)
+                             (when picker-open?
+                               (re-frame/dispatch [:ui/close-popover]))
+                             (swap! !mobile-actions-open? not))}
+                [icons/plus {:width "20px" :height "20px"}]]
+               [:div.mobile-composer-pill
+                [:div.timeline-editor-container
+                 editor-node]
+                [timeline-emoji-button
+                 {:on-click (fn []
+                              (reset! !mobile-actions-open? false)
+                              (if picker-open?
+                                (re-frame/dispatch [:ui/close-popover])
+                                (re-frame/dispatch [:ui/open-popover :inline-emoji {}])))
+                  :active?  picker-open?
+                  :room-id  active-id}]]
+               (if has-content?
+                 [timeline-send-button {:submit-message! submit-message!
+                                        :active-id       active-id
+                                        :class           "is-mobile-cta"}]
+                 [:button.timeline-mic-btn.is-mobile-cta
+                  {:type     "button"
+                   :title    (tr [:composer/record-voice-tooltip])
+                   :on-click (fn []
+                               (reset! !mobile-actions-open? false)
+                               (reset! !recording-voice? true))}
+                  [icons/mic {:width "20px" :height "20px"}]])])]
+           [:div.timeline-input-wrapper
+            (when (seq attachments)
+              [:div.composer-attachments
+               (doall
+                (map-indexed (fn [idx att]
+                               ^{:key (str "att-" idx)}
+                               [attachment-preview active-id att idx])
+                             attachments))])
+            (when uploading?
+              ^{:key "upload-indicator"}
+              [:div.upload-indicator
+               [:span.upload-text (tr [:composer/uploading])]
+               [:div.upload-progress-bar [:div.upload-progress-fill]]])
+            ^{:key "composer-input-row"}
+            (if recording?
+              [voice-recorder-bar
+               {:room-id  active-id
+                :on-close #(reset! !recording-voice? false)}]
+              [:div.timeline-input-row
+               [:label.timeline-upload-btn
+                {:title (tr [:composer/upload-tooltip])}
+                [:input {:type      "file"
+                         :multiple  true
+                         :style     {:display "none"}
+                         :on-change on-pick-files!}]
+                [icons/plus]]
+               [:button.timeline-poll-btn
+                {:type     "button"
+                 :title    (tr [:composer/create-poll-tooltip])
+                 :on-click #(re-frame/dispatch [:ui/open-modal :create-poll {:room-id active-id}])}
+                [icons/poll {:width "20px" :height "20px"}]]
+               [:div.timeline-editor-container
+                editor-node]
+               [plugins/plugin-slot :composer-actions {:room-id active-id}]
+               [:button.timeline-mic-btn
+                {:type     "button"
+                 :title    (tr [:composer/record-voice-tooltip])
+                 :on-click #(reset! !recording-voice? true)}
+                [icons/mic {:width "20px" :height "20px"}]]
+               [timeline-emoji-button {:on-click #(if picker-open?
+                                                    (re-frame/dispatch [:ui/close-popover])
+                                                    (re-frame/dispatch [:ui/open-popover :inline-emoji {}]))
+                                       :active?  picker-open?
+                                       :room-id  active-id}]
+               [timeline-send-button {:submit-message! submit-message!
+                                      :active-id       active-id}]])])]))))
 #+end_src
 
 
