@@ -15,7 +15,7 @@ sizeable item namespace.
 (ns paradise.ui.overlays.messages
   (:require
    [re-frame.core :as re-frame]
-   [paradise.ui.overlays.base :refer [context-menu-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items]]
    [paradise.shared.utils.svg :as icons]
    [paradise.shared.client.state :as state]
    [cljs-workers.core :as main]
@@ -113,21 +113,10 @@ sizeable item namespace.
 **** Context Menu
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/messages.cljs
-(defn ^:ui message-context-menu-content [{:keys [item active-room my-id x y close-fn]}]
+(defn ^:ui message-context-menu-content [{:keys [item active-room my-id x y]}]
   (let [tr    @(re-frame/subscribe [:i18n/tr])
         items (build-message-actions item active-room my-id x y tr)]
-    [:<>
-     (for [{:keys [id label dispatch class-name icon]} items]
-       ^{:key (or id label)}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
-                     (.stopPropagation e)
-                     (when dispatch
-                       (re-frame/dispatch dispatch))
-                     (re-frame/dispatch [:ui/close-context-menu]))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+    [context-menu-items items]))
 
 
 (defmethod context-menu-component :message-actions [_]
