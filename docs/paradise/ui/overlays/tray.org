@@ -28,6 +28,7 @@ matching the ~key_handler~ design.
 (ns paradise.ui.overlays.tray
   (:require
    [paradise.shared.client.key-handler :as key-handler]
+   [paradise.shared.utils.helpers :refer [normalize-id]]
    [re-frame.core :as re-frame]
    [re-frame.db :as db]))
 #+end_src
@@ -42,11 +43,6 @@ pure data (receiving only that section's own small state map rather than full
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/tray.cljs
 (defn- get-tray ^js []
   (.-paradiseTray js/globalThis))
-
-(defn- normalize-id [id]
-  (if (keyword? id)
-    (subs (str id) 1)
-    (str id)))
 
 (defmulti tray-section
   (fn [section-id _section-state] section-id))
