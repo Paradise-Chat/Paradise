@@ -405,21 +405,29 @@ so we stick with what the complex component expects.
 .tiptap-editor-container,
 .tiptap-editor-container > div {
     width: 100%;
+    min-width: 0;
     display: block;
 }
 
 .tiptap-editor-surface {
-    padding: 10px 16px;
+    padding: 10px 12px;
     color: #dbdee1;
     font-size: 0.95rem;
+    line-height: 1.4;
 }
 
+.ProseMirror,
 .prosemirror {
-    min-height: 24px;
-    max-height: 400px;
+    min-height: 22px;
+    max-height: 35dvh;
     overflow-y: auto;
+    overflow-x: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     outline: none;
     cursor: text;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
 .tiptap-editor-surface p {
@@ -429,6 +437,10 @@ so we stick with what the complex component expects.
 .tiptap-editor-surface p.is-editor-empty:first-child::before {
     content: attr(data-placeholder);
     float: left;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: #6d6f78;
     pointer-events: none;
     height: 0;
@@ -500,18 +512,35 @@ so we stick with what the complex component expects.
     to { opacity: 1; }
 }
 
-::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+@media (min-width: 769px) {
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #45475a;
+        border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #585b70;
+    }
 }
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-::-webkit-scrollbar-thumb {
-    background: #45475a;
-    border-radius: 10px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #585b70;
+
+@media (max-width: 768px) {
+    .ProseMirror,
+    .prosemirror {
+        max-height: 28dvh;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+    }
+    .ProseMirror::-webkit-scrollbar,
+    .prosemirror::-webkit-scrollbar {
+        display: none;
+        width: 0;
+        height: 0;
+    }
 }
 #+end_src
