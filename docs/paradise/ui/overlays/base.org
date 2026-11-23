@@ -8,7 +8,7 @@ This is where we define our global reusables. They're using multi-methods for ne
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/base.cljs
 (ns paradise.ui.overlays.base
-(:require))
+  (:require [re-frame.core :as re-frame]))
 #+end_src
 
 
