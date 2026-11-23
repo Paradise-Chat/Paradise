@@ -132,7 +132,10 @@ and the tab completion.
      #(re-frame/dispatch [:suggestion/set-index %])
      (fn [raw-item]
        (when-let [cmd @!active-command]
-         (let [selected-item (if (= type :emoji) (second raw-item) raw-item)]
+         (let [selected-item (if (= type :emoji)
+                               (let [[sc item] raw-item]
+                                 (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
+                               raw-item)]
            (cmd #js {:props selected-item})))))))
 #+end_src
 
@@ -143,27 +146,6 @@ and the tab completion.
 ****** Note: these return a JS obj and can't be def ^:ui
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/autocomplete.cljs
-(defonce !active-command (atom nil))
-
-(defn handle-suggestion-keydown [^js props type]
-  (let [e       (.-event props)
-        room-id @(re-frame/subscribe [:rooms/active-id])
-        state   @(re-frame/subscribe [:suggestion/state])
-        items   (if (= type :emoji)
-                  @(re-frame/subscribe [:emoji/filtered-suggestions])
-                  @(re-frame/subscribe [:mention/filtered-users room-id]))
-        idx     (or (:index state) 0)]
-    (handle-list-navigation
-     e items idx
-     #(re-frame/dispatch [:suggestion/set-index %])
-     (fn [raw-item]
-       (when-let [cmd @!active-command]
-         (let [selected-item (if (= type :emoji)
-                               (let [[sc item] raw-item]
-                                 (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
-                               raw-item)]
-           (cmd #js {:props selected-item})))))))
-
 (defn emoji-suggestion-options []
   #js {:char    ":"
        :command (fn [^js props]
