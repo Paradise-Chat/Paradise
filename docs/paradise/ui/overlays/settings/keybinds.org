@@ -95,6 +95,7 @@ For how they are handled and implemented that is in key_handler.
                _              (attach-keybind-listener! on-key-down)]
     (let [tr                @(re-frame/subscribe [:i18n/tr])
           keybinds          @(re-frame/subscribe [:settings/resolved-keybinds])
+          submit-enter?     @(re-frame/subscribe [:settings/submit-on-enter?])
           global-supported? (kh/global-shortcuts-supported?)]
       [:div.settings-tab-content
        [:p.settings-subview-lead
@@ -103,6 +104,26 @@ For how they are handled and implemented that is in key_handler.
        (when global-supported?
          [:p.settings-subview-lead
           (tr [:settings.keybinds/global-hint])])
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr [:settings.advanced/prefs-subheading])]
+        [:div.settings-hub-group-card
+         [:div.settings-card-row.is-toggle
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/submit-on-enter-title])]
+           [:div.settings-row-description
+            (tr [:settings.advanced/submit-on-enter-description])]]
+          [:label.settings-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   (boolean submit-enter?)
+             :on-change #(re-frame/dispatch
+                          [:settings/set-submit-on-enter
+                           (.. % -target -checked)])}]
+           [:div.settings-toggle-track
+            [:div.settings-toggle-knob]]]]]]
 
        [:div.settings-hub-group
         [:div.settings-hub-group-header
