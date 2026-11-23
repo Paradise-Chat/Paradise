@@ -57,18 +57,26 @@ the repo.
              (fn [resolve]
                (go
                  (if (:engine-config pointer)
-                   (do (swap! !target-atom assoc item-kw pointer)
-                       (resolve true))
+                   (let [i18n-path (:i18n pointer)
+                         enriched  (cond-> pointer
+                                     (and (string? i18n-path) (nil? (:i18n-url pointer)))
+                                     (assoc :i18n-url i18n-path))]
+                     (swap! !target-atom assoc item-kw enriched)
+                     (resolve true))
                    (let [url (:manifest-url pointer)]
                      (if url
                        (if-let [manifest (<! (fetch-edn url))]
                          (let [asset-path (:path manifest)]
                            (if (string? asset-path)
-                             (let [abs-path (resolve-relative-url url asset-path)
-                                   merged   (-> (merge pointer manifest)
-                                                (assoc :id (or (:id manifest) item-kw)
-                                                       :path abs-path
-                                                       :manifest-url url))]
+                             (let [abs-path  (resolve-relative-url url asset-path)
+                                   i18n-path (:i18n manifest)
+                                   i18n-url  (when (string? i18n-path)
+                                               (resolve-relative-url url i18n-path))
+                                   merged    (cond-> (-> (merge pointer manifest)
+                                                         (assoc :id (or (:id manifest) item-kw)
+                                                                :path abs-path
+                                                                :manifest-url url))
+                                               i18n-url (assoc :i18n-url i18n-url))]
                                (swap! !target-atom assoc item-kw merged))
                              (js/console.error "Manifest fetched, but it is invalid or missing a :path string. URL:" url "Data:" (clj->js manifest))))
                          (js/console.error "Failed to fetch or parse manifest.edn:" url))
@@ -130,6 +138,24 @@ the repo.
 
 (defn get-engine-manifest [protocol]
   (get @!available-engines (keyword protocol)))
+
+(defn resolve-manifest-i18n-url
+  "Resolves the i18n EDN URL from a manifest map (and optional base URL)."
+  ([m]
+   (resolve-manifest-i18n-url m nil))
+  ([m base-url]
+   (let [raw  (or (:i18n-url m) (when (string? (:i18n m)) (:i18n m)))
+         burl (or base-url (:manifest-url m))]
+     (when (and (string? raw) (not (str/blank? raw)))
+       (if (and burl (not (str/starts-with? raw "http")))
+         (resolve-relative-url burl raw)
+         raw)))))
+
+(defn get-engine-i18n-url [protocol]
+  (resolve-manifest-i18n-url (get @!available-engines (keyword protocol))))
+
+(defn get-plugin-i18n-url [plugin-id]
+  (resolve-manifest-i18n-url (get @!available-plugins (keyword plugin-id))))
 #+end_src
 
 
