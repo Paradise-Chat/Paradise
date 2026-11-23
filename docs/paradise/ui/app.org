@@ -225,6 +225,10 @@ displayed language.
  :i18n/engine-dictionary
  (fn [db _] (:i18n/engine-dictionary db)))
 
+(re-frame/reg-sub
+ :i18n/plugin-dictionaries
+ (fn [db _] (:i18n/plugin-dictionaries db {})))
+
 (defonce !tr-cache (atom {:locale nil :is-empty? true :fn nil}))
 
 (re-frame/reg-sub
@@ -232,12 +236,16 @@ displayed language.
  :<- [:i18n/locale]
  :<- [:i18n/dictionary]
  :<- [:i18n/engine-dictionary]
- (fn [[locale dictionary engine-dictionary] _]
+ :<- [:i18n/plugin-dictionaries]
+ (fn [[locale dictionary engine-dictionary plugin-dictionaries] _]
    (let [base-dict      (if (and (map? dictionary) (seq dictionary))
                           dictionary
                           i18n-data)
-         effective-dict (if (and (map? engine-dictionary) (seq engine-dictionary))
-                          (deep-merge-dicts base-dict engine-dictionary)
+         plugin-dicts   (when (and (map? plugin-dictionaries) (seq plugin-dictionaries))
+                          (map second (sort-by (comp str key) plugin-dictionaries)))
+         effective-dict (if (or (and (map? engine-dictionary) (seq engine-dictionary))
+                                (seq plugin-dicts))
+                          (apply deep-merge base-dict engine-dictionary plugin-dicts)
                           base-dict)
          safe-locale    (or (some-> locale keyword) :en)]
      (if (empty? effective-dict)
@@ -265,6 +273,33 @@ displayed language.
  (fn [db _]
    (dissoc db :i18n/engine-id :i18n/engine-dictionary :i18n/loading-engine-id)))
 
+(re-frame/reg-event-db
+ :i18n/set-plugin-dictionary
+ (fn [db [_ plugin-id dict]]
+   (if-let [pid (some-> plugin-id keyword)]
+     (if (and (map? dict) (seq dict))
+       (assoc-in db [:i18n/plugin-dictionaries pid] dict)
+       (update db :i18n/plugin-dictionaries dissoc pid))
+     db)))
+
+(re-frame/reg-event-db
+ :i18n/remove-plugin-dictionary
+ (fn [db [_ plugin-id]]
+   (if-let [pid (some-> plugin-id keyword)]
+     (update db :i18n/plugin-dictionaries dissoc pid)
+     db)))
+
+(defn- fetch-i18n-edn [url]
+  (go
+    (when (and (string? url) (not (str/blank? url)))
+      (try
+        (let [busted (str url
+                          (if (str/includes? url "?") "&t=" "?t=")
+                          (.getTime (js/Date.)))
+              res    (<! (registry/fetch-edn busted))]
+          (when (map? res) res))
+        (catch :default _ nil)))))
+
 (re-frame/reg-event-fx
  :i18n/load-engine-extensions
  (fn [{:keys [db]} [_ engine-id]]
@@ -282,18 +317,35 @@ displayed language.
                                         (decode-edn-field res :dictionary-edn :dictionary))]
                              (when (map? dict) dict))
                            (catch :default _ nil))
-               http-dict (when (string? manifest-i18n-url)
-                           (try
-                             (let [url (str manifest-i18n-url
-                                            (if (str/includes? manifest-i18n-url "?") "&t=" "?t=")
-                                            (.getTime (js/Date.)))
-                                   res (<! (registry/fetch-edn url))]
-                               (when (map? res) res))
-                             (catch :default _ nil)))
-               merged    (deep-merge-dicts bind-dict http-dict)]
+               http-dict (<! (fetch-i18n-edn manifest-i18n-url))
+               merged    (deep-merge bind-dict http-dict)]
            (re-frame/dispatch [:i18n/set-engine-dictionary eng-kw (or merged {})])))
        {:db (assoc db :i18n/loading-engine-id eng-kw)})
      {:dispatch [:i18n/clear-engine-dictionary]})))
+
+(re-frame/reg-event-fx
+ :i18n/load-plugin-extensions
+ (fn [_ [_ plugin-id source-url plugin-map]]
+   (when-let [pid (some-> plugin-id keyword)]
+     (let [inline-dict (when (map? (:i18n plugin-map))
+                         (:i18n plugin-map))
+           i18n-url    (or (registry/resolve-manifest-i18n-url plugin-map source-url)
+                           (registry/get-plugin-i18n-url pid))]
+       (cond
+         (and inline-dict (not i18n-url))
+         {:dispatch [:i18n/set-plugin-dictionary pid inline-dict]}
+
+         i18n-url
+         (do
+           (go
+             (let [http-dict (<! (fetch-i18n-edn i18n-url))
+                   merged    (deep-merge inline-dict http-dict)]
+               (when (seq merged)
+                 (re-frame/dispatch [:i18n/set-plugin-dictionary pid merged]))))
+           {})
+
+         :else
+         {})))))
 
 (re-frame/reg-event-db
  :i18n/set-locale
