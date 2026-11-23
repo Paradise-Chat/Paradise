@@ -25,6 +25,7 @@ to their call spec then Paradise can just 'work' for their calls.
    [paradise.shared.plugins :as plugins]
    [paradise.ui.overlays.tray :refer [tray-section]]
    [paradise.shared.client.key-handler :refer [keybind-spec]]
+   [paradise.shared.utils.helpers :refer [clean-user-id]]
    [paradise.ui.container.call.events]
    [paradise.ui.container.call.runtime :as rtc]))
 #+end_src
@@ -40,11 +41,6 @@ several, several times over the span of a few months.
 Likely we'll need some more tweaks in the future for other protocol support still.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
-(defn- clean-user-id [raw-id]
-  (when (and raw-id (not (str/blank? (str raw-id))))
-    (or (re-find #"^@[^:]+:[^:|]+" (str raw-id))
-        (str raw-id))))
-
 (defn- active-video? [p]
   (and (rtc/resolve-media-track (:video-track p))
        (not (:video-muted? p))))
