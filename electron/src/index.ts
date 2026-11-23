@@ -308,10 +308,15 @@ app.on("before-quit", () => {
         mainWindow.on("hide", () => rebuildCustomTrayMenu());
         mainWindow.on("close", (event) => {
             if (!isQuitting) {
-                event.preventDefault();
-                mainWindow.hide();
-                if (process.platform === "darwin") {
-                    app.hide();
+                if (myCapacitorApp.getCloseToTrayEnabled()) {
+                    event.preventDefault();
+                    mainWindow.hide();
+                    if (process.platform === "darwin") {
+                        app.hide();
+                    }
+                } else {
+                    isQuitting = true;
+                    app.quit();
                 }
             }
         });
@@ -319,6 +324,12 @@ app.on("before-quit", () => {
 
     autoUpdater.checkForUpdatesAndNotify();
 })();
+
+app.on("window-all-closed", () => {
+    if (isQuitting || !myCapacitorApp.getCloseToTrayEnabled()) {
+        app.quit();
+    }
+});
 
 app.on("activate", async function () {
     if (myCapacitorApp.getMainWindow().isDestroyed()) {
