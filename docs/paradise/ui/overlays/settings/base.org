@@ -71,6 +71,8 @@ file.
    "call_noise_suppression" {:event :settings/hydrate-noise-suppression :default true     :stage :boot}
    "encrypted_search_crawler" {:event :search/hydrate-crawler-enabled   :default true     :stage :login}})
    "submit_on_enter"          {:event :settings/hydrate-submit-on-enter   :default nil      :stage :boot}
+   "encrypted_search_crawler" {:event :search/hydrate-crawler-enabled     :default true     :stage :login}})
+
 (defn default-submit-on-enter? []
   (let [platform (when (exists? Capacitor) (.getPlatform Capacitor))]
     (not (or (contains? #{"android" "ios"} platform)
