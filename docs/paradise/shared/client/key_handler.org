@@ -177,20 +177,6 @@ Interactions with storage and the IPC
           (= tag "select")
           (boolean (.-isContentEditable el))))))
 
-(defn effective-keybind [entry overrides]
-  (let [ov (get overrides (:id entry))]
-    (cond
-      (map? ov)
-      (merge entry
-             {:accelerator (get ov "accelerator" (:accelerator ov (:accelerator entry)))
-              :global?     (boolean (get ov "global?" (:global? ov (:global? entry))))})
-
-      (string? ov)
-      (assoc entry :accelerator ov)
-
-      :else
-      entry)))
-
 (defn trigger-action! [action-id]
   (let [norm-id (normalize-id action-id)]
     (when-let [{:keys [dispatch on-trigger]} (get (all-keybind-specs) norm-id)]
