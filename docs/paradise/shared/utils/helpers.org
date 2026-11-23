@@ -12,10 +12,10 @@ So there a couple methods that don't mesh perfectly in any one location that for
 (ns paradise.shared.utils.helpers
   (:require
    [cljs.reader :as reader]
-   [net :as net]
    [clojure.string :as str]
-   [promesa.core :as p]
    [hickory.core :as h]
+   [paradise.shared.utils.encoding :as encoding]
+   [promesa.core :as p]
    [taoensso.timbre :as log]))
 #+end_src
 
