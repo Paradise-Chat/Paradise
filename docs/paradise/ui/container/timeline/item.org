@@ -1506,10 +1506,13 @@ state for now.
 (defn ^:ui timeline-avatar [content-tag merge-with-prev? popover-member custom-tags active-room]
   [:div.timeline-avatar-wrapper
    {:class (when merge-with-prev? "is-merged")}
-  (when (and (= content-tag "MsgLike") (not merge-with-prev?))
-    [profile-popover-trigger popover-member custom-tags active-room nil
-     [avatar {:id (:user-id popover-member) :name (:display-name popover-member)
-              :url (:avatar-url popover-member) :size 36 :status :online :shape :circle}]])])
+   (when (and (= content-tag "MsgLike") (not merge-with-prev?))
+     [profile-popover-trigger popover-member custom-tags active-room nil
+      [avatar {:id    (:user-id popover-member)
+               :name  (:display-name popover-member)
+               :url   (:avatar-url popover-member)
+               :size  36
+               :shape :circle}]])])
 
 
 (defn ^:ui timeline-header [ts merge-with-prev? popover-member custom-tags active-room]
