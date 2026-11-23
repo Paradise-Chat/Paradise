@@ -89,6 +89,20 @@ throw an error.
   (and (string? s)
        (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
 
+(defn local-media-url?
+  "Returns true when `url` is a local browser object or inline data URI."
+  [url]
+  (let [s (str (or url ""))]
+    (or (str/starts-with? s "blob:")
+        (str/starts-with? s "data:"))))
+
+(defn extract-first-url
+  "Extracts the first HTTP(S) URL from `text`, stripping trailing punctuation."
+  [text]
+  (when text
+    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
+      (str/replace match #"[.,:;!?]$" ""))))
+
 (defn- parse-style-str [style-str]
   (if (string? style-str)
     (->> (str/split style-str #";")
@@ -197,6 +211,22 @@ throw an error.
           raw-fragments (h/parse-fragment html-str)
           hickory-maps  (map h/as-hickory raw-fragments)]
       (sanitize-nodes hickory-maps 0))))
+
+(defonce ^:private !sanitize-cache (atom {}))
+
+(defn memoized-sanitize
+  "Bounded-cache wrapper around `sanitize-custom-html` for hot timeline paths."
+  [html]
+  (if-let [hit (get @!sanitize-cache html)]
+    hit
+    (let [res (sanitize-custom-html html)]
+      (swap! !sanitize-cache
+             (fn [m]
+               (let [m' (assoc m html res)]
+                 (if (> (count m') 300)
+                   (dissoc m' (first (keys m')))
+                   m'))))
+      res)))
 
 (defn sanitize-text [raw-text]
   (when raw-text
@@ -414,6 +444,19 @@ We need to be able to convert timestamps to date otherwise people might not be t
   (when ts
     (let [date (js/Date. ts)]
       (.toLocaleTimeString date js/undefined #js {:hour "numeric" :minute "2-digit"}))))
+
+(defn format-duration-seconds
+  "Formats a non-negative duration in seconds as `M:SS`."
+  [seconds]
+  (let [s   (max 0 (js/Math.floor (or seconds 0)))
+        m   (quot s 60)
+        rem (mod s 60)]
+    (str m ":" (when (< rem 10) "0") rem)))
+
+(defn format-duration-ms
+  "Formats a non-negative duration in milliseconds as `M:SS`."
+  [ms]
+  (format-duration-seconds (quot (or ms 0) 1000)))
 #+end_src
 
 
@@ -478,33 +521,187 @@ We need to be able to convert timestamps to date otherwise people might not be t
 #+end_src
 
 
-**** Converters
+**** Generic Utilities
 
+Reusable pure helpers shared across UI, workers, and client modules.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
-(defn uint8->base64 [bytes]
-  (let [len    (.-byteLength bytes)
-        chunks (js/Array.)]
-    (loop [i 0]
-      (when (< i len)
-        (let [end   (min len (+ i 8192))
-              sub   (.subarray bytes i end)
-              piece (.apply js/String.fromCharCode nil sub)]
-          (.push chunks piece)
-          (recur end))))
-    (js/btoa (.join chunks ""))))
+(defn clamp
+  "Clamps numeric value `x` into the closed interval `[lo, hi]`."
+  [x lo hi]
+  (max lo (min hi (or x lo))))
 
-(defn base64->uint8 [b64]
-  (if (or (nil? b64) (str/blank? b64))
-    (js/Uint8Array. 0)
-    (let [bin (js/atob b64)
-          len (.-length bin)
-          out (js/Uint8Array. len)]
-      (loop [i 0]
-        (when (< i len)
-          (aset out i (.charCodeAt bin i))
-          (recur (inc i))))
-      out)))
+(defn clamp01
+  "Clamps numeric value `x` into `[0.0, 1.0]`."
+  [x]
+  (clamp (or x 0.0) 0.0 1.0))
+
+(defn ok-status?
+  "Returns true when a worker status value or response map indicates success."
+  [x]
+  (let [s (if (map? x) (:status x) x)]
+    (contains? #{"success" :success} s)))
+
+(defn normalize-id
+  "Normalizes a keyword or arbitrary identifier to a clean string without a leading colon."
+  [id]
+  (if (keyword? id)
+    (subs (str id) 1)
+    (str id)))
+
+(defn normalize-keyword
+  "Converts a non-empty keyword, string, or symbol into a keyword; returns nil otherwise."
+  [x]
+  (when (or (keyword? x) (string? x) (symbol? x))
+    (when-let [s (not-empty (name x))]
+      (keyword s))))
+
+(defn clean-user-id
+  "Strips trailing LiveKit/device suffixes (e.g. `|device`) from a matrix-style user ID."
+  [raw-id]
+  (when (and raw-id (not (str/blank? (str raw-id))))
+    (or (re-find #"^@[^:]+:[^:|]+" (str raw-id))
+        (str raw-id))))
+
+(defn deep-merge
+  "Recursively merges maps, ignoring nil inputs."
+  [& maps]
+  (apply merge-with
+         (fn [a b]
+           (if (and (map? a) (map? b))
+             (deep-merge a b)
+             b))
+         (remove nil? maps)))
+
+(defn hex->rgba
+  "Converts a 6-digit hex color string into an `rgba(r, g, b, alpha)` CSS string."
+  [hex alpha]
+  (let [clean (str/replace (or hex "#5865f2") #"^#" "")]
+    (if (= 6 (count clean))
+      (let [r (js/parseInt (subs clean 0 2) 16)
+            g (js/parseInt (subs clean 2 4) 16)
+            b (js/parseInt (subs clean 4 6) 16)]
+        (str "rgba(" r ", " g ", " b ", " alpha ")"))
+      (str "rgba(88, 101, 242, " alpha ")"))))
+
+(defn tr-or
+  "Translates key `k` with `tr`, falling back cleanly when missing or unresolved."
+  ([tr k]
+   (tr-or tr k nil nil))
+  ([tr k fallback]
+   (tr-or tr k nil fallback))
+  ([tr k args fallback]
+   (let [v (when (and tr k)
+             (if (seq args)
+               (tr [k] (vec args))
+               (tr [k])))]
+     (if (and (string? v)
+              (not (str/blank? v))
+              (not (str/starts-with? v "[")))
+       v
+       (or fallback (when k (name k)) "")))))
+
+(defn resolve-dm-display
+  "Derives DM / Group-DM peer list, avatar, and display name from room membership."
+  [{:keys [is-dm? is-group-dm? members-map my-id avatar-url name only-replace-loading?]}]
+  (let [other-users (when (and is-dm? (seq members-map))
+                      (->> (vals members-map)
+                           (remove #(= (:user-id %) my-id))))
+        group-dm?   (boolean (or is-group-dm? (> (count other-users) 1)))
+        other-user  (when (and is-dm? (not group-dm?))
+                      (first other-users))
+        final-av    (if group-dm?
+                      avatar-url
+                      (or avatar-url (:avatar-url other-user)))
+        placeholder (or (str/blank? name) (= name "Loading..."))
+        final-name  (cond
+                      (and group-dm? placeholder (seq other-users))
+                      (str/join ", " (map :display-name other-users))
+
+                      (and is-dm? other-user (or (not only-replace-loading?) placeholder))
+                      (:display-name other-user)
+
+                      :else
+                      name)]
+    {:other-users  other-users
+     :group-dm?    group-dm?
+     :other-user   other-user
+     :avatar-url   final-av
+     :display-name final-name}))
+#+end_src
+
+**** Runtime & Platform Detection
+
+Lightweight environment checks that inspect Capacitor and navigator globals
+without importing native Capacitor plugins into worker bundles.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
+(defn capacitor-platform
+  "Returns the active Capacitor platform string (e.g. `\"ios\"`, `\"android\"`, `\"web\"`), or nil."
+  []
+  (try
+    (when (exists? js/window)
+      (let [^js cap (aget js/window "Capacitor")]
+        (when (and (some? cap) (fn? (.-getPlatform cap)))
+          (str (.getPlatform cap)))))
+    (catch :default _
+      nil)))
+
+(defn capacitor-mobile?
+  "Returns true when running inside a native iOS or Android Capacitor shell."
+  []
+  (contains? #{"ios" "android"} (capacitor-platform)))
+
+(defn ios-runtime?
+  "Returns true on native iOS Capacitor shells as well as iOS/iPadOS Safari/WebKit."
+  []
+  (try
+    (or (= "ios" (capacitor-platform))
+        (when (exists? js/navigator)
+          (let [ua  (str (or (.-userAgent js/navigator) ""))
+                plt (str (or (.-platform js/navigator) ""))
+                mtp (js/Number (or (.-maxTouchPoints js/navigator) 0))]
+            (or (boolean (re-find #"(?i)iPhone|iPad|iPod" ua))
+                (and (= plt "MacIntel") (> mtp 1))))))
+    (catch :default _
+      false)))
+
+(defn mobile-runtime?
+  "Returns true on native mobile shells (iOS/Android) or mobile browsers."
+  []
+  (try
+    (or (capacitor-mobile?)
+        (ios-runtime?)
+        (when (exists? js/navigator)
+          (boolean (re-find #"(?i)Android" (str (or (.-userAgent js/navigator) ""))))))
+    (catch :default _
+      false)))
+#+end_src
+
+**** Converters
+
+Encoding helpers are implemented in =paradise.shared.utils.encoding= so
+worker bundles can import them cleanly, and are re-exported here for callers
+and SCI plugins.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
+(def uint8->base64 encoding/uint8->base64)
+(def base64->uint8 encoding/base64->uint8)
+(def utf8->base64 encoding/utf8->base64)
+(def bytes->base64url encoding/bytes->base64url)
+(def base64url->uint8 encoding/base64url->uint8)
+(def array-buffer->data-url encoding/array-buffer->data-url)
+
+(defn parse-edn-map
+  "Parses an EDN string into a map (or passes an existing map through), returning `{}` on failure."
+  [raw-val]
+  (cond
+    (map? raw-val)    raw-val
+    (string? raw-val) (try
+                        (let [parsed (reader/read-string raw-val)]
+                          (if (map? parsed) parsed {}))
+                        (catch :default _ {}))
+    :else             {}))
 
 (defn decode-edn-field
   "Decodes an EDN-encoded string field (e.g. :options-edn) from a worker payload,
