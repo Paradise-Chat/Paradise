@@ -1417,20 +1417,31 @@ folder, top/bottom halves reorder within that folder.
 
 ***** Space Icons and Folder CSS
 
-Now for the CSS for the space icons
 #+begin_src css :tangle ../../../../../css/space-icons.css
 .space-icon-wrapper {
+    position: relative;
     display: flex;
     justify-content: center;
     align-items: center;
     width: 100%;
     padding: 4px 0;
+    margin-bottom: 4px;
     cursor: pointer;
-    position: relative;
+    flex-shrink: 0;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
 }
 
-.space-icon-wrapper .avatar-container.space {
-    transition: border-radius 0.2s ease, background-color 0.2s ease;
+.space-icon-wrapper img {
+    -webkit-user-drag: none;
+    -webkit-touch-callout: none;
+    pointer-events: none;
+}
+
+.space-icon-wrapper .avatar-wrapper {
+    pointer-events: none;
+    transition: transform 0.15s ease, border-radius 0.2s ease;
 }
 
 .space-icon-wrapper:hover .avatar-container.space,
@@ -1447,11 +1458,13 @@ Now for the CSS for the space icons
     content: "";
     position: absolute;
     left: 0;
+    top: 50%;
+    transform: translateY(-50%);
     width: 4px;
     height: 8px;
     background-color: white;
     border-radius: 0 4px 4px 0;
-    transition: height 0.2s ease;
+    transition: height 0.2s ease, opacity 0.2s ease;
     opacity: 0;
 }
 
@@ -1462,9 +1475,74 @@ Now for the CSS for the space icons
 
 .space-icon-wrapper.active::before {
     opacity: 1;
-    height: 40px;
+    height: 36px;
 }
 
+.space-icon-draggable {
+    width: 42px;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    flex-shrink: 0;
+}
+
+.space-icon-wrapper.is-touch-armed .space-icon-draggable {
+    transform: scale(1.12);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(88, 101, 242, 0.75);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.space-icon-wrapper.is-dragging .space-icon-draggable,
+.space-folder-expanded.is-dragging {
+    opacity: 0.4;
+}
+
+.space-touch-drag-ghost {
+    position: fixed;
+    z-index: 100000;
+    width: 46px;
+    height: 46px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    transform: translate(-50%, -50%) scale(1.12);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.65), 0 0 0 2px #5865f2;
+    background: #2b2d31;
+}
+
+.space-icon-wrapper.drop-before::after,
+.space-icon-wrapper.drop-after::after {
+    content: "";
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    height: 3px;
+    background-color: #5865f2;
+    border-radius: 2px;
+    box-shadow: 0 0 6px rgba(88, 101, 242, 0.8);
+    pointer-events: none;
+    z-index: 20;
+}
+
+.space-icon-wrapper.drop-before::after {
+    top: -2px;
+}
+
+.space-icon-wrapper.drop-after::after {
+    bottom: -2px;
+}
+
+.space-icon-wrapper.drop-combine .avatar-wrapper,
+.space-icon-wrapper.drop-combine .space-folder-closed,
+.space-icon-wrapper.drop-combine .space-folder-open-btn {
+    outline: 2px solid #5865f2;
+    outline-offset: 3px;
+    transform: scale(1.06);
+}
 
 .home-icon-container {
     width: 48px;
@@ -1484,35 +1562,30 @@ Now for the CSS for the space icons
     background-color: #5865f2;
 }
 
-
-.space-icon-wrapper {
-    position: relative;
-    display: flex;
-    justify-content: center;
-    margin-bottom: 8px;
-    cursor: pointer;
-}
-
 .space-notification-pill {
     position: absolute;
     left: 0;
     top: 50%;
     transform: translateY(-50%);
-    width: 8px;
+    width: 4px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: 0 4px 4px 0;
     background-color: #ffffff;
     transition: all 0.2s ease;
+}
+
+.space-icon-wrapper:hover .space-notification-pill {
+    height: 20px;
 }
 
 .space-mention-badge {
     position: absolute;
     bottom: 2px;
-    right: 2px;
+    right: 10px;
     background: #ff4b4b;
     color: white;
     border-radius: 10px;
-    padding: 0 6px;
+    padding: 0 5px;
     font-size: 11px;
     font-weight: bold;
     min-width: 18px;
@@ -1520,7 +1593,7 @@ Now for the CSS for the space icons
     display: flex;
     align-items: center;
     justify-content: center;
-    border: 2px solid #18191c;
+    border: 2px solid #1e1f22;
     z-index: 10;
     pointer-events: none;
     animation: badge-pop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
@@ -1531,13 +1604,6 @@ Now for the CSS for the space icons
     to { transform: scale(1); }
 }
 
-
-.space-icon-wrapper:hover .space-notification-pill {
-    height: 20px;
-    border-radius: 4px;
-}
-
-
 .is-dm-entry {
     margin-bottom: 4px;
 }
@@ -1546,27 +1612,85 @@ Now for the CSS for the space icons
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.space-folder-closed {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-radius 0.2s ease, transform 0.15s ease, background-color 0.2s ease;
+    pointer-events: none;
+}
 
+.space-folder-closed-wrapper:hover .space-folder-closed {
+    border-radius: 12px;
+}
+
+.space-folder-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 16px);
+    grid-template-rows: repeat(2, 16px);
+    gap: 3px;
+}
+
+.space-folder-expanded {
+    position: relative;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2px 0 4px 0;
+    margin-bottom: 6px;
+    flex-shrink: 0;
+}
+
+.space-folder-capsule-bg {
+    position: absolute;
+    top: 0;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 50px;
+    border-radius: 25px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    pointer-events: none;
+}
+
+.space-folder-header {
+    margin-bottom: 2px;
+}
+
+.space-folder-header::before {
+    display: none;
+}
+
+.space-folder-open-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: filter 0.15s ease, transform 0.15s ease;
+    pointer-events: none;
+}
+
+.space-folder-header:hover .space-folder-open-btn {
+    filter: brightness(1.15);
+}
+
+.space-folder-items {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.space-icon-wrapper.in-space-folder {
+    margin-bottom: 2px;
+}
 #+end_src
-
-
-
-**** Virtuoso Spaces
-
-
-***** Virtuoso
-
-
-Now for the actual spacebar we want a Virtuso. It makes the rendering of a
-list based object effectively trivial. We'll be using them around quite frequently.
-
-Now we inform Virtuso what to list to display (and we need it to be a vector/js array)
-and then we inform it *how* to display each component.
-In this case we just grab all of the stored spaces and the currently active one
-supply them as a React component by surrounding the Hiccup with (r/as-element).
-Inside we just set the click event to inform re-frame that we want this
-dispatch event. No extra imports. Just use what you need. Reframe is delightful
-at abstracting the excessive state management of React.
 
 **** Space Rail List and Layout CSS
 
@@ -1624,18 +1748,30 @@ at abstracting the excessive state management of React.
     [spaces-rail-items items active-space-id]))
 #+end_src
 
-***** CSS
+***** Rail and Modal CSS
 
 #+begin_src css :tangle ../../../../../css/space.css
 .sidebar-spaces {
     width: 72px;
+    align-self: stretch;
+    min-height: 0;
     flex-shrink: 0;
     background-color: #1e1f22;
     display: flex;
     flex-direction: column;
     align-items: center;
+    overflow: hidden;
+    position: relative;
+}
+
+.sidebar-spaces-top {
+    width: 100%;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     padding-top: 12px;
-    gap: 8px;
+    gap: 4px;
 }
 
 .sidebar-divider {
@@ -1643,15 +1779,70 @@ at abstracting the excessive state management of React.
     height: 2px;
     background-color: #3f4147;
     border-radius: 1px;
-    margin: 4px 0;
+    margin: 4px auto;
+    flex-shrink: 0;
 }
 
+.spaces-scroll-area {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 4px;
+}
+
+.spaces-scroll-area::-webkit-scrollbar {
+    display: none;
+}
+
+.dm-pops-group {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.spaces-rail-list {
+    width: 100%;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.spaces-tail-dropzone {
+    width: 100%;
+    flex: 1;
+    min-height: 24px;
+    position: relative;
+}
+
+.spaces-tail-dropzone.drop-tail-active::before {
+    content: "";
+    position: absolute;
+    top: 4px;
+    left: 14px;
+    right: 14px;
+    height: 3px;
+    background-color: #5865f2;
+    border-radius: 2px;
+    box-shadow: 0 0 6px rgba(88, 101, 242, 0.8);
+}
 
 .spaces-list-container {
     width: 100%;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
 }
-
 
 .sidebar-item {
     width: 36px;
@@ -1680,8 +1871,6 @@ at abstracting the excessive state management of React.
     color: #fff;
 }
 
-
-
 .sidebar-item img {
     pointer-events: none;
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -1691,50 +1880,252 @@ at abstracting the excessive state management of React.
     border-color: #fff;
 }
 
+.context-menu-divider {
+    height: 1px;
+    background-color: rgba(255, 255, 255, 0.08);
+    margin: 4px 6px;
+}
+
+.space-group-modal-window {
+    width: 420px;
+    max-width: calc(100vw - 32px);
+    background: #313338;
+    color: #f2f3f5;
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+}
+
+.space-group-modal {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+}
+
+.space-group-modal-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: #f2f3f5;
+}
+
+.space-group-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.space-group-field label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #b5bac1;
+}
+
+.space-group-input {
+    width: 100%;
+    padding: 10px 12px;
+    background: #1e1f22;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    color: #f2f3f5;
+    font-size: 14px;
+    outline: none;
+}
+
+.space-group-input:focus {
+    border-color: #5865f2;
+}
+
+.space-group-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.space-group-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    padding: 0;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.space-group-swatch:hover {
+    transform: scale(1.1);
+}
+
+.space-group-swatch.selected {
+    border-color: #ffffff;
+}
+
+.space-group-checklist {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: #2b2d31;
+    border-radius: 8px;
+    padding: 6px;
+}
+
+.space-group-check-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.12s ease;
+}
+
+.space-group-check-row:hover {
+    background: #35373c;
+}
+
+.space-group-check-row.checked {
+    background: rgba(88, 101, 242, 0.16);
+}
+
+.space-group-check-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    color: #dbdee1;
+}
+
+.space-group-checkbox {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1.5px solid #80848e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    flex-shrink: 0;
+}
+
+.space-group-check-row.checked .space-group-checkbox {
+    background: #5865f2;
+    border-color: #5865f2;
+}
+
+.space-group-empty {
+    font-size: 13px;
+    color: #949ba4;
+    padding: 8px 0;
+}
+
+.space-group-modal-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.space-group-modal-actions-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.space-group-btn {
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: filter 0.12s ease, opacity 0.12s ease;
+}
+
+.space-group-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.space-group-btn.primary {
+    background: #5865f2;
+    color: #ffffff;
+}
+
+.space-group-btn.primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+}
+
+.space-group-btn.secondary {
+    background: transparent;
+    color: #dbdee1;
+}
+
+.space-group-btn.secondary:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.space-group-btn.danger-outline {
+    background: rgba(218, 55, 60, 0.12);
+    color: #f23f43;
+}
+
+.space-group-btn.danger-outline:hover {
+    background: #da373c;
+    color: #ffffff;
+}
+
+.home-icon-container:hover .animate-sun-pulse {
+    animation: sun-breathe 2s ease-in-out infinite;
+}
 #+end_src
 
+**** Spaces Sidebar
 
-
-**** Spaces (side)bar
-
-Actually using the virtualized space bar is easy. We just need
-a default "home" button which is actually just de-selecting a space
-This causes the diffs to show every room for now (until we set a
-nice filter for this)
-Adding features would a "home" button could be expanded to have "no-filter"
-or "non-space" (both of those filters exist). Then you could easily add a
-button in Hiccup here for a DMs button.
-Keeping with our goal of easily mutated to look how you want!
-
-#+begin_src css :tangle ../../../../../css/space.css
-  .home-icon-container:hover .animate-sun-pulse {
-      animation: sun-breathe 2s ease-in-out infinite;
-  }
-#+end_src
-
+The ~spaces-sidebar~ pins the Home button above ~.spaces-scroll-area~ and the
+profile control below it, keeping both reachable regardless of how many DMs,
+spaces, or folders are displayed.
 
 ****** TODO Swap home icon out with SVG
+
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
 (defn ^:ui spaces-sidebar []
-  (let [spaces        @(re-frame/subscribe [:spaces/all])
-        active-id     @(re-frame/subscribe [:spaces/active-id])
-        active-dms    @(re-frame/subscribe [:rooms/active-dm-pops])
-        tr            @(re-frame/subscribe [:i18n/tr])]
+  (let [rail-items @(re-frame/subscribe [:spaces/rail-items])
+        active-id  @(re-frame/subscribe [:spaces/active-id])
+        active-dms @(re-frame/subscribe [:rooms/active-dm-pops])
+        tr         @(re-frame/subscribe [:i18n/tr])]
     [:div.sidebar-spaces
-     [:div.home-group
+     [:div.sidebar-spaces-top
       [:div.space-icon-wrapper
-       {:class (when (nil? active-id) "active")
+       {:class    (when (nil? active-id) "active")
         :on-click #(re-frame/dispatch [:space/select nil])
-        :title (tr [:navigation.spaces.bar/home])}
-       [:div.home-icon-container [icons/sun {:animate :sun-pulse :size "32px"}]]]
-      (for [dm active-dms]
-        ^{:key (:id dm)}
-        [space-icon-item dm active-id])]
-     [:div.sidebar-divider]
-     [:div.spaces-list-container
-      [virtualized-space-bar spaces active-id]]
-     [sidebar-profile-mini]]))
-
+        :title    (tr [:navigation.spaces.bar/home])}
+       [:div.home-icon-container
+        [icons/sun {:animate :sun-pulse :size "32px"}]]]
+      [:div.sidebar-divider]]
+     [:div.spaces-scroll-area
+      (when (seq active-dms)
+        [:div.dm-pops-group
+         (for [dm active-dms]
+           ^{:key (:id dm)}
+           [space-icon-item dm active-id nil])
+         [:div.sidebar-divider]])
+      [spaces-rail-items rail-items active-id]]
+     [sidebar-profile-mini]
+     [space-touch-drag-ghost]]))
 #+end_src
-
-
