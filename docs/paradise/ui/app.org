@@ -460,6 +460,11 @@ html, body {
     --app-bottom-cushion: 8px;
 }
 
+:root[data-platform="android"],
+.app-root[data-platform="android"] {
+    --safe-area-inset-top: 0px;
+}
+
 
 
 
@@ -633,7 +638,7 @@ html, body {
 #+begin_src css :tangle ../../../css/update-banner.css
 .global-update-banner {
   position: fixed;
-  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + 16px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 9999999;
