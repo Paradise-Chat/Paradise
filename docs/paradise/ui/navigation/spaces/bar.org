@@ -15,14 +15,14 @@ account in ~session-store~ and synchronized with the active protocol engine.
   (:require
    [cljs-workers.core :as main]
    [cljs.core.async :refer [go <!]]
-   [cljs.reader :as reader]
    [clojure.string :as str]
    [paradise.shared.client.session-store :as store]
    [paradise.shared.client.state :as state]
+   [paradise.shared.utils.helpers :refer [hex->rgba normalize-id parse-edn-map resolve-dm-display]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar long-press-props]]
    [paradise.ui.overlays.base :refer [context-menu-component modal-component]]
-   [paradise.ui.overlays.rooms :refer [build-room-actions]]
+   [paradise.ui.overlays.rooms :refer [engine-room-option-items]]
    [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
