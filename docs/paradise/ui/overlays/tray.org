@@ -44,6 +44,9 @@ pure data (receiving only that section's own small state map rather than full
 (defn- get-tray ^js []
   (.-paradiseTray js/globalThis))
 
+(defn tray-supported? []
+  (some? (get-tray)))
+
 (defmulti tray-section
   (fn [section-id _section-state] section-id))
 
@@ -139,6 +142,11 @@ pure data (receiving only that section's own small state map rather than full
   (swap! !registry dissoc section-id)
   (when (exists? db/app-db)
     (sync-tray! (get-in @db/app-db [:tray :sections] {}))))
+
+(defn sync-close-to-tray! [enabled?]
+  (when-let [^js tray (get-tray)]
+    (when (fn? (.-setCloseToTray tray))
+      (.setCloseToTray tray (boolean enabled?)))))
 #+end_src
 
 **** Reframe and Initialization
@@ -162,6 +170,31 @@ pure data (receiving only that section's own small state map rather than full
  :tray/sync-electron
  (fn [sections-state]
    (sync-tray! sections-state)))
+
+(re-frame/reg-fx
+ :tray/sync-close-behavior
+ (fn [enabled?]
+   (sync-close-to-tray! enabled?)))
+
+(re-frame/reg-event-fx
+ :settings/hydrate-close-to-tray
+ (fn [{:keys [db]} [_ saved-val]]
+   (let [enabled? (if (boolean? saved-val) saved-val true)]
+     {:db                       (assoc db :settings/close-to-tray enabled?)
+      :tray/sync-close-behavior enabled?})))
+
+(re-frame/reg-event-fx
+ :settings/set-close-to-tray
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [val (boolean enabled?)]
+     {:db                       (assoc db :settings/close-to-tray val)
+      :tray/sync-close-behavior val
+      :dispatch                 [:settings/save "close_to_tray" val]})))
+
+(re-frame/reg-sub
+ :settings/close-to-tray?
+ (fn [db _]
+   (get db :settings/close-to-tray true)))
 
 (re-frame/reg-event-fx
  :tray/set-section
@@ -193,5 +226,6 @@ pure data (receiving only that section's own small state map rather than full
                (fn [action-id]
                  (trigger-tray-action! action-id)))
     (when (exists? db/app-db)
+      (sync-close-to-tray! (get @db/app-db :settings/close-to-tray true))
       (sync-tray! (get-in @db/app-db [:tray :sections] {})))))
 #+end_src
