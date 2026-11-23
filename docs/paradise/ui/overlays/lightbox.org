@@ -500,7 +500,7 @@ So we define the component contents and then register in the modal multi-method.
 .lightbox-close-btn {
     position: absolute;
     right: 20px;
-    top: env(safe-area-inset-top, 0px);
+    top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
     background: rgba(0, 0, 0, 0.5);
     color: white;
     border-radius: 50%;
@@ -530,7 +530,7 @@ So we define the component contents and then register in the modal multi-method.
     position: absolute;
     left: 0;
     right: 0;
-    top: env(safe-area-inset-top, 0px);
+    top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
     bottom: env(safe-area-inset-bottom, 0px);
     overflow: hidden;
     display: flex;
