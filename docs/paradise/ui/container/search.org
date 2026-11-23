@@ -16,6 +16,7 @@ cross-room (~:all~) scopes.
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
    [paradise.shared.client.state :as state]
+   [paradise.shared.utils.helpers :refer [ok-status?]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.container.reusable :refer [message-preview-item]]
    [re-frame.core :as re-frame]
@@ -26,9 +27,6 @@ cross-room (~:all~) scopes.
 **** Reframe
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/search.cljs
-(defn- ok-status? [s]
-  (contains? #{"success" :success} s))
-
 (re-frame/reg-event-fx
  :room/execute-search
  (fn [{:keys [db]} [_ room-id query scope-opt]]
