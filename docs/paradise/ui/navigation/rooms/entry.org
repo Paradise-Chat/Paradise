@@ -767,27 +767,15 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
         (when (and id (not membership) (not mem-loading?) (not mem-attempted?))
           (re-frame/dispatch [:room/fetch-membership id]))
 
-        (let [other-users           (when (and is-dm? (seq members-map))
-                                      (->> (vals members-map)
-                                           (remove #(= (:user-id %) my-id))))
-              group-dm?             (boolean (or is-group-dm? (> (count other-users) 1)))
-              other-user            (when (and is-dm? (not group-dm?))
-                                      (first other-users))
-              final-avatar          (if group-dm?
-                                      avatar-url
-                                      (or avatar-url (:avatar-url other-user)))
-              final-name            (cond
-                                      group-dm?
-                                      (if (and (or (str/blank? name) (= name "Loading..."))
-                                               (seq other-users))
-                                        (str/join ", " (map :display-name other-users))
-                                        name)
-
-                                      (and is-dm? other-user)
-                                      (:display-name other-user)
-
-                                      :else
-                                      name)
+        (let [{:keys [other-users group-dm? other-user]
+               final-avatar :avatar-url
+               final-name   :display-name}
+              (resolve-dm-display {:is-dm?       is-dm?
+                                   :is-group-dm? is-group-dm?
+                                   :members-map  members-map
+                                   :my-id        my-id
+                                   :avatar-url   avatar-url
+                                   :name         name})
               group-members         (when group-dm?
                                       (or (seq recipient-avatars)
                                           (let [peers (mapv (fn [u]
