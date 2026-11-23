@@ -198,6 +198,11 @@ diffs like Timeline, Spaces, and Rooms.
    (get-in db [:room-members room-id :loading?] false)))
 
 (re-frame/reg-sub
+ :room/members-attempted?
+ (fn [db [_ room-id]]
+   (get-in db [:room-members room-id :attempted?] false)))
+
+(re-frame/reg-sub
  :room/members
  (fn [db [_ room-id]]
    (get-in db [:room-members room-id :data] [])))
