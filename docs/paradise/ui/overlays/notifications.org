@@ -25,6 +25,7 @@ They are technically an overlay, so we'll group them here also.
             ["@capacitor/push-notifications" :refer [PushNotifications]]
             [paradise.shared.client.state :refer [!config] :as state]
             [paradise.shared.client.session-store :as store]
+            [paradise.shared.utils.helpers :refer [base64url->uint8 bytes->base64url]]
             [cljs-workers.mesh :as mesh]))
 #+end_src
 
@@ -361,28 +362,9 @@ to utilize the nice features inside of Capacitor.
 Just some helper functions
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
-(defn url-base64->uint8-array [base64-string]
-  (let [padding      (.repeat "=" (mod (- 4 (mod (.-length base64-string) 4)) 4))
-        base64       (-> (.replace base64-string (js/RegExp. "-" "g") "+")
-                         (.replace (js/RegExp. "_" "g") "/")
-                         (str padding))
-        raw-data     (js/atob base64)
-        output-array (js/Uint8Array. (.-length raw-data))]
-    (dotimes [i (.-length raw-data)]
-      (aset output-array i (.charCodeAt raw-data i)))
-    output-array))
+(def url-base64->uint8-array base64url->uint8)
 
-(defn- buf->b64url [buf]
-  (when buf
-    (let [bytes  (js/Uint8Array. buf)
-          len    (.-byteLength bytes)
-          chunks #js []]
-      (dotimes [i len]
-        (.push chunks (js/String.fromCharCode (aget bytes i))))
-      (-> (js/btoa (.join chunks ""))
-          (str/replace "+" "-")
-          (str/replace "/" "_")
-          (str/replace #"=+$" "")))))
+(def ^:private buf->b64url bytes->base64url)
 
 (defn- extract-push-keys [subscription]
   (when subscription
