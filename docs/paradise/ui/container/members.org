@@ -40,33 +40,42 @@ diffs like Timeline, Spaces, and Rooms.
 (re-frame/reg-event-fx
  :room/fetch-members
  (fn [{:keys [db]} [_ room-id]]
-   (if-let [pool @state/!engine-pool]
-     (go
-       (let [res (<! (main/do-with-pool! pool {:handler :fetch-room-members
-                                               :arguments {:room-id room-id}}))]
-         (if (= (:status res) "success")
-           (re-frame/dispatch [:room/fetch-members-success room-id (:members res)])
-           (do
-             (log/error "Failed to fetch members:" (:msg res))
-             (re-frame/dispatch [:room/fetch-members-error room-id (:msg res)])))))
-     (log/error "Cannot fetch members: No engine pool"))
-   {:db (assoc-in db [:room-members room-id :loading?] true)}))
+   (if-not room-id
+     {}
+     (do
+       (if-let [pool @state/!engine-pool]
+         (go
+           (let [res (<! (main/do-with-pool! pool {:handler   :fetch-room-members
+                                                   :arguments {:room-id room-id}}))]
+             (if (= (:status res) "success")
+               (re-frame/dispatch [:room/fetch-members-success room-id (:members res)])
+               (do
+                 (log/error "Failed to fetch members:" (:msg res))
+                 (re-frame/dispatch [:room/fetch-members-error room-id (:msg res)])))))
+         (log/error "Cannot fetch members: No engine pool"))
+       {:db (-> db
+                (assoc-in [:room-members room-id :loading?] true)
+                (assoc-in [:room-members room-id :attempted?] true))}))))
 
- (re-frame/reg-event-db
+(re-frame/reg-event-db
  :room/fetch-members-success
  (fn [db [_ room-id raw-members]]
    (let [clean-members (mapv
                         (fn [m]
-                          (assoc m :avatar-url (or (:avatar-url m) (:avatar-uri m))))
+                          (assoc m :avatar-url
+                                 (or (:avatar-url m) (:avatar-uri m) (:avatar-mxc m))))
                         raw-members)]
      (-> db
          (assoc-in [:room-members room-id :data] clean-members)
-         (assoc-in [:room-members room-id :loading?] false)))))
+         (assoc-in [:room-members room-id :loading?] false)
+         (assoc-in [:room-members room-id :attempted?] true)))))
 
 (re-frame/reg-event-db
  :room/fetch-members-error
  (fn [db [_ room-id _err]]
-   (assoc-in db [:room-members room-id :loading?] false)))
+   (-> db
+       (assoc-in [:room-members room-id :loading?] false)
+       (assoc-in [:room-members room-id :attempted?] true))))
 
 (re-frame/reg-event-db
  :room/set-member-sort
