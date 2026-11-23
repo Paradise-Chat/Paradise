@@ -418,6 +418,12 @@ component slots
            (inject-css! (str "plugin-css-" (name (:id full-plugin-map)))
                         (reg/resolve-relative-url url css-url)))
 
+         (when-let [pid (:id full-plugin-map)]
+           (when (or (:i18n full-plugin-map)
+                     (:i18n-url full-plugin-map)
+                     (reg/get-plugin-i18n-url pid))
+             (rf/dispatch [:i18n/load-plugin-extensions pid url full-plugin-map])))
+
          (when-let [scripts (:external-scripts full-plugin-map)]
            (doseq [script-url scripts]
              (<p! (inject-script! (reg/resolve-relative-url url script-url)))))
