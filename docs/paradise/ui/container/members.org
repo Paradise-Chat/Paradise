@@ -81,7 +81,6 @@ diffs like Timeline, Spaces, and Rooms.
  :room/set-member-sort
  (fn [db [_ room-id sort-type]]
    (assoc-in db [:room-members room-id :sort-type] sort-type)))
-
 #+end_src
 
 
@@ -368,19 +367,19 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
 (defn profile-popover-trigger [member custom-tags active-room pos child]
   (let [open-popover! (fn [current-target]
                         (let [rect (.getBoundingClientRect current-target)
-                              px (if (= pos :left)
-                                   (- (.-left rect) 265)
-                                   (+ (.-right rect) 15))
-                              py (.-top rect)]
-                          (log/error member)
+                              px   (if (= pos :left)
+                                     (- (.-left rect) 312)
+                                     (+ (.-right rect) 15))
+                              py   (.-top rect)]
                           (re-frame/dispatch
                            [:ui/open-popover :profile-preview
                             {:x         px
                              :y         py
-                             :width     265
-                             :height    150
+                             :width     300
+                             :height    260
                              :backdrop? true
                              :member    member
+                             :room-id   active-room
                              :tags      custom-tags}])))
         trigger-props {:on-click (fn [e]
                                    (.stopPropagation e)
