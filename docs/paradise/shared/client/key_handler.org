@@ -17,6 +17,7 @@ Later, we'll expand it to handle native input for features like push to talk.
 (ns paradise.shared.client.key-handler
   (:require
    [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [normalize-id]]
    [reagent.core :as r]
    [re-frame.core :as re-frame]
    [re-frame.db :as db]))
@@ -30,11 +31,6 @@ are registered. Instead that responsibility is pushed to the actual
 module namespaces themselves.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/key_handler.cljs
-(defn- normalize-id [id]
-  (if (keyword? id)
-    (subs (str id) 1)
-    (str id)))
-
 (defmulti keybind-spec identity)
 
 (defmethod keybind-spec :default [action-id]
