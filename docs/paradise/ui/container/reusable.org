@@ -293,17 +293,30 @@ Now we also can supply a reusable container for those events
 as often times these on-off events are useful to be used as a jump-to.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/reusable.cljs
-(defn ^:ui message-preview-item [room-id event]
-  (let [tr         @(re-frame/subscribe [:i18n/tr])
-        hs-url           @(re-frame/subscribe [:sdk/homeserver-url])
-        is-mobile?       @(re-frame/subscribe [:ui/mobile?])
-        my-profile       @(re-frame/subscribe [:sdk/profile])
-        my-id            (:user-id my-profile)]
-    [:div.message-preview-card
-     [event-tile-render event hs-url is-mobile? my-id tr]
-     [:button.jump-btn
-      {:on-click #(re-frame/dispatch [:room/pretty-jump room-id (:id event)])}
-      (tr [:container/jump-to-message])]]))
+(defn ^:ui message-preview-item
+  ([room-id event]
+   [message-preview-item room-id event nil])
+  ([room-id event {:keys [show-room-badge?]}]
+   (let [tr             @(re-frame/subscribe [:i18n/tr])
+         rooms-map      @(re-frame/subscribe [:rooms/unfiltered-indexed-map])
+         target-room-id (or (:room-id event) (:room_id event) room-id)
+         cross-room?    (and target-room-id room-id (not= target-room-id room-id))
+         room-meta      (when (or show-room-badge? cross-room?)
+                          (get rooms-map target-room-id))
+         room-label     (when (or show-room-badge? cross-room?)
+                          (let [nm (or (:name room-meta) (:room-name event) target-room-id)]
+                            (if (:isDirect room-meta)
+                              (str "@ " nm)
+                              (str "# " nm))))]
+     [:div.message-preview-card
+      (when room-label
+        [:div.message-preview-room-badge
+         {:on-click #(re-frame/dispatch [:room/pretty-jump target-room-id (:id event)])}
+         room-label])
+      [event-tile-render event]
+      [:button.jump-btn
+       {:on-click #(re-frame/dispatch [:room/pretty-jump target-room-id (:id event)])}
+       (tr [:container/jump-to-message])]])))
 #+end_src
 
 
