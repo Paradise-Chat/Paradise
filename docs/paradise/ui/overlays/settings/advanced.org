@@ -15,6 +15,7 @@ live here.
   (:require
    [paradise.ui.overlays.settings.plugins :as plugins]
    [paradise.ui.overlays.settings.registry :as registry]
+   [paradise.ui.overlays.tray :as tray]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 #+end_src
@@ -30,6 +31,8 @@ live here.
           policy          @(re-frame/subscribe [:settings/media-preview-policy])
           previews-on?    (= policy :on)
           submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
+          close-to-tray?  @(re-frame/subscribe [:settings/close-to-tray?])
+          tray-supported? (tray/tray-supported?)
           crawler-on?     @(re-frame/subscribe [:settings/encrypted-search-crawler])
           idx-status      @(re-frame/subscribe [:search/index-status])
           supported?      (:supported? idx-status)
@@ -74,6 +77,27 @@ live here.
                              :off)])}]
            [:div.settings-toggle-track
             [:div.settings-toggle-knob]]]]]]
+
+       (when tray-supported?
+         [:div.settings-hub-group
+          [:div.settings-hub-group-label
+           (tr [:settings.advanced/desktop-subheading])]
+          [:div.settings-hub-group-card
+           [:div.settings-card-row.is-toggle
+            [:div.settings-row-text
+             [:div.settings-row-title
+              (tr [:settings.advanced/close-to-tray-title])]
+             [:div.settings-row-description
+              (tr [:settings.advanced/close-to-tray-description])]]
+            [:label.settings-toggle
+             [:input
+              {:type      "checkbox"
+               :checked   (boolean close-to-tray?)
+               :on-change #(re-frame/dispatch
+                            [:settings/set-close-to-tray
+                             (.. % -target -checked)])}]
+             [:div.settings-toggle-track
+              [:div.settings-toggle-knob]]]]]])
 
        [:div.settings-hub-group
         [:div.settings-hub-group-label
