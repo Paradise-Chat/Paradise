@@ -339,6 +339,29 @@ as often times these on-off events are useful to be used as a jump-to.
     border-color: var(--brand-primary-alpha);
 }
 
+.message-preview-room-badge {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    margin-bottom: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.message-preview-room-badge:hover {
+    background: var(--surface-4);
+    color: var(--text-primary);
+}
+
 .jump-btn {
       margin-top: 12px;
       display: flex;
