@@ -746,6 +746,115 @@ provide an avatar color.
 (defn kname [arg]
   (name arg))
 
+(defn normalize-presence [raw]
+  (when raw
+    (case (str/lower-case (if (keyword? raw) (name raw) (str raw)))
+      ("online" "active")                               :online
+      ("away" "idle" "unavailable")                     :away
+      ("dnd" "do_not_disturb" "do-not-disturb" "busy")  :dnd
+      ("offline" "invisible" "hidden")                  :offline
+      nil)))
+
+(defn presence-label [status]
+  (case (normalize-presence status)
+    :online  "Online"
+    :away    "Away"
+    :dnd     "Do Not Disturb"
+    :offline "Offline"
+    nil))
+
+(re-frame/reg-event-db
+ :presence/sync-batch
+ (fn [db [_ raw-presences]]
+   (let [m         (cond
+                     (map? raw-presences)    raw-presences
+                     (object? raw-presences) (js->clj raw-presences)
+                     :else                   nil)
+         prev-map  (:user-presences db {})
+         next-map  (if (seq m)
+                     (reduce-kv
+                      (fn [acc k v]
+                        (let [uid  (if (keyword? k)
+                                     (subs (str k) 1)
+                                     (str k))
+                              norm (normalize-presence v)]
+                          (if (and (not (str/blank? uid)) norm)
+                            (if (= (get acc uid) norm)
+                              acc
+                              (assoc acc uid norm))
+                            acc)))
+                      prev-map
+                      m)
+                     prev-map)]
+     (if (identical? prev-map next-map)
+       db
+       (assoc db :user-presences next-map)))))
+
+(re-frame/reg-event-db
+ :presence/receive-own-status
+ (fn [db [_ raw-status]]
+   (if-let [norm (normalize-presence raw-status)]
+     (if (= (:own-presence db) norm)
+       db
+       (assoc db :own-presence norm))
+     db)))
+
+(re-frame/reg-event-fx
+ :presence/hydrate-own-status
+ (fn [{:keys [db]} [_ saved-val]]
+   (let [norm (or (normalize-presence saved-val) :online)]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments {:status (name norm)}}))
+         (catch :default _ nil)))
+     {:db (assoc db :own-presence norm)})))
+
+(re-frame/reg-event-fx
+ :presence/set-own-status
+ (fn [{:keys [db]} [_ status]]
+   (let [norm (or (normalize-presence status) :online)]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments {:status (name norm)}}))
+         (catch :default e
+           (log/warn "Engine does not support :set-presence or failed:" e))))
+     {:db       (assoc db :own-presence norm)
+      :dispatch [:settings/save "user_presence" (name norm)]})))
+
+(re-frame/reg-sub
+ :presence/map
+ (fn [db _]
+   (get db :user-presences {})))
+
+(re-frame/reg-sub
+ :presence/own-status
+ (fn [db _]
+   (get db :own-presence :online)))
+
+(re-frame/reg-sub
+ :presence/user
+ :<- [:presence/map]
+ :<- [:presence/own-status]
+ :<- [:auth/active-user-id]
+ (fn [[p-map own-status my-uid] [_ user-id fallback]]
+   (let [uid (when user-id (str user-id))]
+     (cond
+       (or (nil? uid) (str/blank? uid))
+       nil
+
+       (and my-uid (= uid (str my-uid)))
+       own-status
+
+       :else
+       (or (get p-map uid)
+           (normalize-presence fallback))))))
+
 (defonce !broken-urls (r/atom #{}))
 
 (defn- render-mini-member-avatar [member sub-size]
