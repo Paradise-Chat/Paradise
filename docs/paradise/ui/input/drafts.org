@@ -412,6 +412,21 @@ For now this is just exploratory.
  :composer/loaded-text
  (fn [db [_ room-id]]
    (get-in db [:composer room-id :loaded-text] "")))
+
+(re-frame/reg-sub
+ :composer/has-content?
+ (fn [db [_ room-id]]
+   (let [{:keys [text html loaded-text]} (get-in db [:composer room-id])
+         atts                            (get-in db [:drafts room-id :attachments])
+         eff-html                        (str (or html loaded-text ""))
+         eff-text                        (str (or text
+                                                  (when (string? loaded-text)
+                                                    (str/replace loaded-text #"<[^>]+>" ""))
+                                                  ""))]
+     (boolean
+      (or (seq atts)
+          (not (str/blank? eff-text))
+          (str/includes? eff-html "<img"))))))
 #+end_src
 
 
