@@ -406,13 +406,19 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/members.cljs
 (defn member-item [m custom-tags active-room]
   (let [pl         (:power-level m)
+        uid        (:user-id m)
+        status     @(re-frame/subscribe [:presence/user uid (:presence m)])
         tag-data   (get custom-tags (keyword (str pl)))
         role-name  (:name tag-data)
         role-color (or (:color tag-data) "var(--text-primary)")
         icon-uri   (some-> tag-data :icon :key)]
     [profile-popover-trigger m custom-tags active-room :left
      [:div.member-item
-      [avatar {:id (:user-id m) :name (:display-name m) :url (:avatar-url m) :size 32}]
+      [avatar {:id     uid
+               :name   (:display-name m)
+               :url    (:avatar-url m)
+               :size   32
+               :status status}]
       [:div.member-item-info
        [:div.member-item-name-row
         [:span.member-item-name {:style {:color role-color}} (:display-name m)]
@@ -421,7 +427,7 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
            (when icon-uri
              [media {:uri icon-uri :class "member-item-role-icon"}])
            role-name])]
-       [:span.member-item-user-id (:user-id m)]]]]))
+       [:span.member-item-user-id uid]]]]))
 #+end_src
 
 
