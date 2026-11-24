@@ -585,11 +585,14 @@ Reusable pure helpers shared across UI, workers, and client modules.
     (str id)))
 
 (defn normalize-keyword
-  "Converts a non-empty keyword, string, or symbol into a keyword; returns nil otherwise."
+  "Converts a non-empty keyword, string, or symbol into a keyword (preserving namespace); returns nil otherwise."
   [x]
-  (when (or (keyword? x) (string? x) (symbol? x))
-    (when-let [s (not-empty (name x))]
-      (keyword s))))
+  (cond
+    (keyword? x) x
+    (symbol? x)  (keyword x)
+    (string? x)  (let [s (str/replace x #"^:" "")]
+                   (when (seq s) (keyword s)))
+    :else        nil))
 
 (defn clean-user-id
   "Strips trailing LiveKit/device suffixes (e.g. `|device`) from a matrix-style user ID."
