@@ -233,11 +233,52 @@ Likely we'll need some more tweaks in the future for other protocol support stil
        :on-change #(rf/dispatch [:call/set-volume volume-key (.. % -target -value)])}]
      [:span.call-volume-value (str effective "%")]]))
 
-(defn toggle-video-pip [video-el]
-  (when (and video-el (.-pictureInPictureEnabled js/document))
-    (if (= (.-pictureInPictureElement js/document) video-el)
-      (-> (.exitPictureInPicture js/document) (p/catch (fn [_] nil)))
-      (-> (.requestPictureInPicture video-el) (p/catch (fn [_] nil))))))
+(defn toggle-video-pip [^js video-el]
+  (when video-el
+    (cond
+      (and (exists? js/document) (.-pictureInPictureEnabled js/document))
+      (if (= (.-pictureInPictureElement js/document) video-el)
+        (-> (.exitPictureInPicture js/document) (p/catch (fn [_] nil)))
+        (-> (.requestPictureInPicture video-el) (p/catch (fn [_] nil))))
+
+      (and (fn? (.-webkitSupportsPresentationMode video-el))
+           (fn? (.-webkitSetPresentationMode video-el))
+           (try (.webkitSupportsPresentationMode video-el "picture-in-picture")
+                (catch :default _ false)))
+      (let [cur-mode (.-webkitPresentationMode video-el)]
+        (try
+          (.webkitSetPresentationMode
+           video-el
+           (if (= cur-mode "picture-in-picture") "inline" "picture-in-picture"))
+          (catch :default _ nil)))
+
+      (fn? (.-webkitEnterFullscreen video-el))
+      (try (.webkitEnterFullscreen video-el) (catch :default _ nil)))))
+
+(defonce ^:private !ios-webaudio-ctx (atom nil))
+
+(defn- ios-webkit-audio? []
+  (when (exists? js/navigator)
+    (let [ua  (str (.-userAgent js/navigator))
+          plt (str (.-platform js/navigator))
+          mtp (or (.-maxTouchPoints js/navigator) 0)]
+      (or (boolean (re-find #"(?i)iPhone|iPad|iPod" ua))
+          (and (= plt "MacIntel") (> mtp 1))))))
+
+(defn- ensure-ios-webaudio-ctx! []
+  (let [Ctor (when (exists? js/window)
+               (or (.-AudioContext js/window)
+                   (.-webkitAudioContext js/window)))]
+    (when Ctor
+      (let [^js cur @!ios-webaudio-ctx
+            ^js ctx (if (or (nil? cur) (= (.-state cur) "closed"))
+                      (let [^js created (Ctor.)]
+                        (reset! !ios-webaudio-ctx created)
+                        created)
+                      cur)]
+        (when (contains? #{"suspended" "interrupted"} (.-state ctx))
+          (-> (.resume ctx) (p/catch (fn [_] nil))))
+        ctx))))
 
 (defn remote-audio-track [{:keys [track volume muted? output-device-id]}]
   (let [audio-ref  (react/useRef nil)
