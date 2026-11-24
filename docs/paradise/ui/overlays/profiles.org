@@ -42,36 +42,142 @@ aspect.
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
+(defonce ^:private !profile-cache (r/atom {}))
+(defonce ^:private !in-flight-profiles (atom #{}))
+(def ^:private profile-ttl-ms 60000)
+
+(defn- ensure-member-profile-loaded! [engine-kw user-id room-id]
+  (when (and user-id (not (str/blank? (str user-id))))
+    (let [uid    (str user-id)
+          ckey   [(or engine-kw :default) uid]
+          cached (get @!profile-cache ckey)
+          now    (js/Date.now)
+          stale? (or (nil? cached)
+                     (> (- now (or (:fetched-at cached) 0)) profile-ttl-ms))]
+      (when (and stale? (not (contains? @!in-flight-profiles ckey)))
+        (swap! !in-flight-profiles conj ckey)
+        (go
+          (try
+            (let [res (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :fetch-profile
+                            :arguments (cond-> {:user-id uid}
+                                         room-id (assoc :room-id (str room-id)))}))]
+              (if (ok-status? res)
+                (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
+                                                  :data       (or (:profile res) {})})
+                (when-not cached
+                  (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
+                                                    :data       {}}))))
+            (catch :default _
+              (when-not cached
+                (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
+                                                  :data       {}})))
+            (finally
+              (swap! !in-flight-profiles disj ckey))))))))
+
+(defn- resolve-preview-state [member remote self-p]
+  (let [uid      (first-non-blank (:user-id member))
+        pick     (fn [k] (first-non-blank (k self-p) (k remote) (k member)))
+        raw-m-nm (first-non-blank (:display-name member))
+        uname    (pick :username)
+        handle   (or (pick :handle)
+                     (when uname (str "@" uname))
+                     uid)]
+    {:uid       uid
+     :disp-name (or (when (and raw-m-nm (not= raw-m-nm uid)) raw-m-nm)
+                    (first-non-blank (:display-name self-p) (:display-name remote))
+                    raw-m-nm
+                    uid
+                    "?")
+     :av-url    (first-non-blank (:avatar-url self-p) (:avatar-url member) (:avatar-url remote))
+     :bn-url    (pick :banner-url)
+     :bn-color  (pick :banner-color)
+     :bio       (pick :bio)
+     :pronouns  (pick :pronouns)
+     :handle    handle
+     :sub-id    (or (pick :sub-id)
+                    (when (and handle uid (not= handle uid)) uid))}))
+
 (defn ^:ui profile-preview-content [args]
-  (let [{:keys [member tags]} args
-        pl         (:power-level member)
-        tag-data   (get tags (keyword (str pl)))
-        role-name  (:name tag-data)
-        role-color (or (:color tag-data) "var(--text-primary)")
-        icon-uri   (some-> tag-data :icon :key)]
+  (let [{:keys [member tags room-id]} args
+        tr            @(re-frame/subscribe [:i18n/tr])
+        active-engine @(re-frame/subscribe [:auth/active-engine])
+        active-uid    @(re-frame/subscribe [:auth/active-user-id])
+        own-profile   @(re-frame/subscribe [:sdk/profile])
+        uid           (some-> (:user-id member) str not-empty)
+        _             (ensure-member-profile-loaded! active-engine uid room-id)
+        remote        (when uid
+                        (:data (get @!profile-cache [(or active-engine :default) uid])))
+        self-p        (when (and uid active-uid (= uid (str active-uid)))
+                        own-profile)
+        st            (resolve-preview-state member remote self-p)
+        status        @(re-frame/subscribe [:presence/user (:uid st) (:presence remote)])
+        pl            (:power-level member)
+        tag-data      (get tags (keyword (str pl)))
+        role-name     (:name tag-data)
+        role-color    (:color tag-data)
+        icon-uri      (some-> tag-data :icon :key)
+        bn-url        (:bn-url st)
+        bn-color      (:bn-color st)]
     [:div.profile-preview-card
-     [:div.profile-preview-cover]
+     [:div.profile-preview-cover
+      {:style (when (and (nil? bn-url) bn-color)
+                {:background bn-color})}
+      (when bn-url
+        (if (local-media-url? bn-url)
+          [:img.profile-preview-banner-img
+           {:src bn-url
+            :alt ""}]
+          [media
+           {:uri     bn-url
+            :user-id active-uid
+            :class   "profile-preview-banner-img"
+            :alt     ""}]))]
      [:div.profile-preview-content
       [:div.profile-preview-avatar-wrap
-       [avatar {:id   (:user-id member)
-                :name (:display-name member)
-                :url  (:avatar-url member)
-                :size 64}]]
-      [:div.profile-preview-id-block
-       [:span.profile-preview-name {:style {:color role-color}}
-        (:display-name member)]
-       [:span.profile-preview-id
-        (:user-id member)]]
-      (when role-name
-        [:div.profile-preview-role-row
-         (when icon-uri
-           [media {:uri   icon-uri
-                   :class "member-item-role-icon"
-                   :alt   role-name}])
-         [:span.profile-preview-role-text {:style {:color role-color}}
-          role-name]])
-      [plugins/plugin-slot :profile-actions {:member member}]]]))
-
+       [avatar {:id     (:uid st)
+                :name   (:disp-name st)
+                :url    (:av-url st)
+                :size   68
+                :status status}]]
+      [:div.profile-preview-body
+       [:div.profile-preview-id-block
+        [:span.profile-preview-name
+         (cond-> {}
+           role-color (assoc :style {:color role-color}))
+         (:disp-name st)]
+        (when (or (:handle st) (:pronouns st))
+          [:div.profile-preview-meta-row
+           (when (:handle st)
+             [:span.profile-preview-handle (:handle st)])
+           (when (and (:handle st) (:pronouns st))
+             [:span.profile-preview-dot "·"])
+           (when (:pronouns st)
+             [:span.profile-preview-pronouns (:pronouns st)])])
+        (when (:sub-id st)
+          [:span.profile-preview-id (:sub-id st)])]
+       (when (and role-name (nil? room-id))
+         [:div.profile-preview-role-row
+          (when icon-uri
+            [media {:uri   icon-uri
+                    :class "member-item-role-icon"
+                    :alt   role-name}])
+          [:span.profile-preview-role-text
+           (cond-> {}
+             role-color (assoc :style {:color role-color}))
+           role-name]])
+       (when (:bio st)
+         [:div.profile-preview-bio-card
+          [:div.profile-preview-section-label
+           (tr-or tr :settings.profile/bio-label "About Me")]
+          [:div.profile-preview-bio (:bio st)]])
+       (when room-id
+         [member-popover-roles-and-mod
+          {:member  member
+           :room-id room-id
+           :tags    tags}])
+       [plugins/plugin-slot :profile-actions {:member (merge remote self-p member)}]]]]))
 
 (defmethod popover-component :profile-preview [_]
   profile-preview-content)
