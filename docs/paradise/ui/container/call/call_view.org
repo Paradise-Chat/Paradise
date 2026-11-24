@@ -296,6 +296,34 @@ this will be where that lives.
                 :on-click #(choose! app-item)}
                [:span.call-share-audio-item-text label]])])]))))
 
+(defn- screen-share-supported? []
+  (try
+    (when (exists? js/navigator)
+      (let [devs (.-mediaDevices js/navigator)]
+        (and (some? devs)
+             (fn? (.-getDisplayMedia devs))
+             (not (mobile-runtime?)))))
+    (catch :default _
+      false)))
+
+(defn share-screen-button [{:keys [screen-sharing?]}]
+  (let [btn-ref (react/useRef nil)]
+    (react/useEffect
+     (fn []
+       (if-let [^js el (.-current btn-ref)]
+         (let [on-click (fn [_]
+                          (rf/dispatch-sync [:call/toggle-screen-share]))]
+           (.addEventListener el "click" on-click)
+           (fn []
+             (.removeEventListener el "click" on-click)))
+         js/undefined))
+     #js [])
+    [:button.call-control-btn
+     {:ref   btn-ref
+      :type  "button"
+      :class (when screen-sharing? "is-active")}
+     (if screen-sharing? "Stop Share" "Share Screen")]))
+
 (defn call-control-bar []
   (let [audio-enabled?  @(rf/subscribe [:call/audio-enabled?])
         video-enabled?  @(rf/subscribe [:call/video-enabled?])
