@@ -361,6 +361,41 @@ spot for them to live and be utilized neatly outside of it.
        (catch :default e
          (reject e))))))
 
+(defn file->base64-payload
+  "Reads a browser File/Blob into `{:buffer-b64 :mime :filename}` for worker RPCs,
+  or resolves to nil when `file` is nil."
+  [^js file]
+  (if-not file
+    (p/resolved nil)
+    (p/let [ab (file->array-buffer file)]
+      (let [u8  (when (and ab (pos? (.-byteLength ab)))
+                  (js/Uint8Array. ab))
+            b64 (when u8 (encoding/uint8->base64 u8))]
+        {:buffer-b64 b64
+         :mime       (or (not-empty (.-type file)) "image/png")
+         :filename   (.-name file)}))))
+
+(defn revoke-object-url!
+  "Safely revokes a `blob:` object URL, ignoring errors."
+  [url]
+  (when url
+    (try
+      (js/URL.revokeObjectURL url)
+      (catch :default _ nil))))
+
+(defn click-element-by-id!
+  "Triggers a click on the DOM element with `element-id`, if mounted."
+  [element-id]
+  (when-let [el (and element-id (exists? js/document) (.getElementById js/document element-id))]
+    (.click el)))
+
+(defn copy-to-clipboard!
+  "Writes `text` to the browser clipboard when available; returns true on dispatch."
+  [text]
+  (when-let [cb (and (exists? js/navigator) (.-clipboard js/navigator))]
+    (.writeText cb (str text))
+    true))
+
 (defn extract-metadata [raw-file]
   (p/create
    (fn [resolve-fn _]
