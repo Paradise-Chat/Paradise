@@ -91,13 +91,16 @@ Paradise binds a completely protocol-agnostic calling runtime.
 
 (defn get-or-create-audio-processor! []
   (or @!audio-processor
-      (let [processor (audio-processor/create-processor
-                       {:threshold @!voice-threshold
-                        :gate-enabled? @!voice-gate-enabled?
-                        :hangover-ms 180})]
+      (let [ios?      (ios-runtime?)
+            processor (audio-processor/create-processor
+                       {:threshold     @!voice-threshold
+                        :gate-enabled? (and @!voice-gate-enabled? (not ios?))
+                        :ios-direct?   ios?
+                        :hangover-ms   180})]
         (reset! !audio-processor processor)
-        (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
-          (set-enabled @!noise-suppression-enabled?))
+        (when-not ios?
+          (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
+            (set-enabled @!noise-suppression-enabled?)))
         processor)))
 
 (defn create-test-audio-processor []
