@@ -139,34 +139,49 @@ Paradise binds a completely protocol-agnostic calling runtime.
                           nil)
           _             (reset! !encoder-worker encoder)
           driver        (create-driver
-                         #js {:sessionConfig (clj->js session-config)
-                              :encoderWorker encoder
-                              :getAudioProcessor get-or-create-audio-processor!
-                              :onParticipantsChanged (fn [js-participants]
-                                                       (let [parsed (into []
-                                                                          (keep normalize-participant-tile)
-                                                                          (array-seq (or js-participants #js [])))]
-                                                         (reset! !participants parsed)
-                                                         (when-let [cb (:on-participants-changed callbacks)]
-                                                           (cb parsed))))
-                              :onLocalMediaChanged (fn [js-state]
-                                                     (let [parsed (js->clj js-state :keywordize-keys true)]
-                                                       (swap! !local-media-state merge parsed)
-                                                       (when-let [cb (:on-local-media-changed callbacks)]
-                                                         (cb parsed))))
-                              :onConnected (fn []
-                                             (when-let [cb (:on-connected callbacks)]
-                                               (cb)))
-                              :onDisconnected (fn [reason]
-                                                (reset! !local-media-state {:audio false :video false :screen-sharing false})
-                                                (when-let [cb (:on-disconnected callbacks)]
-                                                  (cb reason)))
-                              :onSignalOut (fn [js-payload]
-                                             (when-let [cb (:on-signal-out callbacks)]
-                                               (cb (js->clj js-payload :keywordize-keys true))))
-                              :onError (fn [category err]
-                                         (when-let [cb (:on-error callbacks)]
-                                           (cb (keyword category) err)))})]
+                         #js {:sessionConfig        (clj->js session-config)
+                              :encoderWorker        encoder
+                              :getAudioProcessor    get-or-create-audio-processor!
+                              :onParticipantsChanged
+                              (fn [js-participants]
+                                (let [parsed (into []
+                                                   (keep normalize-participant-tile)
+                                                   (array-seq (or js-participants #js [])))]
+                                  (reset! !participants parsed)
+                                  (when-let [cb (:on-participants-changed callbacks)]
+                                    (cb parsed))))
+                              :onLocalMediaChanged
+                              (fn [js-state]
+                                (when-let [cb (:on-local-media-changed callbacks)]
+                                  (cb (js->clj js-state :keywordize-keys true))))
+                              :onConnected
+                              (fn []
+                                (when-let [cb (:on-connected callbacks)]
+                                  (cb)))
+                              :onDisconnected
+                              (fn [reason]
+                                (when-let [cb (:on-disconnected callbacks)]
+                                  (cb reason)))
+                              :onSignalOut
+                              (fn [js-payload]
+                                (when-let [cb (:on-signal-out callbacks)]
+                                  (cb (js->clj js-payload :keywordize-keys true))))
+                              :onDataReceived
+                              (fn [raw-bytes js-meta]
+                                (when-let [cb (:on-data-received callbacks)]
+                                  (cb raw-bytes js-meta))
+                                (when (exists? js/window)
+                                  (try
+                                    (.dispatchEvent
+                                     js/window
+                                     (js/CustomEvent. "paradise:call-data"
+                                                      #js {:detail #js {:bytes raw-bytes
+                                                                        :meta  js-meta}}))
+                                    (catch :default _ nil))))
+                              :onError
+                              (fn [category err]
+                                (when-let [cb (:on-error callbacks)]
+                                  (cb (keyword category) err)))})]
     (reset! !driver-instance driver)
     (flush-pending-crypto! driver)
     (when-let [connect-fn (aget driver "connect")]
