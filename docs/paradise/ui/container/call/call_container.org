@@ -372,10 +372,11 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                (p/catch (fn [_] nil)))))
        js/undefined)
      #js [output-device-id])
-    [:audio {:ref      audio-ref
-             :autoPlay true
-             :muted    eff-muted
-             :style    {:display "none"}}]))
+    [:audio {:ref                        audio-ref
+             :data-paradise-remote-audio "true"
+             :autoPlay                   true
+             :playsInline                true
+             :style                      {:display "none"}}]))
 
 (defn mini-video-preview [{:keys [track mirror? video-ref]}]
   (let [live-track (rtc/resolve-media-track track)]
@@ -630,17 +631,7 @@ Likely we'll need some more tweaks in the future for other protocol support stil
      (when is-active?
        [:f> persistent-audio-renderer {:deafened? deafened?}])
      children]))
-#+end_src
 
-
-
-**** Tray
-
-
-***** TODO Update to use TR for the tray entries
-
-
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defmethod tray-section :call
   [_ {:keys [connected? audio-enabled? deafened? screen-sharing?]
       :or   {audio-enabled?  true
@@ -666,13 +657,7 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                {:type    "separator"}
                {:id      "call/hangup"
                 :label   "Disconnect Call"}]}))
-#+end_src
 
-
-**** Keybinds
-
-
-#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/call_container.cljs
 (defmethod keybind-spec :call/toggle-audio [_]
   {:id              "call/toggle-audio"
    :label-key       :settings.keybinds/action-toggle-mute
