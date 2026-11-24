@@ -423,10 +423,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
           parent-sp   (some-> (get rooms-map room-id) :first-parent-id)
           _           (when (and room-id (not= @!fetched-id room-id))
                         (reset! !fetched-id room-id)
-                        (re-frame/dispatch [:room-settings/fetch-config room-id])
-                        (re-frame/dispatch [:room-perms/fetch room-id parent-sp])
-                        (re-frame/dispatch [:room/fetch-members room-id])
-                        (re-frame/dispatch [:room/fetch-power-level-tags room-id]))
+                        (re-frame/dispatch [:room-settings/load-all room-id parent-sp]))
           config      (resolve-fallback-config room-id (:config rs-state) rooms-map spaces-list)
           is-space?   (boolean (:is-space? config))
           is-dm?      (boolean (:is-dm? config))
@@ -444,18 +441,17 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                         (:tabs config)
                         (default-room-tabs is-space? is-dm? (:can-manage-emotes? config true)))
           nav-items   (mapv
-                       (fn [{:keys [id title title-key subtitle subtitle-key
-                                    badge badge-source accent icon]}]
+                       (fn [{:keys [id badge badge-source accent icon] :as tab}]
                          {:id       (keyword id)
-                          :title    (or (when title-key (tr [title-key])) title (name id))
-                          :subtitle (or (when subtitle-key (tr [subtitle-key])) subtitle "")
+                          :title    (or (not-empty (resolve-item-label tr tab)) (name id))
+                          :subtitle (resolve-item-desc tr tab)
                           :badge    (or badge
                                         (case (some-> badge-source keyword)
                                           :roles-count   (when (pos? roles-cnt) (str roles-cnt))
                                           :members-count (when (pos? members-cnt) (str members-cnt))
                                           nil))
                           :accent   (or accent "indigo")
-                          :icon     (resolve-tab-icon icon)})
+                          :icon     (icons/resolve-icon icon {:default [icons/settings]})})
                        raw-tabs)]
       [:div.settings-shell
        [:div.settings-topbar
