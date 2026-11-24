@@ -8,8 +8,6 @@ call and for many people lacking certain features makes calling rather
 unpleasant. So here we can provide the needed modulations to the audio
 stream like noise canceling and volume gating.
 
-
-
 On mobile (Android ~WebView~ and iOS ~WKWebView~), ~requestAnimationFrame~
 halts completely when the app is backgrounded or the screen is locked, and
 main-thread timers can be throttled to 1 Hz on iOS even while the native WebRTC
@@ -39,7 +37,6 @@ feature.
 
 **** Code
 
-
 ***** RNNoise Set-up
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
@@ -52,35 +49,26 @@ feature.
 (defonce !registration-promises
   (js/WeakMap.))
 
-
 (def ^:private rnnoise-worklet-url
   "/rnnoise/rnnoise.worklet.js")
 
 (def ^:private rnnoise-wasm-url
   "/rnnoise/rnnoise.wasm")
 
-
 (defn audio-worklet-supported? []
-  (and
-   (exists? js/AudioContext)
-   (exists? js/AudioWorkletNode)
-   (true? js/window.isSecureContext)))
+  (and (exists? js/AudioContext)
+       (exists? js/AudioWorkletNode)
+       (true? js/window.isSecureContext)))
 
-
-(defn- module-export
-  [module export-name]
-  (or
-   (aget module export-name)
-   (when-let [default
-              (.-default module)]
-     (aget default export-name))))
-
+(defn- module-export [module export-name]
+  (or (aget module export-name)
+      (when-let [default (.-default module)]
+        (aget default export-name))))
 
 (defn load-rnnoise! []
   (cond
     @!rnnoise-module
-    (p/resolved
-     @!rnnoise-module)
+    (p/resolved @!rnnoise-module)
 
     @!rnnoise-module-promise
     @!rnnoise-module-promise
@@ -88,126 +76,54 @@ feature.
     (not (audio-worklet-supported?))
     (p/rejected
      (js/Error.
-      (str
-       "RNNoise requires AudioWorklet support in a secure browser context. "
-       "secureContext="
-       js/window.isSecureContext
-       ", AudioWorkletNode="
-       (exists? js/AudioWorkletNode))))
+      (str "RNNoise requires AudioWorklet support in a secure browser context. "
+           "secureContext=" js/window.isSecureContext
+           ", AudioWorkletNode=" (exists? js/AudioWorkletNode))))
 
     :else
     (let [promise
-          (-> (dynamic-import
-               "/rnnoise/rnnoise.mjs")
-
+          (-> (dynamic-import "/rnnoise/rnnoise.mjs")
               (p/then
                (fn [module]
-                 (let [RNNoiseNode
-                       (module-export
-                        module
-                        "RNNoiseNode")
-
-                       load-assets
-                       (module-export
-                        module
-                        "rnnoise_loadAssets")]
-
+                 (let [RNNoiseNode (module-export module "RNNoiseNode")
+                       load-assets (module-export module "rnnoise_loadAssets")]
                    (when-not RNNoiseNode
                      (throw
                       (js/Error.
-                       (str
-                        "RNNoise module loaded, but RNNoiseNode was missing. "
-                        "Exports: "
-                        (js/Object.keys module)))))
-
+                       (str "RNNoise module loaded, but RNNoiseNode was missing. "
+                            "Exports: " (js/Object.keys module)))))
                    (when-not load-assets
                      (throw
                       (js/Error.
-                       (str
-                        "RNNoise module loaded, but rnnoise_loadAssets was missing. "
-                        "Exports: "
-                        (js/Object.keys module)))))
-
-                   (reset!
-                    !rnnoise-module
-                    module)
-
+                       (str "RNNoise module loaded, but rnnoise_loadAssets was missing. "
+                            "Exports: " (js/Object.keys module)))))
+                   (reset! !rnnoise-module module)
                    module)))
-
               (p/catch
                (fn [err]
-                 (reset!
-                  !rnnoise-module-promise
-                  nil)
-
+                 (reset! !rnnoise-module-promise nil)
                  (throw err))))]
-
-      (reset!
-       !rnnoise-module-promise
-       promise)
-
+      (reset! !rnnoise-module-promise promise)
       promise)))
 
-
-
-(defn- ensure-rnnoise-registered!
-  [audio-context]
-
-  (if-let [existing
-           (.get
-            !registration-promises
-            audio-context)]
-
+(defn- ensure-rnnoise-registered! [audio-context]
+  (if-let [existing (.get !registration-promises audio-context)]
     existing
-
     (let [registration
-          (-> (p/let [module
-                      (load-rnnoise!)
-
-                      RNNoiseNode
-                      (module-export
-                       module
-                       "RNNoiseNode")
-
-                      load-assets
-                      (module-export
-                       module
-                       "rnnoise_loadAssets")
-
-                      assets
-                      (load-assets
-                       #js {:scriptSrc
-                            rnnoise-worklet-url
-
-                            :moduleSrc
-                            rnnoise-wasm-url})
-
-                      _
-                      (.register
-                       RNNoiseNode
-                       audio-context
-                       assets)]
-
+          (-> (p/let [module      (load-rnnoise!)
+                      RNNoiseNode (module-export module "RNNoiseNode")
+                      load-assets (module-export module "rnnoise_loadAssets")
+                      assets      (load-assets #js {:scriptSrc rnnoise-worklet-url
+                                                    :moduleSrc rnnoise-wasm-url})
+                      _           (.register RNNoiseNode audio-context assets)]
                 RNNoiseNode)
-
               (p/catch
                (fn [err]
-                 (.delete
-                  !registration-promises
-                  audio-context)
-
+                 (.delete !registration-promises audio-context)
                  (throw err))))]
-
-      (.set
-       !registration-promises
-       audio-context
-       registration)
-
+      (.set !registration-promises audio-context registration)
       registration)))
-
 #+end_src
-
-
 
 ***** Helpers
 
