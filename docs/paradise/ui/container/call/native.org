@@ -29,24 +29,34 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
    [taoensso.timbre :as log]))
 #+end_src
 
-
-
 **** Code
 
-
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/native.cljs
-(def call-plugin
-  (when (.isNativePlatform js/Capacitor)
-  (registerPlugin "ParadiseCall"))
-)
+(defonce call-plugin
+  (when (and (exists? Capacitor) (.isNativePlatform Capacitor))
+    (registerPlugin "ParadiseCall")))
 
-(defn request-media-permissions! []
-  (when call-plugin
-    (.requestMediaPermissions call-plugin)))
+(defonce ^:private !listeners-initialized? (atom false))
 
-(defn start-call! [room-id display-name]
-  (when call-plugin
-    (.startCall call-plugin #js {:roomId room-id :name display-name})))
+(defn native-available? []
+  (and (some? call-plugin)
+       (try
+         (.isPluginAvailable Capacitor "ParadiseCall")
+         (catch :default _ true))))
+
+(defn- invoke-native! [method-name & [js-args]]
+  (if-not (native-available?)
+    (p/resolved nil)
+    (let [fn-ref (aget call-plugin method-name)]
+      (if (fn? fn-ref)
+        (-> (if (some? js-args)
+              (.call fn-ref call-plugin js-args)
+              (.call fn-ref call-plugin #js {}))
+            (p/catch (fn [err]
+                       (log/warn "ParadiseCall" method-name "warning:" err)
+                       nil)))
+        (p/resolved nil)))))
+
 
 (defn report-connected! [room-id]
   (when call-plugin
