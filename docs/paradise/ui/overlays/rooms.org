@@ -12,13 +12,15 @@ given room, space, server, channel, community, or direct message.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
 (ns paradise.ui.overlays.rooms
   (:require
-   [paradise.ui.overlays.base :refer [popover-component
-                          context-menu-component]]
-   [taoensso.timbre :as log]
-   [paradise.shared.utils.svg :as icons]
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
+   [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [decode-edn-field ok-status? resolve-item-label]]
+   [paradise.shared.utils.svg :refer [resolve-icon]]
+   [paradise.ui.overlays.base :refer [context-menu-component]]
    [re-frame.core :as re-frame]
-   [paradise.ui.global :refer [avatar]]
-   [paradise.media.component :refer [media]]))
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 #+end_src
 
 
