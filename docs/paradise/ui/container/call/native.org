@@ -20,9 +20,13 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/native.cljs
 (ns paradise.ui.container.call.native
-  (:require [re-frame.core :as rf]
-            ["@capacitor/core" :refer [Capacitor registerPlugin]]
-            [taoensso.timbre :as log]))
+  (:require
+   ["@capacitor/core" :refer [Capacitor registerPlugin]]
+   [clojure.string :as str]
+   [goog.object :as gobj]
+   [promesa.core :as p]
+   [re-frame.core :as rf]
+   [taoensso.timbre :as log]))
 #+end_src
 
 
