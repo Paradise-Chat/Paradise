@@ -152,7 +152,8 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                         (.-current state-ref)
                         nodes (.-current nodes-ref)
                         now   (js/performance.now)]
-                    (when (and (seq nodes) (= (.-state ctx) "suspended"))
+                    (when (and (seq nodes)
+                               (contains? #{"suspended" "interrupted"} (.-state ctx)))
                       (-> (.resume ctx) (p/catch (fn [_] nil))))
                     (let [speaking-set
                           (reduce
