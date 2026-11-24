@@ -74,7 +74,6 @@ given room, space, server, channel, community, or direct message.
 #+end_src
 
 
-**** Context Menu
 **** Room Options Re-frame Events & Fallback
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
@@ -146,25 +145,56 @@ given room, space, server, channel, community, or direct message.
 #+end_src
 
 
+**** Context Menu
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
-(defn ^:ui room-context-menu-content [{:keys [room-id parent-id room-name is-space? is-dm? context membership close-fn]}]
-  (let [tr @(re-frame/subscribe [:i18n/tr])
-        items (build-room-actions tr room-id parent-id room-name is-space? is-dm? context membership)]
-    [:<>
-     (for [{:keys [id label action class-name icon]} items]
-       ^{:key id}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
-                     (.stopPropagation e)
-                     (when action
-                       (action))
-                     (if close-fn
-                       (close-fn)
-                       (re-frame/dispatch [:ui/close-context-menu])))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+(defn ^:ui engine-room-option-items
+  "Fetches and renders engine-supplied room option items for a context menu."
+  [{:keys [room-id parent-id room-name is-space? is-dm? context membership close-fn on-item-click]}]
+  (r/with-let [!last-req (atom nil)]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          preview       @(re-frame/subscribe [:rooms/preview room-id])
+          is-forum?     @(re-frame/subscribe [:room/is-forum? room-id])
+          native-forum? (boolean (:native-forum? preview))
+          req           {:room-id       room-id
+                         :parent-id     parent-id
+                         :room-name     room-name
+                         :is-space?     (boolean is-space?)
+                         :is-dm?        (boolean is-dm?)
+                         :context       (or context :list)
+                         :membership    (or membership "joined")
+                         :is-forum?     (boolean is-forum?)
+                         :native-forum? native-forum?}
+          cache-key     (options-cache-key active-engine req)
+          _             (when (and room-id (not= @!last-req cache-key))
+                          (reset! !last-req cache-key)
+                          (re-frame/dispatch [:room-options/fetch req]))
+          items         @(re-frame/subscribe [:room-options/items cache-key])]
+      [:<>
+       (for [{:keys [id class-name icon divider?] :as item} items]
+         (if divider?
+           ^{:key (or id (str (random-uuid)))}
+           [:div.context-menu-divider]
+           (let [lbl     (resolve-option-label tr item)
+                 icon-el (resolve-option-icon icon)]
+             ^{:key (or id lbl)}
+             [:div.context-menu-item
+              {:class    class-name
+               :on-click (fn [e]
+                           (.stopPropagation e)
+                           (if on-item-click
+                             (on-item-click #(execute-option-command! item))
+                             (do
+                               (execute-option-command! item)
+                               (if close-fn
+                                 (close-fn)
+                                 (re-frame/dispatch [:ui/close-context-menu])))))}
+              (when icon-el [:span.item-icon icon-el])
+              [:span.item-label lbl]])))])))
+
+(defn ^:ui room-context-menu-content [props]
+  [engine-room-option-items props])
 
 (defmethod context-menu-component :room-actions [_]
   room-context-menu-content)
