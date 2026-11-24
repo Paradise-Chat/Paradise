@@ -57,6 +57,17 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
                        nil)))
         (p/resolved nil)))))
 
+(defn request-media-permissions! [& [{:keys [video?]}]]
+  (invoke-native! "requestMediaPermissions"
+                  #js {:video (boolean video?)}))
+
+(defn start-call! [room-id display-name & [{:keys [video? engine]}]]
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "startCall"
+                    #js {:roomId   (str room-id)
+                         :name     (or (not-empty (str display-name)) "Paradise Call")
+                         :hasVideo (boolean video?)
+                         :engine   (when engine (name engine))})))
 
 (defn report-connected! [room-id]
   (when call-plugin
