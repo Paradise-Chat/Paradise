@@ -161,9 +161,7 @@ feature.
     (.linearRampToValueAtTime param target (+ now duration))))
 #+end_src
 
-
 ***** Processor
-
 
 Rough Audio Graph
 + raw mic
@@ -171,8 +169,7 @@ Rough Audio Graph
 + analyser
 + Voice Gate
 + MediaStream destination
-+ LiveKit processedTrack
-
++ Driver processedTrack
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
 (defn create-processor
