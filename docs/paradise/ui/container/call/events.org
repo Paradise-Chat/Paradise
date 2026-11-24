@@ -369,6 +369,80 @@ Most of the call re-frame events and subscriptions are listed here
                (some? screen-sharing) (assoc-in [:call :screen-sharing?] screen-sharing))}))
      {:db db})))
 
+(rf/reg-event-fx
+ :call/native-muted
+ (fn [{:keys [db]} [_ {:keys [muted?]}]]
+   (let [enabled? (not (boolean muted?))]
+     (if (= (get-in db [:call :status]) :connected)
+       {:call.driver/set-microphone {:enabled?     enabled?
+                                     :skip-native? true}}
+       {:db (assoc-in db [:call :audio-enabled?] enabled?)}))))
+
+(rf/reg-event-db
+ :call/clear-stale-device
+ (fn [db [_ kind]]
+   (update-in db [:settings :call-devices] dissoc kind)))
+
+(rf/reg-event-fx
+ :call/audio-session-activated
+ (fn [{:keys [db]} _]
+   (let [hidden?    (and (exists? js/document) (true? (.-hidden js/document)))
+         connected? (= (get-in db [:call :status]) :connected)
+         video?     (boolean (get-in db [:call :video-enabled?] false))]
+     (rtc/notify-visibility-changed! (not hidden?) {:video-enabled? video?
+                                                    :connected?     connected?})
+     {})))
+
+(rf/reg-event-fx
+ :call/native-answered
+ (fn [{:keys [db]} [_ {:keys [room-id engine has-video?] :as payload}]]
+   (if (= (:auth-status db) :logged-in)
+     (do
+       (go
+         (rf/dispatch [:rooms/select room-id])
+         (rf/dispatch [:call/init-widget room-id])
+         (<! (timeout 400))
+         (rf/dispatch [:call/start room-id {:is-native-answered? true
+                                            :has-video?          has-video?}]))
+       {:db (assoc-in db [:call :pending-native-answer] nil)})
+     {:db (-> db
+              (assoc :deep-link-room room-id)
+              (assoc-in [:call :pending-native-answer]
+                        (assoc payload :received-at (js/Date.now))))})))
+
+(rf/reg-event-fx
+ :call/flush-pending-native-answer
+ (fn [{:keys [db]} _]
+   (if-let [{:keys [room-id has-video?] :as pending}
+            (get-in db [:call :pending-native-answer])]
+     (do
+       (go
+         (<! (timeout 600))
+         (rf/dispatch [:call/native-answered pending]))
+       {:db (assoc-in db [:call :pending-native-answer] nil)})
+     {})))
+
+(rf/reg-event-fx
+ :call/visibility-changed
+ (fn [{:keys [db]} [_ visible?]]
+   {:call.driver/visibility-changed
+    {:visible?       (boolean visible?)
+     :connected?     (= (get-in db [:call :status]) :connected)
+     :video-enabled? (get-in db [:call :video-enabled?] false)}}))
+
+(rf/reg-event-fx
+ :call/incoming-invite
+ (fn [{:keys [db]} [_ {:keys [room-id caller-name video? engine]}]]
+   (when (and room-id
+              (not (get-in db [:call :is-active?] false))
+              (and (exists? js/document) (true? (.-hidden js/document))))
+     (native/report-incoming-call!
+      {:room-id room-id
+       :name    (or caller-name (resolve-room-display-name db room-id))
+       :video?  (boolean video?)
+       :engine  (or engine (:active-engine db))}))
+   {:db db}))
+
 (rf/reg-event-db
  :call/media-error
  (fn [db [_ device err]]
