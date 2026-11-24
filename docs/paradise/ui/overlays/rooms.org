@@ -75,6 +75,76 @@ given room, space, server, channel, community, or direct message.
 
 
 **** Context Menu
+**** Room Options Re-frame Events & Fallback
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
+(defn- options-cache-key [engine-id {:keys [room-id context membership is-forum?]}]
+  [(or engine-id :default)
+   (str room-id)
+   (keyword (or context :list))
+   (str (or membership "joined"))
+   (boolean is-forum?)])
+
+(defn fallback-room-actions [{:keys [room-id is-space? membership]}]
+  (let [joined? (= (str/lower-case (str (or membership "joined"))) "joined")]
+    (vec
+     (remove nil?
+             [(when joined?
+                {:id        "settings"
+                 :label-key :navigation.actions/settings
+                 :icon      :settings
+                 :command   {:type  :dispatch
+                             :event [:rooms/open-settings room-id]}})
+              (when joined?
+                {:id         "leave"
+                 :label-key  (if is-space?
+                               :navigation.actions/leave-space
+                               :navigation.actions/leave-room)
+                 :icon       :leave
+                 :class-name "danger"
+                 :command    {:type  :dispatch
+                              :event [:rooms/leave room-id]}})
+              {:id        "copy-link"
+               :label-key :navigation.actions/copy-link
+               :icon      :link
+               :command   {:type  :dispatch
+                           :event [:rooms/copy-link room-id]}}]))))
+
+(re-frame/reg-event-db
+ :room-options/set
+ (fn [db [_ cache-key options]]
+   (assoc-in db [:room-options/by-key cache-key] (vec options))))
+
+(re-frame/reg-sub
+ :room-options/items
+ (fn [db [_ cache-key]]
+   (get-in db [:room-options/by-key cache-key])))
+
+(re-frame/reg-event-fx
+ :room-options/fetch
+ (fn [{:keys [db]} [_ req]]
+   (let [eng-id    (:active-engine db)
+         cache-key (options-cache-key eng-id req)
+         fallback! (fn [reason]
+                     (log/warn "Engine :get-room-options fallback:" reason)
+                     (re-frame/dispatch [:room-options/set cache-key (fallback-room-actions req)]))]
+     (when (:room-id req)
+       (go
+         (try
+           (let [res  (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :get-room-options
+                            :arguments req}))
+                 opts (when (ok-status? res)
+                        (decode-edn-field res :options-edn :options))]
+             (if (sequential? opts)
+               (re-frame/dispatch [:room-options/set cache-key opts])
+               (fallback! res)))
+           (catch :default e
+             (fallback! e))))))
+   {}))
+#+end_src
+
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
