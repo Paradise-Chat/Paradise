@@ -83,4 +83,14 @@ This allows us to neatly create states and provide a single component to the mai
                    (re-frame/dispatch [:ui/close-context-menu]))}
       (when icon [:span.item-icon icon])
       [:span.item-label label]])])
+
+(defn ^:ui feedback-banners
+  "Renders standard error and/or success feedback banners inside overlay tabs."
+  [{:keys [error success style]}]
+  (let [attrs (when style {:style style})]
+    [:<>
+     (when error
+       [:div.emotes-mgr-banner.is-error attrs error])
+     (when success
+       [:div.emotes-mgr-banner.is-success attrs success])]))
 #+end_src
