@@ -13,8 +13,10 @@ On mobile (Android & iOS), background calls require native OS integration:
   focus, and wake/Wi-Fi locks, paired with ~CallStyle~ ongoing and incoming
   notifications.
 
-**** Imports
+This namespace bridges Paradise's protocol-agnostic call events with the native
+~ParadiseCall~ Capacitor plugin.
 
+**** Imports
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/native.cljs
 (ns paradise.ui.container.call.native
