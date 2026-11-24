@@ -105,9 +105,9 @@ Paradise binds a completely protocol-agnostic calling runtime.
 
 (defn create-test-audio-processor []
   (let [processor (audio-processor/create-processor
-                   {:threshold @!voice-threshold
+                   {:threshold     @!voice-threshold
                     :gate-enabled? @!voice-gate-enabled?
-                    :hangover-ms 180})]
+                    :hangover-ms   180})]
     (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
       (set-enabled @!noise-suppression-enabled?))
     processor))
@@ -126,7 +126,11 @@ Paradise binds a completely protocol-agnostic calling runtime.
       (reset! !pending-crypto-queue [])
       (doseq [payload items]
         (inject-fn (clj->js payload))))))
+#+end_src
 
+***** Driver Lifecycle & Controls
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (defn start-driver!
   [{:keys [driver-url encoder-url session-config callbacks]}]
   (p/let [create-driver (load-driver-module! driver-url)
