@@ -50,15 +50,24 @@ proxy provider across Electron, Capacitor, and browser extensions.
     (call-cap-plugin paradise-proxy-plugin method-name arg)
     (fallback-fn)))
 
+(defn- valid-http-url-str [raw]
+  (when (and (string? raw) (not (str/blank? raw)))
+    (try
+      (let [u (js/URL. (str/trim raw))]
+        (when (#{"http:" "https:"} (.-protocol u))
+          (.-href u)))
+      (catch :default _ nil))))
+
 (defn- fallback-capacitor-http-request [js-opts]
   (let [url      (gobj/get js-opts "url")
         method   (or (gobj/get js-opts "method") "GET")
         headers  (or (gobj/get js-opts "headers") #js {})
         body     (gobj/get js-opts "body")
-        req-opts (cond-> {:url          url
-                          :method       method
-                          :headers      (js->clj headers)
-                          :responseType "blob"}
+        req-opts (cond-> {:url              url
+                          :method           method
+                          :headers          (js->clj headers)
+                          :responseType     "blob"
+                          :disableRedirects true}
                    (some? body) (assoc :data body))]
     (p/let [res       (.request CapacitorHttp (clj->js req-opts))
             status    (or (gobj/get res "status") 200)
@@ -118,14 +127,16 @@ proxy provider across Electron, Capacitor, and browser extensions.
                                     clear-ok)))
       (gobj/set "openAuthWindow"
                 (fn [opts]
-                  (call-or-fallback
-                   "openAuthWindow"
-                   opts
-                   (fn []
-                     (if can-open?
-                       (-> (.open cap-browser #js {"url" (gobj/get opts "url")})
-                           (p/then (fn [_] #js {"ok" true "mode" "capacitor-browser"})))
-                       (p/resolved #js {"ok" false}))))))
+                  (if-let [safe-url (valid-http-url-str (some-> opts (gobj/get "url")))]
+                    (call-or-fallback
+                     "openAuthWindow"
+                     (js/Object.assign #js {} opts #js {"url" safe-url})
+                     (fn []
+                       (if can-open?
+                         (-> (.open cap-browser #js {"url" safe-url})
+                             (p/then (fn [_] #js {"ok" true "mode" "capacitor-browser"})))
+                         (p/resolved #js {"ok" false}))))
+                    (p/resolved #js {"ok" false "error" "Invalid auth URL"}))))
       (gobj/set "closeAuthWindow"
                 (fn []
                   (call-or-fallback
@@ -139,15 +150,16 @@ proxy provider across Electron, Capacitor, and browser extensions.
                        (p/resolved #js {"ok" true}))))))
       (gobj/set "openExternal"
                 (fn [url]
-                  (let [url-str (str (or url ""))]
+                  (if-let [safe-url (valid-http-url-str (str (or url "")))]
                     (call-or-fallback
                      "openExternal"
-                     #js {"url" url-str}
+                     #js {"url" safe-url}
                      (fn []
                        (if can-open?
-                         (-> (.open cap-browser #js {"url" url-str})
+                         (-> (.open cap-browser #js {"url" safe-url})
                              (p/then (fn [_] #js {"ok" true})))
-                         (p/resolved #js {"ok" false}))))))))
+                         (p/resolved #js {"ok" false}))))
+                    (p/resolved #js {"ok" false "error" "Invalid external URL"})))))
     bridge))
 
 (defn mount-capacitor-proxy!
