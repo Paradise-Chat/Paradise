@@ -360,13 +360,5 @@ local camera automatically on foreground return if video was enabled.
     (reset! !encoder-worker nil))
   (reset! !driver-instance nil)
   (reset! !participants [])
-  (reset! !pending-crypto-queue [])
-  (reset! !local-media-state {:audio false :video false :screen-sharing false}))
+  (reset! !pending-crypto-queue []))
 #+end_src
-
-
-
-
-
-
-
