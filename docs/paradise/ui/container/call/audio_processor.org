@@ -31,6 +31,7 @@ feature.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
 (ns paradise.ui.container.call.audio-processor
   (:require
+   [paradise.shared.utils.helpers :refer [clamp01]]
    [shadow.esm :refer [dynamic-import]]
    [promesa.core :as p]
    [taoensso.timbre :as log]))
