@@ -24,7 +24,7 @@ given room, space, server, channel, community, or direct message.
 #+end_src
 
 
-**** Room Options
+**** Icon & Command Resolution
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
 (defn build-room-actions [tr room-id parent-id room-name is-space? is-dm? context membership]
