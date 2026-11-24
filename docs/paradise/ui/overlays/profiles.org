@@ -15,12 +15,22 @@ aspect.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
 (ns paradise.ui.overlays.profiles
   (:require
-   [paradise.ui.overlays.base :refer [popover-component context-menu-component]]
-   [taoensso.timbre :as log]
-   [re-frame.core :as re-frame]
-   [paradise.ui.global :refer [avatar]]
+   [cljs.core.async :refer [<! go]]
+   [cljs-workers.mesh :as mesh]
+   [clojure.string :as str]
    [paradise.media.component :refer [media]]
-   [paradise.shared.plugins :as plugins]))
+   [paradise.shared.plugins :as plugins]
+   [paradise.shared.utils.helpers :refer [copy-to-clipboard!
+                                          first-non-blank
+                                          local-media-url?
+                                          ok-status?
+                                          tr-or]]
+   [paradise.ui.global :refer [avatar]]
+   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items popover-component]]
+   [paradise.ui.overlays.permissions-roles :refer [member-popover-roles-and-mod]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 #+end_src
 
 
