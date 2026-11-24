@@ -165,37 +165,32 @@ Overview (name, topic/description, avatar) and Members & Roles views.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
 (defn- resolve-fallback-config [room-id live-cfg rooms spaces]
   (or live-cfg
-      (let [sp (some #(when (= (str (:id %)) (str room-id)) %) spaces)
-            rm (get rooms room-id)]
+      (let [base {:id                 room-id
+                  :name               (str room-id)
+                  :topic              ""
+                  :is-space?          false
+                  :emoji-target-id    room-id
+                  :emoji-scope        "room"
+                  :can-edit?          true
+                  :can-manage-emotes? true}
+            sp   (some #(when (= (str (:id %)) (str room-id)) %) spaces)
+            rm   (get rooms room-id)]
         (cond
-          sp {:id                 room-id
-              :name               (or (:name sp) room-id)
-              :topic              ""
-              :avatar-url         (:avatar-url sp)
-              :is-space?          true
-              :is-dm?             false
-              :emoji-target-id    room-id
-              :emoji-scope        "space"
-              :can-edit?          true
-              :can-manage-emotes? true}
-          rm {:id                 room-id
-              :name               (or (:name rm) room-id)
-              :topic              ""
-              :avatar-url         (or (:avatar rm) (:avatar-url rm))
-              :is-space?          (boolean (or (:is-space? rm) (:isSpace rm)))
-              :is-dm?             (boolean (or (:is-direct? rm) (:isDirect rm)))
-              :emoji-target-id    (or (:first-parent-id rm) room-id)
-              :emoji-scope        (if (or (:is-space? rm) (:first-parent-id rm)) "space" "room")
-              :can-edit?          true
-              :can-manage-emotes? true}
-          :else {:id                 room-id
-                 :name               (str room-id)
-                 :topic              ""
-                 :is-space?          false
-                 :emoji-target-id    room-id
-                 :emoji-scope        "room"
-                 :can-edit?          true
-                 :can-manage-emotes? true}))))
+          sp (merge base
+                    {:name        (or (:name sp) room-id)
+                     :avatar-url  (:avatar-url sp)
+                     :is-space?   true
+                     :is-dm?      false
+                     :emoji-scope "space"})
+          rm (let [is-sp? (boolean (or (:is-space? rm) (:isSpace rm)))]
+               (merge base
+                      {:name            (or (:name rm) room-id)
+                       :avatar-url      (or (:avatar rm) (:avatar-url rm))
+                       :is-space?       is-sp?
+                       :is-dm?          (boolean (or (:is-direct? rm) (:isDirect rm)))
+                       :emoji-target-id (or (:first-parent-id rm) room-id)
+                       :emoji-scope     (if (or is-sp? (:first-parent-id rm)) "space" "room")}))
+          :else base))))
 
 (defn ^:ui room-overview-tab [{:keys [room-id config saving? error saved?]}]
   (r/with-let [!seed-key    (atom nil)
@@ -207,8 +202,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                !copied?     (r/atom false)
                file-id      (str "paradise-room-av-" (random-uuid))
                clear-av!    (fn []
-                              (when-let [u @!av-preview]
-                                (try (js/URL.revokeObjectURL u) (catch :default _ nil)))
+                              (revoke-object-url! @!av-preview)
                               (reset! !av-file nil)
                               (reset! !av-preview nil)
                               (reset! !av-remove? false))]
@@ -273,8 +267,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
              [:button.settings-button.secondary
               {:type     "button"
                :disabled saving?
-               :on-click #(when-let [el (.getElementById js/document file-id)]
-                            (.click el))}
+               :on-click #(click-element-by-id! file-id)}
               (tr [:settings.profile/change-avatar])]
              (when (or shown-av @!av-remove?)
                [:button.settings-button.secondary
@@ -312,11 +305,9 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                             (re-frame/dispatch [:room-settings/clear-feedback room-id])
                             (reset! !topic (.. e -target -value)))}]])
 
-          (when error
-            [:div.emotes-mgr-banner.is-error {:style {:margin "0"}} error])
-          (when saved?
-            [:div.emotes-mgr-banner.is-success {:style {:margin "0"}}
-             (tr [:room-settings/saved])])
+          [feedback-banners {:error   error
+                             :success (when saved? (tr [:room-settings/saved]))
+                             :style   {:margin "0"}}]
 
           (when (and can-edit? dirty?)
             [:div.emotes-mgr-action-btns
@@ -353,8 +344,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
           [:button.settings-button.secondary
            {:type     "button"
             :on-click (fn []
-                        (when-let [cb (some-> js/navigator .-clipboard)]
-                          (.writeText cb (str room-id))
+                        (when (copy-to-clipboard! room-id)
                           (reset! !copied? true)
                           (js/setTimeout #(reset! !copied? false) 1800)))}
            (if @!copied?
