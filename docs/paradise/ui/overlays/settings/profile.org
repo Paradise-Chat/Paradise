@@ -18,10 +18,21 @@ spaces navigation bar.
 (ns paradise.ui.overlays.settings.profile
   (:require
    [cljs.core.async :refer [<! go]]
+   [cljs.core.async.interop :refer-macros [<p!]]
    [cljs-workers.mesh :as mesh]
+   [clojure.string :as str]
+   [paradise.media.component :refer [media]]
+   [paradise.shared.utils.helpers :refer [click-element-by-id!
+                                          decode-edn-field
+                                          file->array-buffer
+                                          local-media-url?
+                                          revoke-object-url!
+                                          tr-or]]
+   [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
-   [paradise.ui.overlays.base :refer [context-menu-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items modal-component]]
    [re-frame.core :as re-frame]
+   [reagent.core :as r]
    [taoensso.timbre :as log]))
 #+end_src
 
