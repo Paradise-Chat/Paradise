@@ -1,13 +1,17 @@
 
 ** Native Calls
 
-
 **** Preface
 
-For the most part calling doesn't need much extra on desktop.
-However, for mobile it is situationally more complex. This is due to how
-mobile handles background processes for example.
-Or call notifications.
+On desktop browsers and Electron, WebRTC calling needs minimal OS coordination.
+On mobile (Android & iOS), background calls require native OS integration:
+- iOS requires CallKit (~CXProvider~) + ~AVAudioSession~ (~.playAndRecord~ /
+  ~.voiceChat~) and PushKit (~.voIP~) for lock-screen continuity and incoming
+  calls.
+- Android requires a dedicated Foreground Service (~microphone|mediaPlayback~
+  plus dynamic ~camera~) holding ~AudioManager.MODE_IN_COMMUNICATION~, audio
+  focus, and wake/Wi-Fi locks, paired with ~CallStyle~ ongoing and incoming
+  notifications.
 
 **** Imports
 
