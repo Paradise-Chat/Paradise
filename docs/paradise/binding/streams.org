@@ -76,6 +76,14 @@ Mildly temporary until we better place these with the engine.
        (re-frame/dispatch [:sdk/update-typing-users
                            (get-val "room-id" :room-id)
                            (get-val "users" :users)]))
+     "presence-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:presence/sync-batch
+                           (get-val "presences" :presences)]))
+     "own-presence-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:presence/receive-own-status
+                           (get-val "status" :status)]))
      "pagination-status"
      (fn [_ get-val]
        (re-frame/dispatch [:sdk/update-pagination-status
@@ -101,6 +109,10 @@ Mildly temporary until we better place these with the engine.
                            {:participant-id (get-val "participant-id" :participant-id)
                             :key-index      (get-val "key-index" :key-index)
                             :key-array      (get-val "key-array" :key-array)}]))
+     "call-engine-signal"
+     (fn [_ get-val]
+       (re-frame/dispatch [:call/engine-signal-received
+                           (get-val "payload" :payload)]))
      "search-index-progress"
      (fn [_ get-val]
        (re-frame/dispatch [:search/receive-index-status
