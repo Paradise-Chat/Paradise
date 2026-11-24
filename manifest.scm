@@ -1,15 +1,12 @@
 (specifications->manifest
- '(
-   ;; Need 1.88 and we're simply... testing
-   ; "rust"
-   "curl"
+'("curl"
    "findutils"
    "grep"
    "gcc-toolchain"
    "pkg-config"
    "which"
    "zlib"
-   "binaryen" ; This provides wasm-opt
+   "binaryen"
    "node"
    "openssl"
    "yarn"
