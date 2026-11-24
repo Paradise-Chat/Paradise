@@ -117,10 +117,10 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                           :arguments {:room-id           room-id
                                       :name              name
                                       :topic             topic
-                                      :avatar-buffer-b64 b64
+                                      :avatar-buffer-b64 buffer-b64
                                       :avatar-mime       mime
                                       :remove-avatar?    (boolean remove-avatar?)}}))]
-           (if (contains? #{"success" :success} (:status res))
+           (if (ok-status? res)
              (do
                (when on-done (on-done))
                (re-frame/dispatch [:room-settings/save-done room-id
