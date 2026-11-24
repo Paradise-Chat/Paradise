@@ -3,12 +3,12 @@
 
 **** Preface
 
-Currently this is actually rather plain, but this is the tab where
-a user would adjust settings related to their account on whatever
-protocol they're using.
+This tab allows the user to edit their account profile across protocols
+(avatar and banner upload/removal plus engine-declared profile fields), as well
+as access quick account actions.
 
-It also provides the right click handling on the actual profile picture
-in the spaces navigation.
+It also provides the right-click context menu on the profile avatar in the
+spaces navigation bar.
 
 
 **** Imports
