@@ -10,6 +10,17 @@ stream like noise canceling and volume gating.
 
 
 
+On mobile (Android ~WebView~ and iOS ~WKWebView~), ~requestAnimationFrame~
+halts completely when the app is backgrounded or the screen is locked, and
+main-thread timers can be throttled to 1 Hz on iOS even while the native WebRTC
+and ~AudioWorklet~ (~RNNoiseNode~) audio threads continue running at full 48 kHz
+real-time. To make our best attempt at uninterrupted microphone transmission
+in the background:
+1. Metering uses a ~setInterval~ loop instead of ~requestAnimationFrame~.
+2. ~AudioContext~ ~"suspended"~ and iOS ~"interrupted"~ states auto-resume.
+3. While ~document.hidden~ is ~true~ (or when main-thread timers are throttled),
+   the ~GainNode~ voice gate stays open (~1.0~) while ~RNNoiseNode~ continues
+   suppressing background noise on the real-time ~AudioWorklet~ thread.
 
 **** Imports
 
