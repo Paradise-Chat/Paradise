@@ -16,10 +16,17 @@ Overview (name, topic/description, avatar) and Members & Roles views.
    [cljs.core.async :refer [<! go]]
    [cljs.core.async.interop :refer-macros [<p!]]
    [clojure.string :as str]
-   [paradise.shared.utils.helpers :refer [decode-edn-field file->array-buffer uint8->base64]]
+   [paradise.shared.utils.helpers :refer [click-element-by-id!
+                                          copy-to-clipboard!
+                                          decode-edn-field
+                                          file->base64-payload
+                                          ok-status?
+                                          resolve-item-desc
+                                          resolve-item-label
+                                          revoke-object-url!]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
-   [paradise.ui.overlays.base :refer [modal-component]]
+   [paradise.ui.overlays.base :refer [feedback-banners modal-component]]
    [paradise.ui.overlays.emotes-manager :refer [custom-emotes-manager]]
    [paradise.ui.overlays.permissions-roles :refer [members-moderation-tab
                                                    permissions-access-tab
