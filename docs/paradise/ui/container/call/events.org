@@ -111,9 +111,14 @@ Most of the call re-frame events and subscriptions are listed here
    (doseq [[kind device-id] devices-map
            :when (seq device-id)]
      (-> (rtc/switch-device! (name kind) device-id)
+         (p/then
+          (fn [res]
+            (when (= res :stale-device)
+              (rf/dispatch [:call/clear-stale-device kind]))))
          (p/catch
           (fn [err]
             (log/warn err "Failed to apply preferred call device" kind device-id)
+            (rf/dispatch [:call/clear-stale-device kind])
             (rf/dispatch [:call/media-error kind err])))))))
 
 (rf/reg-fx
@@ -498,6 +503,7 @@ Most of the call re-frame events and subscriptions are listed here
     {:db (-> db
              (assoc-in [:call :active-room-id] nil)
              (assoc-in [:call :is-active?] false)
+             (assoc-in [:call :status] :idle)
              (assoc-in [:call :disconnecting?] false)
              (assoc-in [:call :screen-sharing?] false)
              (assoc-in [:call :participants] [])
