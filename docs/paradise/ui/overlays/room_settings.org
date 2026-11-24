@@ -152,15 +152,12 @@ Overview (name, topic/description, avatar) and Members & Roles views.
    (when room-id
      (let [parent-sp (get-in db [:rooms/data room-id :first-parent-id])]
        {:db (assoc db :room-settings/active-tab initial-tab)
-        :fx [[:dispatch [:room-settings/fetch-config room-id]]
-             [:dispatch [:room-perms/fetch room-id parent-sp]]
-             [:dispatch [:room/fetch-members room-id]]
-             [:dispatch [:room/fetch-power-level-tags room-id]]
-             [:dispatch [:ui/open-modal :room-settings
-                         {:room-id        room-id
-                          :initial-tab    initial-tab
-                          :backdrop-props {:class "settings-backdrop"}
-                          :window-props   {:class "settings-window"}}]]]}))))
+        :fx (conj (room-settings-fetch-fx room-id parent-sp)
+                  [:dispatch [:ui/open-modal :room-settings
+                              {:room-id        room-id
+                               :initial-tab    initial-tab
+                               :backdrop-props {:class "settings-backdrop"}
+                               :window-props   {:class "settings-window"}}]])}))))
 #+end_src
 
 **** Subviews
