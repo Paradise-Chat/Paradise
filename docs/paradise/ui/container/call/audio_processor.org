@@ -128,45 +128,37 @@ feature.
 ***** Helpers
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
-    (if (pos? n)
-      (js/Math.sqrt
-       (/ sum n))
+(defn- document-hidden? []
+  (and (exists? js/document)
+       (true? (.-hidden js/document))))
 
+(defn- resume-context-safe! [^js audio-context]
+  (when (and audio-context
+             (contains? #{"suspended" "interrupted"} (.-state audio-context)))
+    (-> (.resume audio-context)
+        (p/catch (fn [_] nil)))))
+
+(defn- calculate-rms [^js analyser ^js samples]
+  (.getFloatTimeDomainData analyser samples)
+  (let [n   (.-length samples)
+        sum (loop [idx   0
+                   total 0.0]
+              (if (< idx n)
+                (let [sample (aget samples idx)]
+                  (recur (inc idx) (+ total (* sample sample))))
+                total))]
+    (if (pos? n)
+      (js/Math.sqrt (/ sum n))
       0.0)))
 
-
-(defn- ramp-gate!
-  [audio-context gate-node open?]
-  (let [param
-        (.-gain gate-node)
-
-        now
-        (.-currentTime audio-context)
-
-        target
-        (if open?
-          1.0
-          0.0)
-
-        duration
-        (if open?
-          0.008
-          0.035)]
-
-    (.cancelScheduledValues
-     param
-     now)
-
-    (.setValueAtTime
-     param
-     (.-value param)
-     now)
-
-    (.linearRampToValueAtTime
-     param
-     target
-     (+ now duration))))
-
+(defn- ramp-gate! [^js audio-context ^js gate-node open?]
+  (let [^js param (.-gain gate-node)
+        now       (.-currentTime audio-context)
+        target    (if open? 1.0 0.0)
+        duration  (if open? 0.008 0.035)]
+    (.cancelScheduledValues param now)
+    (.setValueAtTime param (.-value param) now)
+    (.linearRampToValueAtTime param target (+ now duration))))
 #+end_src
 
 
