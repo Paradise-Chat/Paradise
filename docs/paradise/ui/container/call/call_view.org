@@ -328,7 +328,8 @@ this will be where that lives.
   (let [audio-enabled?  @(rf/subscribe [:call/audio-enabled?])
         video-enabled?  @(rf/subscribe [:call/video-enabled?])
         screen-sharing? @(rf/subscribe [:call/screen-sharing?])
-        deafened?       @(rf/subscribe [:call/deafened?])]
+        deafened?       @(rf/subscribe [:call/deafened?])
+        can-share?      (or screen-sharing? (screen-share-supported?))]
     [:div.call-control-bar-wrapper
      [:div.call-control-bar
       [:button.call-control-btn
@@ -339,13 +340,11 @@ this will be where that lives.
        {:class    (when video-enabled? "is-active")
         :on-click #(rf/dispatch [:call/toggle-video])}
        (if video-enabled? "Stop Video" "Start Video")]
-      [:div.call-control-split-group
-       [:button.call-control-btn
-        {:class    (when screen-sharing? "is-active")
-         :on-click #(rf/dispatch [:call/toggle-screen-share])}
-        (if screen-sharing? "Stop Share" "Share Screen")]
-       (when screen-sharing?
-         [:f> screen-share-audio-picker])]
+      (when can-share?
+        [:div.call-control-split-group
+         [:f> share-screen-button {:screen-sharing? screen-sharing?}]
+         (when screen-sharing?
+           [:f> screen-share-audio-picker])])
       [plugins/plugin-slot
        :call/control-bar
        {:audio-enabled?  audio-enabled?
