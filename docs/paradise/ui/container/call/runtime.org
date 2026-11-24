@@ -314,10 +314,43 @@ local camera automatically on foreground return if video was enabled.
         (set-threshold threshold)))
     threshold))
 
+(defn notify-visibility-changed!
+  "Notifies active audio processors, remote audio/video sinks, and camera capture
+   when the host application transitions between foreground and background."
+  [visible? & [{:keys [video-enabled? connected?]}]]
+  (let [visible? (boolean visible?)]
+    (when-let [processor @!audio-processor]
+      (when-let [set-bg (aget processor "setBackgroundMode")]
+        (set-bg (not visible?)))
+      (when-let [resume-fn (aget processor "resume")]
+        (resume-fn)))
+
+    (when (exists? js/window)
+      (try
+        (.dispatchEvent
+         js/window
+         (js/CustomEvent. "paradise:call-visibility"
+                          #js {:detail #js {:visible visible?}}))
+        (catch :default _ nil)))
+
+    (when (and visible? connected? video-enabled? @!driver-instance)
+      (let [local-cam (some (fn [p]
+                              (when (and (:local? p) (= (:source p) "camera"))
+                                (:video-track p)))
+                            @!participants)
+            dead-cam? (or (nil? local-cam)
+                          (not= (.-readyState ^js local-cam) "live"))]
+        (when dead-cam?
+          (-> (set-camera-enabled! true)
+              (p/catch (fn [err]
+                         (log/debug err "Foreground camera recovery skipped")))))))
+    nil))
+
 (defn disconnect! []
-  (reset! !local-media-state {:audio false :video false :screen-sharing false})
   (if-let [driver @!driver-instance]
-    (.disconnect driver)
+    (if-let [f (aget driver "disconnect")]
+      (.call f driver)
+      (p/resolved nil))
     (p/resolved nil)))
 
 (defn reset-session! []
