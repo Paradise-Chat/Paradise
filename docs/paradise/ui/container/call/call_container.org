@@ -289,23 +289,79 @@ Likely we'll need some more tweaks in the future for other protocol support stil
         eff-muted  (boolean (or muted? (<= (or volume 100) 0)))]
     (react/useEffect
      (fn []
-       (when-let [el (.-current audio-ref)]
-         (if live-track
-           (let [stream (js/MediaStream. #js [live-track])]
-             (set! (.-srcObject el) stream)
-             (set! (.-volume el) norm-vol)
-             (set! (.-muted el) eff-muted)
-             (-> (.play el) (p/catch (fn [_] nil))))
-           (set! (.-srcObject el) nil)))
-       (fn []
-         (when-let [el (.-current audio-ref)]
-           (set! (.-srcObject el) nil))))
+       (let [ensure-playing! (fn []
+                               (when-let [^js ctx @!ios-webaudio-ctx]
+                                 (when (contains? #{"suspended" "interrupted"} (.-state ctx))
+                                   (-> (.resume ctx) (p/catch (fn [_] nil)))))
+                               (when-let [^js el (.-current audio-ref)]
+                                 (when (and live-track
+                                            (= (.-readyState live-track) "live")
+                                            (.-paused el))
+                                   (-> (.play el) (p/catch (fn [_] nil))))))
+             on-el-pause     (fn []
+                               (js/setTimeout ensure-playing! 120))
+             !bridge         (atom nil)]
+         (when-let [^js el (.-current audio-ref)]
+           (.addEventListener el "pause" on-el-pause)
+           (if live-track
+             (let [stream (js/MediaStream. #js [live-track])]
+               (set! (.-srcObject el) stream)
+               (if (and (ios-webkit-audio?)
+                        (not (true? (aget el "__paradiseWebAudioRouted"))))
+                 (if-let [^js ctx (ensure-ios-webaudio-ctx!)]
+                   (try
+                     (let [^js src  (.createMediaStreamSource ctx stream)
+                           ^js gain (.createGain ctx)]
+                       (set! (.. gain -gain -value) (if eff-muted 0.0 norm-vol))
+                       (.connect src gain)
+                       (.connect gain (.-destination ctx))
+                       (set! (.-current gain-ref) gain)
+                       (reset! !bridge {:src src :gain gain})
+                       (set! (.-muted el) true))
+                     (catch :default _
+                       (set! (.-volume el) norm-vol)
+                       (set! (.-muted el) eff-muted)))
+                   (do
+                     (set! (.-volume el) norm-vol)
+                     (set! (.-muted el) eff-muted)))
+                 (do
+                   (set! (.-volume el) norm-vol)
+                   (set! (.-muted el) eff-muted)))
+               (-> (.play el) (p/catch (fn [_] nil))))
+             (set! (.-srcObject el) nil)))
+         (when live-track
+           (try (.addEventListener live-track "unmute" ensure-playing!)
+                (catch :default _ nil)))
+         (when (exists? js/window)
+           (.addEventListener js/window "paradise:call-visibility" ensure-playing!))
+         (when (exists? js/document)
+           (.addEventListener js/document "visibilitychange" ensure-playing!))
+         (fn []
+           (when-let [{:keys [^js src ^js gain]} @!bridge]
+             (set! (.-current gain-ref) nil)
+             (try (.disconnect src) (catch :default _ nil))
+             (try (.disconnect gain) (catch :default _ nil)))
+           (when live-track
+             (try (.removeEventListener live-track "unmute" ensure-playing!)
+                  (catch :default _ nil)))
+           (when (exists? js/window)
+             (.removeEventListener js/window "paradise:call-visibility" ensure-playing!))
+           (when (exists? js/document)
+             (.removeEventListener js/document "visibilitychange" ensure-playing!))
+           (when-let [^js el (.-current audio-ref)]
+             (.removeEventListener el "pause" on-el-pause)
+             (set! (.-srcObject el) nil)))))
      #js [live-track])
     (react/useEffect
      (fn []
-       (when-let [el (.-current audio-ref)]
-         (set! (.-volume el) norm-vol)
-         (set! (.-muted el) eff-muted))
+       (if-let [^js gain (.-current gain-ref)]
+         (do
+           (set! (.. gain -gain -value) (if eff-muted 0.0 norm-vol))
+           (when-let [^js el (.-current audio-ref)]
+             (set! (.-muted el) true)))
+         (when-let [^js el (.-current audio-ref)]
+           (set! (.-volume el) norm-vol)
+           (set! (.-muted el) eff-muted)))
        js/undefined)
      #js [norm-vol eff-muted])
     (react/useEffect
