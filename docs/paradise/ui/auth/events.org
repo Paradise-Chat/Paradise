@@ -24,7 +24,7 @@ Probably needs a better name (and logical grouping)
             [paradise.shared.registry :as registry]
             [paradise.shared.client.session-store :as store]
             [paradise.shared.utils.svg :as icons]
-            [net :refer [close-auth-url! open-auth-url! set-auth-context!]]
+            [net :refer [clear-frame-url! clear-stream-url! close-auth-url! open-auth-url! set-auth-context!]]
             [service-worker-handler :refer [register-sw!]]
             [taoensso.timbre :as log]))
 #+end_src
