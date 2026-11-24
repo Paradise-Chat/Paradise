@@ -65,13 +65,15 @@ Most of the call re-frame events and subscriptions are listed here
 
 (rf/reg-fx
  :call.driver/set-microphone
- (fn [enabled?]
-   (-> (p/let [_ (rtc/set-microphone-enabled! enabled?)]
-         (rf/dispatch [:call/media-state-changed :audio enabled?]))
-       (p/catch
-        (fn [err]
-          (log/error err "Failed to change microphone state")
-          (rf/dispatch [:call/media-error :microphone err]))))))
+ (fn [arg]
+   (let [enabled?     (if (map? arg) (boolean (:enabled? arg)) (boolean arg))
+         skip-native? (when (map? arg) (boolean (:skip-native? arg)))]
+     (-> (p/let [_ (rtc/set-microphone-enabled! enabled?)]
+           (rf/dispatch [:call/media-state-changed :audio enabled? {:skip-native? skip-native?}]))
+         (p/catch
+          (fn [err]
+            (log/error err "Failed to change microphone state")
+            (rf/dispatch [:call/media-error :microphone err])))))))
 
 (rf/reg-fx
  :call.driver/set-camera
