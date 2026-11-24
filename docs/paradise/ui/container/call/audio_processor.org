@@ -128,36 +128,6 @@ feature.
 ***** Helpers
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
-(defn- clamp01 [x]
-  (max 0.0
-       (min 1.0
-            (or x 0.0))))
-
-
-(defn- calculate-rms
-  [analyser samples]
-  (.getFloatTimeDomainData
-   analyser
-   samples)
-
-  (let [n
-        (.-length samples)
-
-        sum
-        (loop [idx 0
-               total 0.0]
-
-          (if (< idx n)
-            (let [sample
-                  (aget samples idx)]
-
-              (recur
-               (inc idx)
-               (+ total
-                  (* sample sample))))
-
-            total))]
-
     (if (pos? n)
       (js/Math.sqrt
        (/ sum n))
