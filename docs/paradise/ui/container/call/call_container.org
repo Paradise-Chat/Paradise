@@ -283,6 +283,7 @@ Likely we'll need some more tweaks in the future for other protocol support stil
 
 (defn remote-audio-track [{:keys [track volume muted? output-device-id]}]
   (let [audio-ref  (react/useRef nil)
+        gain-ref   (react/useRef nil)
         live-track (rtc/resolve-media-track track)
         norm-vol   (-> (/ (or volume 100) 100.0) (max 0.0) (min 1.0))
         eff-muted  (boolean (or muted? (<= (or volume 100) 0)))]
