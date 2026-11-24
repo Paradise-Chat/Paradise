@@ -104,25 +104,42 @@ Deprecated method.
 ****** Account Item
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/accounts.cljs
+(defn- format-account-subtitle [acc]
+  (let [proto (some-> (:engine acc) clojure.core/name str/capitalize)
+        url   (or (:server-url acc) (:base-url acc) (:server acc) "")]
+    (cond
+      (and proto (not (str/blank? url))) (str proto " · " url)
+      proto                              proto
+      :else                              url)))
+
 (defn ^:ui account-item
   [{:keys [acc is-active?]}]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
+  (let [tr    @(re-frame/subscribe [:i18n/tr])
+        title (or (not-empty (:label acc))
+                  (not-empty (:display-name acc))
+                  (:userId acc))
+        sub   (format-account-subtitle acc)]
     [:div.settings-list-item
      {:class (when is-active? "is-active")}
-     [:div.settings-list-main
-      [:div.settings-list-title
-       (:userId acc)]
-      [:div.settings-list-description
-       (:hs_url acc)]]
+     [:div.settings-list-lead
+      [avatar {:id   (:userId acc)
+               :name (or title "?")
+               :url  (:avatar-url acc)
+               :size 38}]
+      [:div.settings-list-main
+       [:div.settings-list-title title]
+       (when-not (str/blank? sub)
+         [:div.settings-list-description sub])]]
 
      [:div.settings-list-actions
       (if is-active?
         [:div.settings-badge.success
          (tr [:settings.account-item/active-status])]
-        [:button.settings-button.is-compact
+        [:button.settings-button.secondary.is-compact
          {:on-click #(re-frame/dispatch
                       [:auth/switch-account
-                       (:userId acc)])}
+                       (:userId acc)
+                       (:engine acc)])}
          (tr [:settings.account-item/switch-button])])]]))
 #+end_src
 
@@ -131,35 +148,44 @@ Deprecated method.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/accounts.cljs
 (defn ^:ui accounts-tab []
-  (let [tr           @(re-frame/subscribe [:i18n/tr])
-        accounts     @(re-frame/subscribe [:settings/available-accounts])
-        current-user @(re-frame/subscribe [:sdk/profile])]
+  (let [tr             @(re-frame/subscribe [:i18n/tr])
+        accounts       @(re-frame/subscribe [:settings/available-accounts])
+        current-user   @(re-frame/subscribe [:sdk/profile])
+        active-user-id @(re-frame/subscribe [:auth/active-user-id])
+        active-engine  @(re-frame/subscribe [:auth/active-engine])
+        effective-uid  (or active-user-id (:user-id current-user))]
     [:div.settings-tab-content
-     [:div.settings-page-header
-      [:h2.settings-heading
-       (tr [:settings.accounts/title])]
-      [:p.settings-description
-       (tr [:settings.accounts/description])]]
+     [:p.settings-subview-lead
+      (tr [:settings.accounts/description])]
 
-     [:div.settings-section.is-fill
-      [:div.settings-list.is-scrollable
+     [:div.settings-hub-group
+      [:div.settings-hub-group-label
+       (tr [:settings.accounts/title])]
+      [:div.settings-list
        (if (empty? accounts)
          [:div.settings-empty
           (tr [:settings.accounts/empty-state])]
-         (for [acc accounts]
-           ^{:key (:userId acc)}
+         (for [acc accounts
+               :let [acc-eng  (some-> (:engine acc) keyword)
+                     item-key (str (or (:engine acc) "default") ":" (:userId acc))
+                     active?  (and (= (str (:userId acc)) (str effective-uid))
+                                   (or (nil? acc-eng)
+                                       (nil? active-engine)
+                                       (= acc-eng (keyword active-engine))))]]
+           ^{:key item-key}
            [account-item
-            {:acc acc
-             :is-active?
-             (= (:userId acc)
-                (:user-id current-user))}]))]
+            {:acc        acc
+             :is-active? active?}]))]]
 
-      [:div.settings-actions
-       [:button.settings-button
-        {:on-click #(re-frame/dispatch
-                     [:auth/start-login-flow])}
-        (str
-         "+ "
-         (tr [:settings.accounts/add-account]))]]]]))
+     [:div.settings-hub-group
+      [:div.settings-hub-group-card
+       [:button.settings-hub-item
+        {:type     "button"
+         :on-click #(re-frame/dispatch [:auth/start-login-flow])}
+        [:span.settings-hub-icon.accent-indigo [icons/plus]]
+        [:span.settings-hub-item-copy
+         [:span.settings-hub-item-title
+          (tr [:settings.accounts/add-account])]]
+        [:span.settings-hub-chevron [icons/chevron-down]]]]]]))
 #+end_src
 
