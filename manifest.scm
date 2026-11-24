@@ -28,7 +28,6 @@
    ;; app image
    "gtk+"
    "libx11"
-   "libglvnd"
    "vulkan-loader"
    "libdrm"
    "libva"
