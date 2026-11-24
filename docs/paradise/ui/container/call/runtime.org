@@ -204,36 +204,93 @@ Paradise binds a completely protocol-agnostic calling runtime.
       (p/resolved nil))
     (p/resolved nil)))
 
+(defn- overconstrained-error? [^js err]
+  (let [err-name (some-> err (aget "name") str)
+        err-msg  (some-> err str)]
+    (or (= err-name "OverconstrainedError")
+        (= err-name "ConstraintNotSatisfiedError")
+        (and err-msg
+             (or (.includes err-msg "OverconstrainedError")
+                 (.includes err-msg "Invalid constraint"))))))
+
+(defn- sink-id-supported? []
+  (try
+    (and (exists? js/document)
+         (fn? (.-setSinkId (.createElement js/document "audio"))))
+    (catch :default _
+      false)))
+
+(defn- device-available? [kind device-id]
+  (cond
+    (and (= kind "audiooutput") (not (sink-id-supported?)))
+    (p/resolved :unsupported)
+
+    (or (empty? device-id) (= device-id "default"))
+    (p/resolved :ok)
+
+    :else
+    (if-let [enum-fn (when (exists? js/navigator)
+                       (some-> (.-mediaDevices js/navigator) .-enumerateDevices))]
+      (-> (.call enum-fn (.-mediaDevices js/navigator))
+          (p/then (fn [devs]
+                    (if (some (fn [^js d]
+                                (and (= (.-kind d) kind)
+                                     (= (.-deviceId d) device-id)))
+                              (array-seq (or devs #js [])))
+                      :ok
+                      :stale)))
+          (p/catch (fn [_] :ok)))
+      (p/resolved :ok))))
+
+(defn switch-device! [kind device-id]
+  (if-let [driver @!driver-instance]
+    (if-let [f (aget driver "switchDevice")]
+      (-> (device-available? kind device-id)
+          (p/then (fn [status]
+                    (case status
+                      :ok          (.call f driver kind device-id)
+                      :unsupported :unsupported-device
+                      :stale       :stale-device))))
+      (p/resolved nil))
+    (p/rejected (js/Error. "No active call driver"))))
+
 (defn set-microphone-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (let [enabled? (boolean enabled?)]
-      (-> (js/Promise.resolve (.setMicrophoneEnabled driver enabled?))
-          (p/then (fn [res]
-                    (swap! !local-media-state assoc :audio enabled?)
-                    res))))
+    (if-let [f (aget driver "setMicrophoneEnabled")]
+      (-> (.call f driver (boolean enabled?))
+          (p/catch (fn [err]
+                     (if (and enabled? (overconstrained-error? err))
+                       (-> (if-let [sw (aget driver "switchDevice")]
+                             (-> (.call sw driver "audioinput" "default")
+                                 (p/catch (fn [_] nil)))
+                             (p/resolved nil))
+                           (p/then (fn [_]
+                                     (.call f driver true))))
+                       (p/rejected err)))))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-camera-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (let [enabled? (boolean enabled?)]
-      (-> (js/Promise.resolve (.setCameraEnabled driver enabled?))
-          (p/then (fn [res]
-                    (swap! !local-media-state assoc :video enabled?)
-                    res))))
+    (if-let [f (aget driver "setCameraEnabled")]
+      (-> (.call f driver (boolean enabled?))
+          (p/catch (fn [err]
+                     (if (and enabled? (overconstrained-error? err))
+                       (-> (if-let [sw (aget driver "switchDevice")]
+                             (-> (.call sw driver "videoinput" "default")
+                                 (p/catch (fn [_] nil)))
+                             (p/resolved nil))
+                           (p/then (fn [_]
+                                     (.call f driver true))))
+                       (p/rejected err)))))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-screen-share-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (let [enabled? (boolean enabled?)]
-      (-> (js/Promise.resolve (.setScreenShareEnabled driver enabled?))
-          (p/then (fn [res]
-                    (swap! !local-media-state assoc :screen-sharing enabled?)
-                    res))))
-    (p/rejected (js/Error. "No active call driver"))))
-
-(defn switch-device! [kind device-id]
-  (if-let [driver @!driver-instance]
-    (.switchDevice driver kind device-id)
+    (if-let [f (aget driver "setScreenShareEnabled")]
+      (.call f driver (boolean enabled?))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-noise-suppression-enabled! [enabled?]
