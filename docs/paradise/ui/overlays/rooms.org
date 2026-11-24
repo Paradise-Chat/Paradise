@@ -1,10 +1,11 @@
-
 ** Rooms Context Menu
 
 **** Preface
 
 Room entry context menus!
-Mostly just moving what we had into this new shape.
+Room options are supplied dynamically by the active protocol engine via the
+~:get-room-options~ bind so each protocol decides which actions apply to a
+given room, space, server, channel, community, or direct message.
 
 **** Imports
 
