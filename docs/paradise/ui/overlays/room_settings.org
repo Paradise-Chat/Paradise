@@ -134,6 +134,18 @@ Overview (name, topic/description, avatar) and Members & Roles views.
             (assoc-in [:room-settings/by-id room-id :saving?] true)
             (update-in [:room-settings/by-id room-id] dissoc :error :saved?))}))
 
+(defn- room-settings-fetch-fx [room-id parent-sp]
+  [[:dispatch [:room-settings/fetch-config room-id]]
+   [:dispatch [:room-perms/fetch room-id parent-sp]]
+   [:dispatch [:room/fetch-members room-id]]
+   [:dispatch [:room/fetch-power-level-tags room-id]]])
+
+(re-frame/reg-event-fx
+ :room-settings/load-all
+ (fn [_ [_ room-id parent-sp]]
+   (when room-id
+     {:fx (room-settings-fetch-fx room-id parent-sp)})))
+
 (re-frame/reg-event-fx
  :rooms/open-settings
  (fn [{:keys [db]} [_ room-id initial-tab]]
