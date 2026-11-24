@@ -16,6 +16,7 @@ can establish a nice baseline and work from there
    [cljs-workers.mesh :as mesh]
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [ok-status?]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]
    [paradise.ui.overlays.base :refer [modal-component popover-component]]
@@ -30,158 +31,211 @@ can establish a nice baseline and work from there
 Could make this effectively one component and pass through context later.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/creation.cljs
-(defn ^:ui create-room-content [{:keys [target-space-id]}]
-  (let [tr        @(re-frame/subscribe [:i18n/tr])
-        close-fn  #(re-frame/dispatch [:ui/close-modal])]
-    (r/with-let [room-name          (r/atom "")
-                 room-topic         (r/atom "")
-                 visibility         (r/atom "Private")
-                 is-encrypted       (r/atom true)
-                 history-visibility (r/atom "Shared")
-                 is-loading         (r/atom false)]
-      [:div.create-room-container
-       [:div.form-group
-        [:label (tr [:creation.room/name-label])]
-        [:input.form-input
-         {:type "text"
-          :auto-focus true
-          :placeholder (tr [:creation.room/name-placeholder])
-          :value @room-name
-          :on-change #(reset! room-name (.. % -target -value))}]]
-       [:div.form-group
-        [:label (tr [:creation.room/topic-label])]
-        [:input.form-input
-         {:type "text"
-          :placeholder (tr [:creation.room/topic-placeholder])
-          :value @room-topic
-          :on-change #(reset! room-topic (.. % -target -value))}]]
+(defn ^:ui creation-select [{:keys [value options on-change direction]}]
+  (r/with-let [!open? (r/atom false)]
+    (let [open?        @!open?
+          selected-val value
+          upward?      (= direction :up)
+          cur-lbl      (or (some #(when (= (:value %) selected-val) (:label %)) options)
+                           (:label (first options))
+                           "")]
+      [:div.creation-select-dropdown
+       [:button.creation-select-trigger
+        {:type          "button"
+         :class         (when open? "is-open")
+         :aria-expanded open?
+         :on-click      #(swap! !open? not)}
+        [:span.creation-select-label cur-lbl]
+        [:span.creation-select-chevron
+         {:class (when open? "is-open")}
+         [icons/chevron-down {:width "15px" :height "15px"}]]]
+       (when open?
+         [:<>
+          [:div.creation-select-backdrop
+           {:on-click #(reset! !open? false)}]
+          (into
+           [:div.creation-select-menu
+            {:role  "listbox"
+             :class (when upward? "is-upward")}]
+           (mapv
+            (fn [{opt-val :value opt-label :label}]
+              (let [selected? (= opt-val selected-val)]
+                ^{:key opt-val}
+                [:button.creation-select-option
+                 {:type          "button"
+                  :role          "option"
+                  :aria-selected selected?
+                  :class         (when selected? "is-selected")
+                  :on-click      (fn []
+                                   (reset! !open? false)
+                                   (on-change opt-val))}
+                 [:span opt-label]
+                 (when selected?
+                   [icons/check {:width "14px" :height "14px"}])]))
+            options))])])))
+
+(defn- fetch-creation-options! [is-space? !opts !enc]
+  (go
+    (try
+      (let [res (<! (mesh/do-with-thread!
+                     :engine-pool
+                     {:handler   :get-creation-options
+                      :arguments {:is-space? (boolean is-space?)}}))]
+        (when (and (ok-status? res)
+                   (map? (:options res)))
+          (reset! !opts (:options res))
+          (when (contains? (:options res) :default-encrypted?)
+            (reset! !enc (boolean (:default-encrypted? (:options res)))))))
+      (catch :default _ nil))))
+
+(defn- create-entity-content [{:keys [is-space? target-space-id]}]
+  (r/with-let [entity-name        (r/atom "")
+               room-type          (r/atom "chat")
+               entity-topic       (r/atom "")
+               visibility         (r/atom "Private")
+               is-encrypted       (r/atom (not is-space?))
+               history-visibility (r/atom "Shared")
+               is-loading         (r/atom false)
+               !creation-opts     (r/atom (cond-> {:show-visibility? true
+                                                   :show-history?    true
+                                                   :show-encryption? true}
+                                            (not is-space?)
+                                            (assoc :room-types [:chat :forum :voice])))
+               _                  (fetch-creation-options! is-space? !creation-opts is-encrypted)]
+    (let [tr        @(re-frame/subscribe [:i18n/tr])
+          close-fn  #(re-frame/dispatch [:ui/close-modal])
+          key-ns    (if is-space? "creation.space" "creation.room")
+          k         #(keyword key-ns %)
+          c-opts    @!creation-opts
+          cur-name  @entity-name
+          cur-type  @room-type
+          cur-topic @entity-topic
+          cur-vis   @visibility
+          cur-enc   @is-encrypted
+          cur-hist  @history-visibility
+          loading?  @is-loading
+          type-opts (when-not is-space?
+                      (let [allowed-t (set (map name (or (:room-types c-opts) [:chat :forum :voice])))]
+                        (filterv #(contains? allowed-t (:id %))
+                                 [{:id   "chat"
+                                   :icon icons/hash
+                                   :name (tr [:creation.room/type-chat])}
+                                  {:id   "forum"
+                                   :icon icons/thread
+                                   :name (tr [:creation.room/type-forum])}
+                                  {:id   "voice"
+                                   :icon icons/speaker
+                                   :name (tr [:creation.room/type-voice])}])))
+          vis-opts  [{:value "Private" :label (tr [:creation.visibility/private])}
+                     {:value "Public"  :label (tr [:creation.visibility/public])}]
+          hist-opts [{:value "Shared"        :label (tr [:creation.history/shared])}
+                     {:value "Joined"        :label (tr [:creation.history/joined])}
+                     {:value "Invited"       :label (tr [:creation.history/invited])}
+                     {:value "WorldReadable" :label (tr [:creation.history/world])}]]
+      [(if is-space? :div.create-space-container :div.create-room-container)
+       [:div.creation-header
+        [:h3.creation-title (tr [(k "modal-title")])]
+        [:button.creation-close-btn
+         {:type "button" :on-click close-fn}
+         [icons/exit {:width "18px" :height "18px"}]]]
+
+       (when (> (count type-opts) 1)
+         [:div.form-group
+          [:label (tr [:creation.room/type-label])]
+          (into
+           [:div.room-type-grid
+            {:style {:grid-template-columns (str "repeat(" (count type-opts) ", 1fr)")}}]
+           (mapv
+            (fn [{:keys [id icon name]}]
+              (let [active? (= cur-type id)]
+                ^{:key id}
+                [:button.room-type-option
+                 {:type     "button"
+                  :class    (when active? "is-active")
+                  :on-click #(reset! room-type id)}
+                 [icon {:width "16px" :height "16px"}]
+                 [:span name]]))
+            type-opts))])
 
        [:div.form-group
-        [:label (tr [:creation.room/visibility-label])]
-        [:select.form-input
-         {:value @visibility
-          :on-change #(reset! visibility (.. % -target -value))}
-         [:option {:value "Private"} (tr [:creation.visibility/private])]
-         [:option {:value "Public"} (tr [:creation.visibility/public])]]]
+        [:label (tr [(k "name-label")])]
+        [:input.form-input
+         {:type        "text"
+          :auto-focus  true
+          :placeholder (tr [(k "name-placeholder")])
+          :value       cur-name
+          :on-change   #(reset! entity-name (.. % -target -value))}]]
 
        [:div.form-group
-        [:label (tr [:creation.room/history-label])]
-        [:select.form-input
-         {:value @history-visibility
-          :on-change #(reset! history-visibility (.. % -target -value))}
-         [:option {:value "Shared"} (tr [:creation.history/shared])]
-         [:option {:value "Joined"} (tr [:creation.history/joined])]
-         [:option {:value "Invited"} (tr [:creation.history/invited])]
-         [:option {:value "WorldReadable"} (tr [:creation.history/world])]]]
-       [:div.form-group.toggle-row
-        [:div.setting-text
-         [:label (tr [:creation.room/encryption-label])]]
-        [:label.custom-toggle
-         [:input
-          {:type "checkbox"
-           :checked @is-encrypted
-           :on-change #(swap! is-encrypted not)}]
-         [:div.toggle-track
-          [:div.toggle-knob]]]]
+        [:label (tr [(k "topic-label")])]
+        [:input.form-input
+         {:type        "text"
+          :placeholder (tr [(k "topic-placeholder")])
+          :value       cur-topic
+          :on-change   #(reset! entity-topic (.. % -target -value))}]]
+
+       (when (:show-visibility? c-opts)
+         [:div.form-group
+          [:label (tr [(k "visibility-label")])]
+          [creation-select
+           {:value     cur-vis
+            :options   vis-opts
+            :on-change #(reset! visibility %)}]])
+
+       (when (:show-history? c-opts)
+         [:div.form-group
+          [:label (tr [(k "history-label")])]
+          [creation-select
+           {:value     cur-hist
+            :direction :up
+            :options   hist-opts
+            :on-change #(reset! history-visibility %)}]])
+
+       (when (:show-encryption? c-opts)
+         [:label.form-group.toggle-row
+          [:span.toggle-row-text (tr [(k "encryption-label")])]
+          [:span.custom-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   cur-enc
+             :on-change #(swap! is-encrypted not)}]
+           [:span.toggle-track
+            [:span.toggle-knob]]]])
+
        [:div.modal-actions
-        [:button.form-button.destructive
-         {:on-click close-fn
-          :disabled @is-loading}
+        [:button.form-button.cancel-button
+         {:type     "button"
+          :on-click close-fn
+          :disabled loading?}
          (tr [:creation.action/cancel])]
         [:button.form-button.create-button
-         {:on-click (fn []
-                      (when-not (str/blank? @room-name)
+         {:type     "button"
+          :on-click (fn []
+                      (when-not (str/blank? cur-name)
                         (reset! is-loading true)
-                        (re-frame/dispatch [:rooms/create-room
-                                            {:name               @room-name
-                                             :topic              @room-topic
-                                             :visibility         @visibility
-                                             :is-encrypted       @is-encrypted
-                                             :history-visibility @history-visibility
-                                             :is-space           false
-                                             :parent-space-id    target-space-id
-                                             :on-error           #(reset! is-loading false)}])))
-          :disabled (or (str/blank? @room-name) @is-loading)}
-         (if @is-loading
+                        (re-frame/dispatch
+                         [:rooms/create-room
+                          (cond-> {:name               cur-name
+                                   :topic              cur-topic
+                                   :visibility         cur-vis
+                                   :is-encrypted       cur-enc
+                                   :history-visibility cur-hist
+                                   :is-space           (boolean is-space?)
+                                   :parent-space-id    target-space-id
+                                   :on-error           #(reset! is-loading false)}
+                            (not is-space?)
+                            (assoc :is-forum (= cur-type "forum")
+                                   :is-call  (= cur-type "voice")))])))
+          :disabled (or (str/blank? cur-name) loading?)}
+         (if loading?
            (tr [:creation.action/creating])
            (tr [:creation.action/create]))]]])))
 
-(defn ^:ui create-space-content [{:keys [target-space-id]}]
-  (let [tr        @(re-frame/subscribe [:i18n/tr])
-        close-fn  #(re-frame/dispatch [:ui/close-modal])]
-    (r/with-let [space-name         (r/atom "")
-                 space-topic        (r/atom "")
-                 visibility         (r/atom "Private")
-                 is-encrypted       (r/atom false)
-                 history-visibility (r/atom "Shared")
-                 is-loading         (r/atom false)]
-      [:div.create-space-container
-       [:div.form-group
-        [:label (tr [:creation.space/name-label])]
-        [:input.form-input
-         {:type "text"
-          :auto-focus true
-          :placeholder (tr [:creation.space/name-placeholder])
-          :value @space-name
-          :on-change #(reset! space-name (.. % -target -value))}]]
-       [:div.form-group
-        [:label (tr [:creation.space/topic-label])]
-        [:input.form-input
-         {:type "text"
-          :placeholder (tr [:creation.space/topic-placeholder])
-          :value @space-topic
-          :on-change #(reset! space-topic (.. % -target -value))}]]
+(defn ^:ui create-room-content [props]
+  [create-entity-content (assoc props :is-space? false)])
 
-       [:div.form-group
-        [:label (tr [:creation.space/visibility-label])]
-        [:select.form-input
-         {:value @visibility
-          :on-change #(reset! visibility (.. % -target -value))}
-         [:option {:value "Private"} (tr [:creation.visibility/private])]
-         [:option {:value "Public"} (tr [:creation.visibility/public])]]]
-
-       [:div.form-group
-        [:label (tr [:creation.space/history-label])]
-        [:select.form-input
-         {:value @history-visibility
-          :on-change #(reset! history-visibility (.. % -target -value))}
-         [:option {:value "Shared"} (tr [:creation.history/shared])]
-         [:option {:value "Joined"} (tr [:creation.history/joined])]
-         [:option {:value "Invited"} (tr [:creation.history/invited])]
-         [:option {:value "WorldReadable"} (tr [:creation.history/world])]]]
-
-       [:div.form-group.toggle-row
-        [:div.setting-text
-         [:label (tr [:creation.space/encryption-label])]]
-        [:label.custom-toggle
-         [:input
-          {:type "checkbox"
-           :checked @is-encrypted
-           :on-change #(swap! is-encrypted not)}]
-         [:div.toggle-track
-          [:div.toggle-knob]]]]
-       [:div.modal-actions
-        [:button.form-button.destructive
-         {:on-click close-fn
-          :disabled @is-loading}
-         (tr [:creation.action/cancel])]
-        [:button.form-button.create-button
-         {:on-click (fn []
-                      (when-not (str/blank? @space-name)
-                        (reset! is-loading true)
-                        (re-frame/dispatch [:rooms/create-room
-                                            {:name               @space-name
-                                             :topic              @space-topic
-                                             :visibility         @visibility
-                                             :is-encrypted       @is-encrypted
-                                             :history-visibility @history-visibility
-                                             :is-space           true
-                                             :parent-space-id    target-space-id
-                                             :on-error           #(reset! is-loading false)}])))
-          :disabled (or (str/blank? @space-name) @is-loading)}
-         (if @is-loading
-           (tr [:creation.action/creating])
-           (tr [:creation.action/create]))]]])))
+(defn ^:ui create-space-content [props]
+  [create-entity-content (assoc props :is-space? true)])
 
 
 (defmethod modal-component :create-space [_]
@@ -199,61 +253,364 @@ Could make this effectively one component and pass through context later.
 .create-space-container {
     display: flex;
     flex-direction: column;
-    gap: 20px;
-    width: 100%;
-    max-width: 480px;
-    padding: 24px;
+    gap: 16px;
+    width: min(460px, 92vw);
+    padding: 22px 24px;
     box-sizing: border-box;
+    background: var(--surface-2, #2b2d31);
+    color: var(--text-primary, #f2f3f5);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.09));
+    border-radius: 14px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.creation-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 4px;
+}
+
+.creation-title {
+    margin: 0;
+    font-size: 1.12rem;
+    font-weight: 700;
+    color: var(--text-primary, #f2f3f5);
+}
+
+.creation-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-muted, #949ba4);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.creation-close-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary, #f2f3f5);
 }
 
 .form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
 }
 
 .form-group label {
-    font-size: 14px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted, #949ba4);
+}
+
+.room-type-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+.room-type-option {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 10px 8px;
+    border-radius: 9px;
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.09));
+    background: var(--bg-tertiary, #1e1f22);
+    color: var(--text-secondary, #b5bac1);
+    font-size: 0.82rem;
     font-weight: 600;
-    color: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.room-type-option:hover {
+    background: var(--surface-3, #35373c);
+    color: var(--text-primary, #f2f3f5);
+}
+
+.room-type-option.is-active {
+    background: rgba(88, 101, 242, 0.18);
+    border-color: var(--brand-primary, #5865f2);
+    color: #ffffff;
+    box-shadow: 0 0 0 1px rgba(88, 101, 242, 0.35);
 }
 
 .form-input {
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 14px;
-  color: #333333;
-  background-color: #f9f9f9;
-  border: 1px solid #cccccc;
-  border-radius: 6px;
-  outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  box-sizing: border-box;
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    color: var(--text-primary, #f2f3f5);
+    background-color: var(--bg-tertiary, #1e1f22);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    border-radius: 9px;
+    outline: none;
+    color-scheme: dark;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+    box-sizing: border-box;
+}
+
+.form-input::placeholder {
+    color: var(--text-muted, #80848e);
+}
+
+.form-input:hover {
+    border-color: rgba(255, 255, 255, 0.18);
 }
 
 .form-input:focus {
-  border-color: #0052cc;
-  box-shadow: 0 0 0 2px rgba(0, 82, 204, 0.2);
-  background-color: #ffffff;
+    border-color: var(--brand-primary, #5865f2);
+    box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.22);
+    background-color: var(--bg-tertiary, #1e1f22);
+}
+
+.creation-select-dropdown {
+    position: relative;
+    width: 100%;
+}
+
+.creation-select-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--bg-tertiary, #1e1f22);
+    color: var(--text-primary, #f2f3f5);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.creation-select-trigger:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.creation-select-trigger.is-open,
+.creation-select-trigger:focus-visible {
+    border-color: var(--brand-primary, #5865f2);
+    box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.22);
+}
+
+.creation-select-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.creation-select-chevron {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-muted, #949ba4);
+    flex-shrink: 0;
+    transition: transform 0.16s ease, color 0.16s ease;
+}
+
+.creation-select-chevron.is-open {
+    transform: rotate(180deg);
+    color: var(--text-primary, #f2f3f5);
+}
+
+.creation-select-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+}
+
+.creation-select-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    padding: 6px;
+    border-radius: 10px;
+    background: var(--surface-floating, #18191c);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 95;
+}
+
+.creation-select-menu.is-upward {
+    top: auto;
+    bottom: calc(100% + 6px);
+}
+
+.creation-select-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 10px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary, #b5bac1);
+    font-size: 13.5px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.creation-select-option:hover {
+    background: var(--surface-3, rgba(255, 255, 255, 0.08));
+    color: var(--text-primary, #f2f3f5);
+}
+
+.creation-select-option.is-selected {
+    background: rgba(88, 101, 242, 0.2);
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.form-group.toggle-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--bg-tertiary, #1e1f22);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.07));
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-row-text,
+.form-group.toggle-row label {
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--text-primary, #f2f3f5);
+    cursor: pointer;
+}
+
+.custom-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.custom-toggle input {
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+}
+
+.toggle-track {
+    position: relative;
+    width: 42px;
+    height: 24px;
+    box-sizing: border-box;
+    background: #3f4147;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    background: #dbdee1;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.18s ease;
+}
+
+.custom-toggle input:checked + .toggle-track {
+    background: var(--brand-primary, #5865f2);
+    border-color: var(--brand-primary, #5865f2);
+}
+
+.custom-toggle input:checked + .toggle-track .toggle-knob {
+    background: #ffffff;
+    transform: translateX(18px);
 }
 
 .margin-left-small {
-  margin-left: 8px;
+    margin-left: 8px;
 }
 
 .modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 8px;
-  padding-top: 16px;
-  border-top: 1px solid #eeeeee;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.form-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 38px;
+    padding: 0 18px;
+    border-radius: 9px;
+    font-size: 0.86rem;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
+}
+
+.form-button.cancel-button,
+.form-button.destructive {
+    background: var(--bg-tertiary, #1e1f22);
+    color: var(--text-secondary, #b5bac1);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.form-button.cancel-button:hover,
+.form-button.destructive:hover {
+    background: var(--surface-3, #35373c);
+    color: var(--text-primary, #f2f3f5);
+}
+
+.form-button.create-button {
+    background: var(--brand-primary, #5865f2);
+    color: #ffffff;
+    border: 1px solid transparent;
+    box-shadow: 0 2px 8px rgba(88, 101, 242, 0.3);
+}
+
+.form-button.create-button:hover:not(:disabled) {
+    filter: brightness(1.08);
 }
 
 .form-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
 }
-
 
 #+end_src
