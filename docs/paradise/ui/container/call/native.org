@@ -70,23 +70,92 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
                          :engine   (when engine (name engine))})))
 
 (defn report-connected! [room-id]
-  (when call-plugin
-    (.reportConnected call-plugin #js {:roomId room-id})))
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "reportConnected"
+                    #js {:roomId (str room-id)})))
+
+(defn set-muted! [room-id muted?]
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "setMuted"
+                    #js {:roomId (str room-id)
+                         :muted  (boolean muted?)})))
+
+(defn set-video-enabled! [room-id enabled?]
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "setVideoEnabled"
+                    #js {:roomId  (str room-id)
+                         :enabled (boolean enabled?)})))
+
+(defn report-incoming-call! [{:keys [room-id name video? engine]}]
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "reportIncomingCall"
+                    #js {:roomId   (str room-id)
+                         :name     (or (not-empty (str name)) "Incoming Call")
+                         :hasVideo (boolean video?)
+                         :engine   (when engine (name engine))})))
 
 (defn end-call! [room-id]
-  (when call-plugin
-    (.endCall call-plugin #js {:roomId room-id})))
+  (when (and room-id (not (str/blank? (str room-id))))
+    (invoke-native! "endCall"
+                    #js {:roomId (str room-id)})))
+
+(defn get-voip-token! []
+  (-> (invoke-native! "getVoipToken")
+      (p/then (fn [res]
+                (some-> res (gobj/get "token") not-empty)))))
+
+(defn- handle-answered-payload! [^js data]
+  (when data
+    (let [room-id   (some-> (gobj/get data "roomId") str not-empty)
+          engine    (some-> (gobj/get data "engine") str not-empty)
+          has-video (boolean (gobj/get data "hasVideo"))]
+      (when room-id
+        (log/info "Native OS answered call:" room-id "engine:" engine)
+        (rf/dispatch [:call/native-answered {:room-id    room-id
+                                             :engine     engine
+                                             :has-video? has-video}])))))
+
+(defn consume-pending-call-action! []
+  (when (native-available?)
+    (-> (invoke-native! "getPendingCallAction")
+        (p/then (fn [^js data]
+                  (when data
+                    (let [action  (gobj/get data "action")
+                          room-id (some-> (gobj/get data "roomId") str not-empty)]
+                      (cond
+                        (= action "answer")
+                        (handle-answered-payload! data)
+
+                        (and (= action "decline") room-id)
+                        (rf/dispatch [:call/hangup {:room-id      room-id
+                                                    :wipe-state?  true
+                                                    :skip-native? true}])))))))))
 
 (defn init-native-listeners! []
-  (when call-plugin
+  (when (and call-plugin (compare-and-set! !listeners-initialized? false true))
     (.addListener call-plugin "callAnswered"
-      (fn [^js data]
-        (let [room-id (.-roomId data)]
-          (log/info "Native OS answered call:" room-id)
-          (rf/dispatch [:call/init-widget room-id {:join-directly? true :is-native-answered? true}]))))
+                  (fn [^js data]
+                    (handle-answered-payload! data)))
     (.addListener call-plugin "callDeclined"
-      (fn [^js data]
-        (let [room-id (.-roomId data)]
-          (log/info "Native OS ended call:" room-id)
-          (rf/dispatch [:call/hangup {:room-id room-id :wipe-state? true :skip-native? true}]))))))
+                  (fn [^js data]
+                    (let [room-id (some-> (gobj/get data "roomId") str not-empty)]
+                      (log/info "Native OS ended/declined call:" room-id)
+                      (rf/dispatch [:call/hangup {:room-id      room-id
+                                                  :wipe-state?  true
+                                                  :skip-native? true}]))))
+    (.addListener call-plugin "callMuted"
+                  (fn [^js data]
+                    (let [room-id (some-> (gobj/get data "roomId") str not-empty)
+                          muted?  (boolean (gobj/get data "muted"))]
+                      (log/info "Native OS toggled call mute:" room-id muted?)
+                      (rf/dispatch [:call/native-muted {:room-id room-id
+                                                        :muted?  muted?}]))))
+    (.addListener call-plugin "voipTokenReceived"
+                  (fn [^js data]
+                    (when-let [tok (some-> (gobj/get data "token") str not-empty)]
+                      (rf/dispatch [:push/set-voip-token tok]))))
+    (.addListener call-plugin "callAudioActivated"
+                  (fn [_]
+                    (rf/dispatch [:call/audio-session-activated])))
+    (consume-pending-call-action!)))
 #+end_src
