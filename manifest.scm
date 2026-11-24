@@ -22,7 +22,6 @@
    "git"
    "python"
    "pnpm"
-   ;; app image
    "gtk+"
    "libx11"
    "vulkan-loader"
