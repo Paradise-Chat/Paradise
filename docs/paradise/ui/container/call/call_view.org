@@ -870,7 +870,7 @@ The CSS is quite verbose, so moving it below is more reasonable.
     min-height: 0;
     min-width: 0;
     width: 100%;
-    padding: max(12px, env(safe-area-inset-top, 12px))
+    padding: max(12px, var(--safe-area-inset-top, env(safe-area-inset-top, 12px)))
         max(12px, env(safe-area-inset-right, 12px))
         12px
         max(12px, env(safe-area-inset-left, 12px));
@@ -1486,12 +1486,12 @@ The CSS is quite verbose, so moving it below is more reasonable.
 
 .call-mini-player.snap-top-left {
     left: max(16px, env(safe-area-inset-left, 16px));
-    top: max(16px, env(safe-area-inset-top, 16px));
+    top: max(16px, var(--safe-area-inset-top, env(safe-area-inset-top, 16px)));
 }
 
 .call-mini-player.snap-top-right {
     left: calc(100vw - var(--pip-width) - max(16px, env(safe-area-inset-right, 16px)));
-    top: max(16px, env(safe-area-inset-top, 16px));
+    top: max(16px, var(--safe-area-inset-top, env(safe-area-inset-top, 16px)));
 }
 
 .call-mini-player.snap-bottom-left {
@@ -1757,11 +1757,11 @@ The CSS is quite verbose, so moving it below is more reasonable.
     }
 
     .call-grid-layout-wrapper {
-        padding: max(8px, env(safe-area-inset-top, 8px)) 8px 8px 8px;
+        padding: max(8px, var(--safe-area-inset-top, env(safe-area-inset-top, 8px))) 8px 8px 8px;
     }
 
     .call-grid-container.is-immersive .call-grid-layout-wrapper {
-        padding: max(4px, env(safe-area-inset-top, 4px))
+        padding: max(4px, var(--safe-area-inset-top, env(safe-area-inset-top, 4px)))
             4px
             max(4px, env(safe-area-inset-bottom, 4px))
             4px;
