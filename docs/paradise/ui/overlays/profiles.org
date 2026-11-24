@@ -355,42 +355,66 @@ aspect.
 ***** TODO The engine should be informing us of the actions to populate here
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
-(defn build-member-actions [{:keys [user-id display-name]} active-room]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [{:id "view-profile"
-      :label (tr [:container.member-actions/view-profile])
-      :action #(log/info "View profile for:" user-id)}
-     {:id "mention"
-      :label (tr [:container.member-actions/mention] [display-name])
-      :action #(log/info "Mention:" user-id)}
-     {:id "message"
-      :label (tr [:container.member-actions/message])
-      :action #(log/info "DM:" user-id)}
-     {:id "kick"
-      :label (tr [:container.member-actions/kick])
-      :class-name "text-danger"
-      :action #(log/info "Kick:" user-id)}]))
+(defn build-member-actions
+  ([member active-room]
+   (build-member-actions member active-room nil nil))
+  ([{:keys [user-id display-name] :as member} active-room x y]
+   (let [tr         @(re-frame/subscribe [:i18n/tr])
+         active-uid @(re-frame/subscribe [:auth/active-user-id])
+         pl-tags    (when active-room @(re-frame/subscribe [:room/power-level-tags active-room]))
+         perms-data (when active-room @(re-frame/subscribe [:room-perms/data active-room]))
+         _          (when (and active-room (nil? perms-data))
+                      (re-frame/dispatch [:room-perms/fetch active-room]))
+         self?      (= (str user-id) (str active-uid))
+         can-roles? (boolean (or (:can-assign-roles? perms-data)
+                                 (:can-manage-roles? perms-data)))
+         can-kick?  (and (not self?) (not (:is-owner? member))
+                         (boolean (:can-kick? perms-data true)))
+         can-ban?   (and (not self?) (not (:is-owner? member))
+                         (boolean (:can-ban? perms-data true)))]
+     (cond-> [{:id       "view-profile"
+               :label    (tr [:container.member-actions/view-profile])
+               :dispatch [:ui/open-popover :profile-preview
+                          {:x         (or x 100)
+                           :y         (or y 100)
+                           :width     300
+                           :height    300
+                           :backdrop? true
+                           :member    member
+                           :tags      (or pl-tags {})
+                           :room-id   active-room}]}
+              {:id     "copy-id"
+               :label  (tr [:settings.context-menu/copy-id])
+               :action #(copy-to-clipboard! user-id)}]
+       (and active-room can-roles?)
+       (conj {:id       "manage-roles"
+              :label    (tr [:room-settings.moderation/manage-roles])
+              :dispatch [:rooms/open-settings active-room :members]})
+
+       (and active-room can-kick?)
+       (conj {:id         "kick"
+              :label      (tr [:container.member-actions/kick])
+              :class-name "text-danger"
+              :dispatch   [:ui/open-modal :moderate-member
+                           {:room-id active-room
+                            :member  member
+                            :mode    :kick}]})
+
+       (and active-room can-ban?)
+       (conj {:id         "ban"
+              :label      (tr [:room-settings.moderation/ban])
+              :class-name "text-danger"
+              :dispatch   [:ui/open-modal :moderate-member
+                           {:room-id active-room
+                            :member  member
+                            :mode    :ban}]})))))
 #+end_src
 
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
-(defn ^:ui member-context-menu-content [{:keys [member active-room x y close-fn]}]
-  (let [items (build-member-actions member active-room)]
-    [:<>
-     (for [{:keys [id label dispatch action class-name icon]} items]
-       ^{:key (or id label)}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
-                     (.stopPropagation e)
-                     (when dispatch
-                       (re-frame/dispatch dispatch))
-                     (when action
-                       (action))
-                     (re-frame/dispatch [:ui/close-context-menu]))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+(defn ^:ui member-context-menu-content [{:keys [member active-room x y]}]
+  [context-menu-items (build-member-actions member active-room x y)])
 
 (defmethod context-menu-component :member-actions [_]
   member-context-menu-content)
