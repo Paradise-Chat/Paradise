@@ -63,5 +63,4 @@
    "font-google-noto-emoji"
    "sed"
    "nss-certs"
-  ; "rust:cargo"
-    "coreutils"))
+   "coreutils"))
