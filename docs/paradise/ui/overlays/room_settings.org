@@ -109,10 +109,8 @@ Overview (name, topic/description, avatar) and Members & Roles views.
    (when room-id
      (go
        (try
-         (let [ab   (when avatar-file (<p! (file->array-buffer avatar-file)))
-               u8   (when (and ab (pos? (.-byteLength ab))) (js/Uint8Array. ab))
-               b64  (when u8 (uint8->base64 u8))
-               mime (when avatar-file (or (not-empty (.-type avatar-file)) "image/png"))
+         (let [{:keys [buffer-b64 mime]} (when avatar-file
+                                           (<p! (file->base64-payload avatar-file)))
                res  (<! (mesh/do-with-thread!
                          :engine-pool
                          {:handler   :update-room-config
