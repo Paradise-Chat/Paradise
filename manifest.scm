@@ -61,10 +61,6 @@
    "fontconfig"
    "font-liberation"
    "font-google-noto-emoji"
-   ;; ./squashfs-root/AppRun
-
-   ;;
-   "bash"
    "sed"
    "nss-certs"
   ; "rust:cargo"
