@@ -357,21 +357,6 @@ Overview (name, topic/description, avatar) and Members & Roles views.
 **** Modal Shell
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/room_settings.cljs
-(defn- resolve-tab-icon [icon-spec]
-  (cond
-    (vector? icon-spec) icon-spec
-    (keyword? icon-spec)
-    (case icon-spec
-      :edit     [icons/edit]
-      :shield   [icons/shield]
-      :lock     [icons/lock]
-      :smiley   [icons/smiley]
-      :members  [icons/members]
-      :settings [icons/settings]
-      :globe    [icons/globe]
-      [icons/settings])
-    :else [icons/settings]))
-
 (defn- default-room-tabs [is-space? is-dm? can-emotes?]
   (cond-> [{:id           :overview
             :title-key    :room-settings.tabs/overview
