@@ -83,7 +83,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                         :engine-pool
                         {:handler   :fetch-room-config
                          :arguments {:room-id room-id}}))]
-           (if (contains? #{"success" :success} (:status res))
+           (if (ok-status? res)
              (re-frame/dispatch [:room-settings/fetch-config-done room-id
                                  {:config (decode-edn-field res :config-edn :config)}])
              (re-frame/dispatch [:room-settings/fetch-config-done room-id
