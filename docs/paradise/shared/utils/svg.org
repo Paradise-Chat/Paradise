@@ -1028,3 +1028,51 @@ Some more room icons
                                                "var(--active-green, #10b981)"})}))))
 #+end_src
 
+**** Icon Registry
+
+Lookup table and resolver for engine- or data-driven icon specs (keywords,
+strings, or raw hiccup vectors).
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
+(def icon-registry
+  {:door-open    door-open
+   :leave        leave
+   :doorbell     doorbell
+   :check        check
+   :bell         bell
+   :thread       thread
+   :members-plus members-plus
+   :phone        phone
+   :search       search
+   :pins         pins
+   :members      members
+   :plus-circle  plus-circle
+   :settings     settings
+   :copy         copy
+   :trash        trash
+   :link         link
+   :edit         edit
+   :shield       shield
+   :lock         lock
+   :smiley       smiley
+   :globe        globe})
+
+(defn resolve-icon
+  "Resolves a keyword, string, or hiccup vector into a rendered SVG icon vector.
+  Optional `opts` supports `:props` (passed to the icon fn) and `:default` (fallback icon)."
+  ([icon-spec]
+   (resolve-icon icon-spec nil))
+  ([icon-spec {:keys [props default]}]
+   (cond
+     (vector? icon-spec)
+     icon-spec
+
+     (or (keyword? icon-spec) (string? icon-spec))
+     (if-let [icon-fn (get icon-registry (keyword icon-spec))]
+       (if props [icon-fn props] [icon-fn])
+       default)
+
+     :else
+     default)))
+#+end_src
+
