@@ -40,6 +40,86 @@ spaces navigation bar.
 **** Tab
 
 
+***** Avatar & Form Draft State
+
+#+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/profile.cljs
+(defonce ^:private !avatar-draft
+  (r/atom {:file nil :preview-url nil :remove? false}))
+
+(defonce ^:private !banner-draft
+  (r/atom {:file nil :preview-url nil :remove? false}))
+
+(defonce ^:private !profile-draft
+  (r/atom {:user-id nil :dirty #{} :values {}}))
+
+(defn- clear-media-draft! [!draft]
+  (revoke-object-url! (:preview-url @!draft))
+  (reset! !draft {:file nil :preview-url nil :remove? false}))
+
+(defn- clear-avatar-draft! []
+  (clear-media-draft! !avatar-draft))
+
+(defn- clear-banner-draft! []
+  (clear-media-draft! !banner-draft))
+
+(defn- reset-profile-draft! [user-id]
+  (clear-avatar-draft!)
+  (clear-banner-draft!)
+  (reset! !profile-draft {:user-id user-id :dirty #{} :values {}})
+  (re-frame/dispatch [:profile/clear-feedback]))
+
+(defn- ensure-profile-draft-user! [user-id]
+  (when (and user-id
+             (not= user-id "Loading...")
+             (not= (:user-id @!profile-draft) user-id))
+    (clear-avatar-draft!)
+    (clear-banner-draft!)
+    (reset! !profile-draft {:user-id user-id :dirty #{} :values {}})))
+
+(defn- set-draft-field! [field-kw val]
+  (swap! !profile-draft
+         (fn [st]
+           (-> st
+               (update :dirty (fnil conj #{}) field-kw)
+               (assoc-in [:values field-kw] val))))
+  (re-frame/dispatch [:profile/clear-feedback]))
+
+(defn- trigger-avatar-file-picker! []
+  (click-element-by-id! "paradise-profile-avatar-input"))
+
+(defn- trigger-banner-file-picker! []
+  (click-element-by-id! "paradise-profile-banner-input"))
+
+(defn- handle-media-file-selected! [!draft ^js e]
+  (when-let [file (some-> e .-target .-files (aget 0))]
+    (let [prev (:preview-url @!draft)
+          url  (js/URL.createObjectURL file)]
+      (revoke-object-url! prev)
+      (reset! !draft {:file file :preview-url url :remove? false})
+      (re-frame/dispatch [:profile/clear-feedback])))
+  (when-let [target (.-target e)]
+    (set! (.-value target) "")))
+
+(defn- handle-avatar-file-selected! [^js e]
+  (handle-media-file-selected! !avatar-draft e))
+
+(defn- handle-banner-file-selected! [^js e]
+  (handle-media-file-selected! !banner-draft e))
+
+(defn- toggle-remove-media! [!draft]
+  (let [{:keys [preview-url remove?]} @!draft]
+    (revoke-object-url! preview-url)
+    (reset! !draft {:file nil :preview-url nil :remove? (not remove?)})
+    (re-frame/dispatch [:profile/clear-feedback])))
+
+(defn- toggle-remove-avatar! []
+  (toggle-remove-media! !avatar-draft))
+
+(defn- toggle-remove-banner! []
+  (toggle-remove-media! !banner-draft))
+#+end_src
+
+
 ***** Reframe
 
 
@@ -49,65 +129,126 @@ spaces navigation bar.
  (fn [db _]
    (get db
         :current-user
-        {:user-id "Loading..."
+        {:user-id      "Loading..."
          :display-name "Loading..."
-         :avatar-url nil})))
+         :avatar-url   nil})))
+
+(re-frame/reg-sub
+ :profile/saving?
+ (fn [db _]
+   (boolean (:profile/saving? db))))
+
+(re-frame/reg-sub
+ :profile/error
+ (fn [db _]
+   (:profile/error db)))
+
+(re-frame/reg-sub
+ :profile/saved?
+ (fn [db _]
+   (boolean (:profile/saved? db))))
+
+(re-frame/reg-event-db
+ :profile/clear-feedback
+ (fn [db _]
+   (dissoc db :profile/error :profile/saved?)))
+
+(re-frame/reg-event-db
+ :profile/save-failed
+ (fn [db [_ msg]]
+   (-> db
+       (assoc :profile/saving? false
+              :profile/error (or (not-empty (str msg)) "Failed to update profile"))
+       (dissoc :profile/saved?))))
+
+(re-frame/reg-event-fx
+ :profile/save-succeeded
+ (fn [{:keys [db]} [_ updated-profile]]
+   (clear-avatar-draft!)
+   (clear-banner-draft!)
+   (reset! !profile-draft {:user-id (:user-id updated-profile)
+                           :dirty   #{}
+                           :values  {}})
+   {:db (-> db
+            (update :current-user merge updated-profile)
+            (assoc :profile/saving? false
+                   :profile/saved? true)
+            (dissoc :profile/error))
+    :fx [[:dispatch [:settings/load-accounts]]]}))
+
+(defn- execute-profile-save! [payload]
+  (let [av-file    (:file @!avatar-draft)
+        av-remove? (:remove? @!avatar-draft)
+        bn-file    (:file @!banner-draft)
+        bn-remove? (:remove? @!banner-draft)]
+    (go
+      (try
+        (let [av-ab   (when av-file (<p! (file->array-buffer av-file)))
+              av-mime (when av-file (or (not-empty (.-type av-file)) "image/png"))
+              bn-ab   (when bn-file (<p! (file->array-buffer bn-file)))
+              bn-mime (when bn-file (or (not-empty (.-type bn-file)) "image/png"))
+              args    (cond-> payload
+                        av-ab      (assoc :avatar-buffer av-ab :avatar-mime av-mime)
+                        av-remove? (assoc :remove-avatar? true)
+                        bn-ab      (assoc :banner-buffer bn-ab :banner-mime bn-mime)
+                        bn-remove? (assoc :remove-banner? true))
+              res     (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :update-profile
+                            :arguments args}))]
+          (if (= (:status res) "success")
+            (re-frame/dispatch [:profile/save-succeeded (:profile res)])
+            (re-frame/dispatch [:profile/save-failed (:msg res)])))
+        (catch :default e
+          (log/error "Profile update exception:" e)
+          (re-frame/dispatch [:profile/save-failed (or (.-message e) (str e))]))))))
+
+(re-frame/reg-event-fx
+ :sdk/update-own-profile
+ (fn [{:keys [db]} [_ payload]]
+   (execute-profile-save! payload)
+   {:db (-> db
+            (assoc :profile/saving? true)
+            (dissoc :profile/error :profile/saved?))}))
 
 (re-frame/reg-event-fx
  :sdk/fetch-own-profile
  (fn [_ _]
    (go
-     (let [res
-           (<! (mesh/do-with-thread!
-                :engine-pool
-                {:handler :fetch-profile}))]
+     (let [res (<! (mesh/do-with-thread!
+                    :engine-pool
+                    {:handler :fetch-profile}))]
        (when (= (:status res) "success")
-         (re-frame/dispatch
-          [:sdk/set-own-profile
-           (:profile res)]))))
+         (re-frame/dispatch [:sdk/set-own-profile (:profile res)]))))
    {}))
 
 (re-frame/reg-event-db
  :sdk/set-own-profile
  (fn [db [_ profile]]
-   (assoc db :current-user profile)))
+   (update db :current-user merge profile)))
 
 (re-frame/reg-event-fx
  :settings/update-media-preview-policy
  (fn [{:keys [db]} [_ policy]]
    (let [policy-kw (keyword policy)]
      (go
-       (let [res
-             (<! (mesh/do-with-thread!
-                  :engine-pool
-                  {:handler :set-media-preview-policy
-                   :arguments {:policy policy-kw}}))]
+       (let [res (<! (mesh/do-with-thread!
+                      :engine-pool
+                      {:handler   :set-media-preview-policy
+                       :arguments {:policy policy-kw}}))]
          (when-not (= (:status res) "success")
-           (log/error
-            "Failed to sync media policy to Matrix:"
-            (:msg res)))))
-     {:db
-      (assoc-in
-       db
-       [:settings :media-previews]
-       policy-kw)})))
+           (log/error "Failed to sync media policy:" (:msg res)))))
+     {:db (assoc-in db [:settings :media-previews] policy-kw)})))
 
 (re-frame/reg-event-db
  :settings/receive-media-preview-config
  (fn [db [_ policy]]
-   (assoc-in
-    db
-    [:settings :media-previews]
-    policy)))
+   (assoc-in db [:settings :media-previews] policy)))
 
 (re-frame/reg-sub
  :settings/media-preview-policy
  (fn [db _]
-   (get-in
-    db
-    [:settings :media-previews]
-    :off)))
-
+   (get-in db [:settings :media-previews] :off)))
 #+end_src
 
 
@@ -116,88 +257,425 @@ spaces navigation bar.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/profile.cljs
 (defn build-profile-actions
   [tr user-id]
-  [{:id "status"
-    :label (tr [:settings.context-menu/set-status])
+  [{:id       "status"
+    :label    (tr [:settings.context-menu/set-status])
     :dispatch [:ui/open-modal :status-picker]}
-   {:id "copy"
-    :label (tr [:settings.context-menu/copy-id])
+   {:id       "copy"
+    :label    (tr [:settings.context-menu/copy-id])
     :dispatch [:ui/copy-to-clipboard user-id]}
-   {:id "logout"
-    :label (tr [:settings.context-menu/logout])
+   {:id         "logout"
+    :label      (tr [:settings.context-menu/logout])
     :class-name "danger"
-    :dispatch [:sdk/logout]}])
+    :dispatch   [:sdk/logout]}])
 
 (defn ^:ui profile-context-menu-content
   [{:keys [user-id]}]
-  (let [tr    @(re-frame/subscribe [:i18n/tr])
-        items (build-profile-actions tr user-id)]
-    [:<>
-     (for [{:keys [id label dispatch class-name icon]} items]
-       ^{:key (or id label)}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click
-         (fn [e]
-           (.stopPropagation e)
-           (when dispatch
-             (re-frame/dispatch dispatch))
-           (re-frame/dispatch
-            [:ui/close-context-menu]))}
-        (when icon
-          [:span.item-icon icon])
-        [:span.item-label label]])]))
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [context-menu-items (build-profile-actions tr user-id)]))
 
 (defmethod context-menu-component
   :profile-actions
   [_]
   profile-context-menu-content)
 
+(def ^:private presence-options
+  [{:id         :online
+    :label-key  :settings.profile/status-online
+    :fallback   "Online"
+    :desc-key   :settings.profile/status-online-desc
+    :desc-fb    "Show as active and receive notifications normally."}
+   {:id         :away
+    :label-key  :settings.profile/status-away
+    :fallback   "Away"
+    :desc-key   :settings.profile/status-away-desc
+    :desc-fb    "Show that you stepped away from your device."}
+   {:id         :dnd
+    :label-key  :settings.profile/status-dnd
+    :fallback   "Do Not Disturb"
+    :desc-key   :settings.profile/status-dnd-desc
+    :desc-fb    "Signal that you are busy."}
+   {:id         :offline
+    :label-key  :settings.profile/status-offline
+    :fallback   "Invisible / Offline"
+    :desc-key   :settings.profile/status-offline-desc
+    :desc-fb    "Appear offline to others while still using Paradise."}])
+
+(defn ^:ui status-picker-modal [_props]
+  (let [tr         @(re-frame/subscribe [:i18n/tr])
+        own-status @(re-frame/subscribe [:presence/own-status])]
+    [:div.status-picker-modal
+     [:div.status-picker-header
+      [:span.status-picker-title
+       (tr-or tr :settings.profile/status-picker-title "Set Activity Status")]
+      [:button.status-picker-close
+       {:type     "button"
+        :on-click #(re-frame/dispatch [:ui/close-modal])}
+       [icons/exit {:width "16px" :height "16px"}]]]
+     [:div.status-picker-list
+      (for [{:keys [id label-key fallback desc-key desc-fb]} presence-options
+            :let [active? (= own-status id)]]
+        ^{:key id}
+        [:button.status-picker-option
+         {:type     "button"
+          :class    (when active? "is-active")
+          :on-click (fn [_]
+                      (re-frame/dispatch [:presence/set-own-status id])
+                      (re-frame/dispatch [:ui/close-modal]))}
+         [:span.status-picker-swatch-wrap
+          [:span.avatar-status {:class (name id)}]]
+         [:span.status-picker-copy
+          [:span.status-picker-label (tr-or tr label-key fallback)]
+          [:span.status-picker-desc (tr-or tr desc-key desc-fb)]]
+         (when active?
+           [:span.status-picker-check [icons/check {:size "16px"}]])])]]))
+
+(defmethod modal-component
+  :status-picker
+  [_]
+  status-picker-modal)
+
 (defn ^:ui sidebar-profile-mini []
-  (let [profile @(re-frame/subscribe [:sdk/profile])]
+  (let [profile    @(re-frame/subscribe [:sdk/profile])
+        own-status @(re-frame/subscribe [:presence/own-status])]
     [:div.sidebar-profile-mini
      [:div.profile-trigger
-      {:on-click
-       (fn [e]
-         (.preventDefault e)
-         (re-frame/dispatch [:settings/open]))
-       :on-context-menu
-       (fn [e]
-         (.preventDefault e)
-         (re-frame/dispatch
-          [:ui/open-context-menu
-           :profile-actions
-           {:x (.-clientX e)
-            :y (.-clientY e)
-            :user-id (:user-id profile)}]))}
+      {:on-click        (fn [e]
+                          (.preventDefault e)
+                          (re-frame/dispatch [:settings/open]))
+       :on-context-menu (fn [e]
+                          (.preventDefault e)
+                          (re-frame/dispatch
+                           [:ui/open-context-menu
+                            :profile-actions
+                            {:x       (.-clientX e)
+                             :y       (.-clientY e)
+                             :user-id (:user-id profile)}]))}
       [avatar
-       {:id (:user-id profile)
-        :name (or (:display-name profile) "?")
-        :url (:avatar-url profile)
-        :size 40}]
-      [:div.status-dot]]]))
+       {:id     (:user-id profile)
+        :name   (or (:display-name profile) "?")
+        :url    (:avatar-url profile)
+        :size   40
+        :status own-status}]]]))
+
+(def ^:private default-profile-fields
+  [{:key             :display-name
+    :type            :text
+    :label-key       :settings.profile/display-name-label
+    :placeholder-key :settings.profile/display-name-placeholder}
+   {:key             :pronouns
+    :type            :text
+    :max-length      60
+    :label-key       :settings.profile/pronouns-label
+    :placeholder-key :settings.profile/pronouns-placeholder}
+   {:key             :bio
+    :type            :textarea
+    :max-length      500
+    :label-key       :settings.profile/bio-label
+    :placeholder-key :settings.profile/bio-placeholder}])
+
+(defn- field-base-value [profile schema field-kw]
+  (let [raw (if (and (= field-kw :display-name)
+                     (:display-name-key schema)
+                     (contains? profile (:display-name-key schema)))
+              (get profile (:display-name-key schema))
+              (get profile field-kw))]
+    (if (and (= field-kw :display-name) (= raw "Loading..."))
+      ""
+      (str (or raw "")))))
+
+(defn- compute-profile-view-state [profile active-engine]
+  (let [uid          (:user-id profile)
+        _            (ensure-profile-draft-user! uid)
+        {:keys [dirty values]} @!profile-draft
+        av-draft     @!avatar-draft
+        bn-draft     @!banner-draft
+        schema       (or (decode-edn-field profile :profile-schema-edn :profile-schema) {})
+        fields       (vec (or (seq (:fields schema)) default-profile-fields))
+        live-url?    (boolean (:live-url-preview? schema))
+        base-vals    (into {}
+                           (map (fn [{:keys [key]}]
+                                  [key (field-base-value profile schema key)]))
+                           fields)
+        eff-vals     (into {}
+                           (map (fn [{:keys [key]}]
+                                  [key (if (contains? dirty key)
+                                         (get values key "")
+                                         (get base-vals key ""))]))
+                           fields)
+        changed-map  (into {}
+                           (map (fn [{:keys [key type]}]
+                                  (let [bv (get base-vals key "")
+                                        ev (get eff-vals key "")
+                                        eq (if (= (keyword type) :textarea)
+                                             (= ev bv)
+                                             (= (str/trim ev) (str/trim bv)))]
+                                    [key (not eq)])))
+                           fields)
+        base-av-url  (str (or (:avatar-url profile) ""))
+        base-bn-url  (str (or (:banner-url profile) ""))
+        eff-av-url   (get eff-vals :avatar-url base-av-url)
+        eff-bn-url   (get eff-vals :banner-url base-bn-url)
+        av-staged?   (or (some? (:file av-draft)) (boolean (:remove? av-draft)))
+        bn-staged?   (or (some? (:file bn-draft)) (boolean (:remove? bn-draft)))
+        preview-av   (cond
+                       (:preview-url av-draft) (:preview-url av-draft)
+                       (:remove? av-draft)     nil
+                       (and live-url? (not (str/blank? eff-av-url))) eff-av-url
+                       :else                   (:avatar-url profile))
+        preview-bn   (cond
+                       (:preview-url bn-draft) (:preview-url bn-draft)
+                       (:remove? bn-draft)     nil
+                       (and live-url? (not (str/blank? eff-bn-url))) eff-bn-url
+                       :else                   (not-empty base-bn-url))
+        proto-label  (some-> active-engine clojure.core/name str/capitalize)
+        save-payload (reduce (fn [acc {:keys [key]}]
+                               (-> acc
+                                   (assoc key (get eff-vals key ""))
+                                   (assoc (keyword (str (name key) "-changed?"))
+                                          (boolean (get changed-map key)))))
+                             {}
+                             fields)]
+    {:user-id      uid
+     :proto-label  proto-label
+     :fields       fields
+     :values       eff-vals
+     :display-name (get eff-vals :display-name "")
+     :banner-color (:banner-color profile)
+     :preview-av   preview-av
+     :preview-bn   preview-bn
+     :has-avatar?  (or (not (str/blank? base-av-url)) (some? (:file av-draft)))
+     :has-banner?  (or (not (str/blank? base-bn-url)) (some? (:file bn-draft)))
+     :remove-av?   (boolean (:remove? av-draft))
+     :remove-bn?   (boolean (:remove? bn-draft))
+     :av-staged?   av-staged?
+     :bn-staged?   bn-staged?
+     :has-changes? (or (boolean (some true? (vals changed-map))) av-staged? bn-staged?)
+     :save-payload save-payload}))
+
+(defn- format-hero-handle [profile]
+  (let [h (some-> (:handle profile) str str/trim not-empty)]
+    (when (and h (not= h (:user-id profile)))
+      h)))
 
 (defn ^:ui my-account-tab
   [profile]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [:div.settings-tab-content
-     [:div.settings-page-header
-      [:h2.settings-heading
-       (tr [:settings.profile/title])]]
+  (r/with-let [_ (re-frame/dispatch [:sdk/fetch-own-profile])]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          saving?       @(re-frame/subscribe [:profile/saving?])
+          error-msg     @(re-frame/subscribe [:profile/error])
+          saved?        @(re-frame/subscribe [:profile/saved?])
+          vs            (compute-profile-view-state profile active-engine)
+          user-id       (:user-id vs)
+          hero-name     (or (not-empty (:display-name vs))
+                            (:username profile)
+                            (:display-name profile)
+                            (tr-or tr :settings.profile/unknown-user "Unknown User"))
+          hero-handle   (format-hero-handle profile)
+          copy-target   (or (:copy-id profile) (:npub profile) user-id)]
+      [:div.settings-tab-content
+       [:input#paradise-profile-avatar-input.settings-hidden-file-input
+        {:type      "file"
+         :accept    "image/png,image/jpeg,image/webp,image/gif"
+         :on-change handle-avatar-file-selected!}]
+       [:input#paradise-profile-banner-input.settings-hidden-file-input
+        {:type      "file"
+         :accept    "image/png,image/jpeg,image/webp,image/gif"
+         :on-change handle-banner-file-selected!}]
 
-     [:div.settings-card.settings-profile-card
-      [avatar
-       {:id (:user-id profile)
-        :name (or
-               (:display-name profile)
-               "?")
-        :url (:avatar-url profile)
-        :size 80}]
+       [:div.settings-profile-hero
+        [:div.settings-profile-banner
+         {:class    [(when (:bn-staged? vs) "is-staged")
+                     (when (:preview-bn vs) "has-image")]
+          :style    (when (and (nil? (:preview-bn vs)) (:banner-color vs))
+                      {:background (:banner-color vs)})
+          :on-click (fn [_]
+                      (when-not saving?
+                        (trigger-banner-file-picker!)))}
+         (when-let [bn-src (:preview-bn vs)]
+           (if (local-media-url? bn-src)
+             [:img.settings-profile-banner-img
+              {:src bn-src
+               :alt ""}]
+             [media
+              {:uri     bn-src
+               :user-id user-id
+               :class   "settings-profile-banner-img"
+               :alt     ""}]))
+         [:div.settings-profile-banner-actions
+          [:button.settings-profile-banner-btn
+           {:type     "button"
+            :disabled saving?
+            :on-click (fn [e]
+                        (.stopPropagation e)
+                        (trigger-banner-file-picker!))}
+           (if (:has-banner? vs)
+             [icons/edit {:size "13px"}]
+             [icons/plus {:size "13px"}])
+           [:span
+            (if (:has-banner? vs)
+              (tr-or tr :settings.profile/change-banner "Change Banner")
+              (tr-or tr :settings.profile/add-banner "Add Banner"))]]
+          (when (or (:has-banner? vs) (:remove-bn? vs))
+            [:button.settings-profile-banner-btn
+             {:type     "button"
+              :class    (when-not (:remove-bn? vs) "is-danger")
+              :disabled saving?
+              :on-click (fn [e]
+                          (.stopPropagation e)
+                          (toggle-remove-banner!))}
+             (when-not (:remove-bn? vs)
+               [icons/trash {:size "13px"}])
+             [:span
+              (if (:remove-bn? vs)
+                (tr-or tr :settings.profile/undo-remove-banner "Keep Banner")
+                (tr-or tr :settings.profile/remove-banner "Remove"))]])]]
+        [:div.settings-profile-body
+         [:div.settings-profile-top-row
+          [:div.settings-profile-avatar-wrap
+           [:button.settings-profile-avatar-btn
+            {:type     "button"
+             :class    (when (:av-staged? vs) "is-staged")
+             :title    (tr-or tr :settings.profile/change-avatar "Change Avatar")
+             :disabled saving?
+             :on-click (fn [_] (trigger-avatar-file-picker!))}
+            [avatar
+             {:id   user-id
+              :name (or hero-name "?")
+              :url  (:preview-av vs)
+              :size 72}]
+            [:span.settings-profile-avatar-overlay
+             [icons/edit]]]]
 
-      [:div.settings-profile-info
-       [:div.settings-profile-name
-        (or
-         (:display-name profile)
-         (tr [:settings.profile/unknown-user]))]
-       [:div.settings-profile-id
-        (:user-id profile)]]]]))
+          [:div.settings-profile-hero-actions
+           [:button.settings-button.secondary.is-compact
+            {:type     "button"
+             :disabled saving?
+             :on-click (fn [_] (trigger-avatar-file-picker!))}
+            [icons/edit {:size "14px"}]
+            [:span (tr-or tr :settings.profile/change-avatar "Change Avatar")]]
+           (when (or (:has-avatar? vs) (:remove-av? vs))
+             [:button.settings-button.is-compact
+              {:type     "button"
+               :class    (if (:remove-av? vs) "secondary" "destructive")
+               :disabled saving?
+               :on-click (fn [_] (toggle-remove-avatar!))}
+              (when-not (:remove-av? vs)
+                [icons/trash {:size "14px"}])
+              [:span
+               (if (:remove-av? vs)
+                 (tr-or tr :settings.profile/undo-remove-avatar "Keep Avatar")
+                 (tr-or tr :settings.profile/remove-avatar "Remove Avatar"))]])]]
+
+         [:div.settings-profile-info
+          [:div.settings-profile-name-row
+           [:span.settings-profile-name hero-name]
+           (when (:proto-label vs)
+             [:span.settings-hub-proto-pill (:proto-label vs)])]
+          (when hero-handle
+            [:div.settings-profile-handle hero-handle])
+          [:div.settings-profile-id copy-target]]]]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr-or tr :settings.profile/edit-heading "Profile")]
+        [:div.settings-hub-group-card
+         [:div.settings-card-stack
+          (for [{:keys [key type max-length label-key label placeholder-key placeholder]} (:fields vs)
+                :let [fkey (keyword key)
+                      ftyp (keyword (or type :text))
+                      val  (get-in vs [:values fkey] "")
+                      lbl  (or (tr-or tr label-key label) (name fkey))
+                      ph   (or (when (= fkey :display-name) (not-empty (:username profile)))
+                               (tr-or tr placeholder-key (or placeholder "")))]]
+            ^{:key fkey}
+            [:div.settings-field
+             [:label.settings-label lbl]
+             (if (= ftyp :textarea)
+               [:textarea.settings-input.settings-textarea
+                (cond-> {:value       val
+                         :disabled    saving?
+                         :placeholder ph
+                         :on-change   (fn [e] (set-draft-field! fkey (.. e -target -value)))}
+                  max-length (assoc :max-length max-length))]
+               [:input.settings-input
+                (cond-> {:type        (name ftyp)
+                         :value       val
+                         :disabled    saving?
+                         :placeholder ph
+                         :on-change   (fn [e] (set-draft-field! fkey (.. e -target -value)))}
+                  max-length (assoc :max-length max-length))])])]
+
+         [:div.settings-profile-footer
+          [:div.settings-profile-status
+           (cond
+             error-msg
+             [:div.settings-error error-msg]
+
+             saved?
+             [:span.settings-profile-saved
+              [icons/check]
+              (tr-or tr :settings.profile/saved "Profile updated")])]
+
+          [:div.settings-profile-footer-btns
+           [:button.settings-button.secondary.is-compact
+            {:type     "button"
+             :disabled (or (not (:has-changes? vs)) saving?)
+             :on-click (fn [_] (reset-profile-draft! user-id))}
+            (tr-or tr :settings.profile/reset "Reset")]
+           [:button.settings-button.is-compact
+            {:type     "button"
+             :class    (when saving? "is-busy")
+             :disabled (or (not (:has-changes? vs)) saving?)
+             :on-click (fn [_]
+                         (re-frame/dispatch
+                          [:sdk/update-own-profile (:save-payload vs)]))}
+            (if saving?
+              (tr-or tr :settings.profile/saving "Saving...")
+              (tr-or tr :settings.profile/save-changes "Save Changes"))]]]]]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr-or tr :settings.profile/account-actions "Account")]
+        [:div.settings-hub-group-card
+         [:button.settings-hub-item
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:ui/open-modal :status-picker])}
+          [:span.settings-hub-icon.accent-amber [icons/smiley]]
+          [:span.settings-hub-item-copy
+           [:span.settings-hub-item-title
+            (tr [:settings.context-menu/set-status])]]
+          [:span.settings-hub-chevron [icons/chevron-down]]]
+
+         [:button.settings-hub-item
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:ui/copy-to-clipboard copy-target])}
+          [:span.settings-hub-icon.accent-indigo [icons/copy]]
+          [:span.settings-hub-item-copy
+           [:span.settings-hub-item-title
+            (tr [:settings.context-menu/copy-id])]
+           [:span.settings-hub-item-subtitle copy-target]]]
+
+         [:button.settings-hub-item
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:settings/set-tab :accounts])}
+          [:span.settings-hub-icon.accent-sky [icons/members]]
+          [:span.settings-hub-item-copy
+           [:span.settings-hub-item-title
+            (tr [:settings.tabs/accounts])]
+           [:span.settings-hub-item-subtitle
+            (tr [:settings.accounts/description])]]
+          [:span.settings-hub-chevron [icons/chevron-down]]]]]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-card
+         [:button.settings-hub-item.is-danger
+          {:type     "button"
+           :on-click (fn [_]
+                       (re-frame/dispatch [:ui/close-modal])
+                       (re-frame/dispatch [:sdk/logout]))}
+          [:span.settings-hub-icon.accent-danger [icons/leave]]
+          [:span.settings-hub-item-copy
+           [:span.settings-hub-item-title
+            (tr [:settings.context-menu/logout])]]]]]])))
 #+end_src
