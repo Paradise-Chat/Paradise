@@ -105,7 +105,8 @@ Mildly temporary until we better place these with the engine.
      "own-presence-sync"
      (fn [_ get-val]
        (re-frame/dispatch [:presence/receive-own-status
-                           (get-val "status" :status)]))
+                           (get-val "status" :status)
+                           (get-val "status-msg" :status-msg)]))
      "pagination-status"
      (fn [_ get-val]
        (re-frame/dispatch [:sdk/update-pagination-status
