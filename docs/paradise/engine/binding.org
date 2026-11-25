@@ -1,10 +1,14 @@
+* Engine Binding
 
-** Engine Binding
+** Preface
 
-**** Preface
+Helper functions and the declarative ~define-engine!~ contract binder that
+connect protocol engines to Paradise's worker mesh. Legacy ~register!~ and
+~stream!~ remain fully supported for backwards compatibility while new and
+migrated engines can declare their full surface via ~define-engine!~,
+~emit!~, and ~push-timeline!~.
 
-Helper functions that assist in implementing intercepts and engine id prefixes
-to the actual registered RPC function name.
+** Imports
 
 
 **** Imports
