@@ -1117,6 +1117,7 @@ folder, top/bottom halves reorder within that folder.
                             :y          my
                             :group-id   id
                             :group-name group-name
+                            :space-ids  (mapv :id spaces)
                             :collapsed? collapsed?}]))
         touch-drag     (make-group-touch-drag-opts tr id group-name folder-color)
         drag-src-props {:draggable true
@@ -1246,29 +1247,44 @@ folder, top/bottom halves reorder within that folder.
                         (close-fn)
                         (re-frame/dispatch [:ui/close-context-menu])))]
     [:<>
-     [:div.context-menu-item
-      {:on-click (fn [e]
-                   (.stopPropagation e)
-                   (finish! #(open-space-group-modal!
-                              {:mode              :create
-                               :initial-space-ids [space-id]})))}
-      [:span.item-icon [icons/folder-plus {:size "16px"}]]
-      [:span.item-label (tr [:navigation.spaces.bar/create-group])]]
-     (for [g other-grps]
-       ^{:key (:id g)}
-       [:div.context-menu-item
-        {:on-click (fn [e]
-                     (.stopPropagation e)
-                     (finish! #(re-frame/dispatch [:space-groups/add-space (:id g) space-id])))}
-        [:span.item-icon {:style {:color (:color g)}} [icons/folder {:size "16px"}]]
-        [:span.item-label (tr [:navigation.spaces.bar/move-to-group] [(:name g)])]])
-     (when group-id
-       [:div.context-menu-item
-        {:on-click (fn [e]
-                     (.stopPropagation e)
-                     (finish! #(re-frame/dispatch [:space-groups/remove-space space-id])))}
-        [:span.item-icon [icons/folder-minus {:size "16px"}]]
-        [:span.item-label (tr [:navigation.spaces.bar/remove-from-group])]])
+     [context-menu-submenu
+      {:id              (str "move-to-" space-id)
+       :icon            [icons/folder {:size "16px"}]
+       :label           (tr [:navigation.spaces.bar/move-to])
+       :close-fn        close-fn
+       :render-children (fn [_]
+                          [:<>
+                           (for [g other-grps]
+                             ^{:key (:id g)}
+                             [:div.context-menu-item
+                              {:on-click (fn [e]
+                                           (.stopPropagation e)
+                                           (finish! #(re-frame/dispatch
+                                                      [:space-groups/add-space (:id g) space-id])))}
+                              [:span.item-icon {:style {:color (:color g)}}
+                               [icons/folder {:size "16px"}]]
+                              [:span.item-label (:name g)]])
+                           (when group-id
+                             [:<>
+                              (when (seq other-grps)
+                                [:div.context-menu-divider])
+                              [:div.context-menu-item
+                               {:on-click (fn [e]
+                                            (.stopPropagation e)
+                                            (finish! #(re-frame/dispatch
+                                                       [:space-groups/remove-space space-id])))}
+                               [:span.item-icon [icons/folder-minus {:size "16px"}]]
+                               [:span.item-label (tr [:navigation.spaces.bar/remove-from-group])]]])
+                           (when (or (seq other-grps) group-id)
+                             [:div.context-menu-divider])
+                           [:div.context-menu-item
+                            {:on-click (fn [e]
+                                         (.stopPropagation e)
+                                         (finish! #(open-space-group-modal!
+                                                    {:mode              :create
+                                                     :initial-space-ids [space-id]})))}
+                            [:span.item-icon [icons/folder-plus {:size "16px"}]]
+                            [:span.item-label (tr [:navigation.spaces.bar/create-group])]]])}]
      [:div.context-menu-divider]
      [engine-room-option-items
       {:room-id       space-id
@@ -1282,7 +1298,7 @@ folder, top/bottom halves reorder within that folder.
 (defmethod context-menu-component :space-bar-actions [_]
   space-bar-context-menu)
 
-(defn ^:ui space-group-context-menu [{:keys [group-id collapsed? close-fn]}]
+(defn ^:ui space-group-context-menu [{:keys [group-id space-ids collapsed? close-fn]}]
   (let [tr      @(re-frame/subscribe [:i18n/tr])
         finish! (fn [f]
                   (when f (f))
@@ -1290,6 +1306,14 @@ folder, top/bottom halves reorder within that folder.
                     (close-fn)
                     (re-frame/dispatch [:ui/close-context-menu])))]
     [:<>
+     (when (seq space-ids)
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(doseq [sid space-ids]
+                                 (re-frame/dispatch [:rooms/mark-read sid]))))}
+        [:span.item-icon [icons/check {:size "16px"}]]
+        [:span.item-label (tr [:navigation.actions/mark-read])]])
      [:div.context-menu-item
       {:on-click (fn [e]
                    (.stopPropagation e)
