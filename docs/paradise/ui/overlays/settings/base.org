@@ -208,7 +208,7 @@ file.
              :icon     [icons/smiley]}
             {:id       :language-time
              :title    (tr [:settings.tabs/language-time])
-             :subtitle (tr [:settings.language/description])
+             :subtitle (tr [:settings.language-time/description])
              :accent   "violet"
              :icon     [icons/compass]}
             {:id       :keybinds
