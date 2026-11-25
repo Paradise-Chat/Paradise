@@ -504,8 +504,7 @@ this will be where that lives.
           {:disabled busy?
            :on-click (fn [_]
                        (set-starting! true)
-                       (rf/dispatch [:call/init-widget room-id])
-                       (js/setTimeout #(rf/dispatch [:call/start room-id]) 500))}
+                       (rf/dispatch [:call/init-widget room-id {:join-directly? true}]))}
           join-label]]]])))
 
 (defn active-call-grid [room-id]
