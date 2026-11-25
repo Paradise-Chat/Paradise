@@ -28,8 +28,8 @@ spaces navigation bar.
                                           file->array-buffer
                                           first-non-blank
                                           local-media-url?
-                                          revoke-object-url!
-                                          tr-or]]
+                                          normalize-keyword
+                                          revoke-object-url!]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [context-menu-component
@@ -262,26 +262,457 @@ spaces navigation bar.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/profile.cljs
 (def ^:private presence-options
-  [{:id         :online
-    :label-key  :settings.profile/status-online
-    :fallback   "Online"
-    :desc-key   :settings.profile/status-online-desc
-    :desc-fb    "Show as active and receive notifications normally."}
-   {:id         :away
-    :label-key  :settings.profile/status-away
-    :fallback   "Away"
-    :desc-key   :settings.profile/status-away-desc
-    :desc-fb    "Show that you stepped away from your device."}
-   {:id         :dnd
-    :label-key  :settings.profile/status-dnd
-    :fallback   "Do Not Disturb"
-    :desc-key   :settings.profile/status-dnd-desc
-    :desc-fb    "Signal that you are busy."}
-   {:id         :offline
-    :label-key  :settings.profile/status-offline
-    :fallback   "Invisible / Offline"
-    :desc-key   :settings.profile/status-offline-desc
-    :desc-fb    "Appear offline to others while still using Paradise."}])
+  [{:id        :online
+    :label-key :settings.profile/status-online
+    :desc-key  :settings.profile/status-online-desc}
+   {:id        :away
+    :label-key :settings.profile/status-away
+    :desc-key  :settings.profile/status-away-desc}
+   {:id        :dnd
+    :label-key :settings.profile/status-dnd
+    :desc-key  :settings.profile/status-dnd-desc}
+   {:id        :offline
+    :label-key :settings.profile/status-offline
+    :desc-key  :settings.profile/status-offline-desc}])
+
+(defn- presence-label [tr own-status]
+  (case (keyword (or own-status :online))
+    :away    (tr [:settings.profile/status-away])
+    :dnd     (tr [:settings.profile/status-dnd])
+    :offline (tr [:settings.profile/status-offline])
+    (tr [:settings.profile/status-online])))
+
+(defn- format-account-meta [acc]
+  (let [proto (some-> (:engine acc) clojure.core/name str/capitalize)
+        url   (or (:server-url acc) (:base-url acc) (:server acc) "")]
+    (cond
+      (and proto (not (str/blank? url))) (str proto " · " url)
+      proto                              proto
+      :else                              url)))
+
+(defn- status-submenu-items [close-fn]
+  (let [tr         @(re-frame/subscribe [:i18n/tr])
+        own-status @(re-frame/subscribe [:presence/own-status])]
+    [:<>
+     (for [{:keys [id label-key desc-key]} presence-options
+           :let [active? (= own-status id)]]
+       ^{:key id}
+       [:div.context-menu-item
+        {:class    (when active? "is-selected")
+         :on-click (fn [e]
+                     (.stopPropagation e)
+                     (re-frame/dispatch [:presence/set-own-status id])
+                     (when close-fn (close-fn)))}
+        [:span.status-menu-swatch-wrap
+         [:span.avatar-status {:class (name id)}]]
+        [:span.context-menu-item-copy
+         [:span.item-label (tr [label-key])]
+         [:span.context-menu-item-sub (tr [desc-key])]]
+        (when active?
+          [:span.context-menu-item-check
+           [icons/check {:size "14px"}]])])]))
+
+(defn- account-switch-submenu-items [close-fn]
+  (let [tr             @(re-frame/subscribe [:i18n/tr])
+        accounts       @(re-frame/subscribe [:settings/available-accounts])
+        current-user   @(re-frame/subscribe [:sdk/profile])
+        active-user-id @(re-frame/subscribe [:auth/active-user-id])
+        active-engine  @(re-frame/subscribe [:auth/active-engine])
+        effective-uid  (or active-user-id (:user-id current-user))]
+    [:<>
+     (if (seq accounts)
+       (for [acc accounts
+             :let [acc-eng  (some-> (:engine acc) keyword)
+                   item-key (str (or (:engine acc) "default") ":" (:userId acc))
+                   title    (or (not-empty (:label acc))
+                                (not-empty (:display-name acc))
+                                (:userId acc))
+                   sub      (format-account-meta acc)
+                   active?  (and (= (str (:userId acc)) (str effective-uid))
+                                 (or (nil? acc-eng)
+                                     (nil? active-engine)
+                                     (= acc-eng (keyword active-engine))))]]
+         ^{:key item-key}
+         [:div.context-menu-item
+          {:class    (when active? "is-selected")
+           :on-click (fn [e]
+                       (.stopPropagation e)
+                       (when-not active?
+                         (re-frame/dispatch
+                          [:auth/switch-account (:userId acc) (:engine acc)]))
+                       (when close-fn (close-fn)))}
+          [avatar {:id   (:userId acc)
+                   :name (or title "?")
+                   :url  (:avatar-url acc)
+                   :size 22}]
+          [:span.context-menu-item-copy
+           [:span.item-label title]
+           (when-not (str/blank? sub)
+             [:span.context-menu-item-sub sub])]
+          (when active?
+            [:span.context-menu-item-check
+             [icons/check {:size "14px"}]])])
+       [:div.context-menu-empty-hint
+        (tr [:settings.accounts/empty-state])])
+     [:div.context-menu-divider]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (when close-fn (close-fn))
+                   (re-frame/dispatch [:auth/start-login-flow]))}
+      [:span.item-icon [icons/plus {:size "15px"}]]
+      [:span.item-label (tr [:settings.accounts/add-account])]]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (when close-fn (close-fn))
+                   (re-frame/dispatch [:settings/open :accounts]))}
+      [:span.item-icon [icons/settings {:size "15px"}]]
+      [:span.item-label (tr [:settings.tabs/accounts])]]
+     [:div.context-menu-divider]
+     [:div.context-menu-item.danger
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (when close-fn (close-fn))
+                   (re-frame/dispatch [:sdk/logout]))}
+      [:span.item-icon [icons/leave {:size "15px"}]]
+      [:span.item-label (tr [:settings.context-menu/logout])]]]))
+
+(defn ^:ui profile-context-menu-content
+  [{:keys [user-id close-fn]}]
+  (r/with-let [_ (re-frame/dispatch [:settings/load-accounts])]
+    (let [tr         @(re-frame/subscribe [:i18n/tr])
+          own-status @(re-frame/subscribe [:presence/own-status])
+          profile    @(re-frame/subscribe [:sdk/profile])
+          copy-id    (or (:copy-id profile) (:npub profile) user-id (:user-id profile))
+          finish!    (or close-fn #(re-frame/dispatch [:ui/close-context-menu]))]
+      [:<>
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish!)
+                     (re-frame/dispatch [:settings/open :my-account]))}
+        [:span.item-icon [icons/edit {:size "15px"}]]
+        [:span.item-label (tr [:settings.profile/edit-profile])]]
+       [context-menu-submenu
+        {:id              "profile-ctx-status"
+         :icon            [:span.status-menu-swatch-wrap
+                           [:span.avatar-status {:class (name (or own-status :online))}]]
+         :label           (tr [:settings.context-menu/set-status])
+         :close-fn        finish!
+         :render-children status-submenu-items}]
+       [context-menu-submenu
+        {:id              "profile-ctx-switch-account"
+         :icon            [icons/members {:size "15px"}]
+         :label           (tr [:settings.profile/switch-account])
+         :close-fn        finish!
+         :render-children account-switch-submenu-items}]
+       [:div.context-menu-divider]
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (re-frame/dispatch [:ui/copy-to-clipboard copy-id])
+                     (finish!))}
+        [:span.item-icon [icons/copy {:size "15px"}]]
+        [:span.item-label (tr [:settings.context-menu/copy-id])]]
+       [:div.context-menu-item.danger
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish!)
+                     (re-frame/dispatch [:sdk/logout]))}
+        [:span.item-icon [icons/leave {:size "15px"}]]
+        [:span.item-label (tr [:settings.context-menu/logout])]]])))
+
+(defmethod context-menu-component
+  :profile-actions
+  [_]
+  profile-context-menu-content)
+
+(defn ^:ui self-profile-popout-content
+  [{:keys [close-fn]}]
+  (r/with-let [!status-draft (r/atom nil)
+               !copied?      (r/atom false)
+               _             (re-frame/dispatch [:settings/load-accounts])
+               _             (re-frame/dispatch [:sdk/fetch-own-profile])]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          profile       @(re-frame/subscribe [:sdk/profile])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          own-status    @(re-frame/subscribe [:presence/own-status])
+          saved-msg     @(re-frame/subscribe [:presence/own-status-message])
+          finish!       (or close-fn #(re-frame/dispatch [:ui/close-popover]))
+          user-id       (:user-id profile)
+          display-name  (or (first-non-blank (:display-name profile)
+                                             (:username profile)
+                                             user-id)
+                            "User")
+          raw-handle    (first-non-blank (:handle profile)
+                                         (when-let [u (first-non-blank (:username profile))]
+                                           (str "@" u)))
+          handle        (when (and raw-handle (not= raw-handle display-name))
+                          raw-handle)
+          pronouns      (first-non-blank (:pronouns profile))
+          bio           (first-non-blank (:bio profile))
+          bn-url        (first-non-blank (:banner-url profile))
+          bn-color      (first-non-blank (:banner-color profile))
+          proto-label   (some-> active-engine clojure.core/name str/capitalize)
+          copy-target   (or (:copy-id profile) (:npub profile) user-id)
+          draft-val     (if (some? @!status-draft) @!status-draft (or saved-msg ""))
+          dirty-msg?    (and (some? @!status-draft)
+                             (not= (str/trim @!status-draft) (or saved-msg "")))
+          commit-msg!   (fn []
+                          (let [next-msg (str/trim (str draft-val))]
+                            (re-frame/dispatch [:presence/set-own-status-message next-msg])
+                            (reset! !status-draft nil)))]
+      [:div.self-profile-popout
+       [:div.self-profile-cover
+        {:style (when (and (nil? bn-url) bn-color)
+                  {:background bn-color})}
+        (when bn-url
+          (if (local-media-url? bn-url)
+            [:img.self-profile-banner-img {:src bn-url :alt ""}]
+            [media {:uri     bn-url
+                    :user-id user-id
+                    :class   "self-profile-banner-img"
+                    :alt     ""}]))
+        [:button.self-profile-cover-edit
+         {:type     "button"
+          :title    (tr [:settings.profile/edit-profile])
+          :on-click (fn [e]
+                      (.stopPropagation e)
+                      (finish!)
+                      (re-frame/dispatch [:settings/open :my-account]))}
+         [icons/edit {:size "13px"}]]]
+
+       [:div.self-profile-header
+        [:div.self-profile-avatar-row
+         [:div.self-profile-avatar-wrap
+          [avatar {:id     user-id
+                   :name   display-name
+                   :url    (:avatar-url profile)
+                   :size   62
+                   :status own-status}]]
+         (when proto-label
+           [:span.settings-hub-proto-pill proto-label])]
+
+        [:div.self-profile-id-block
+         [:div.self-profile-name display-name]
+         (when (or handle pronouns)
+           [:div.self-profile-meta-row
+            (when handle
+              [:span.self-profile-handle handle])
+            (when (and handle pronouns)
+              [:span.self-profile-dot "·"])
+            (when pronouns
+              [:span.self-profile-pronouns pronouns])])
+         (when (and user-id (not= user-id display-name) (not= user-id handle))
+           [:div.self-profile-uid user-id])
+         (when bio
+           [:div.self-profile-bio bio])]]
+
+       [:div.self-profile-status-box
+        [:div.self-profile-status-input-row
+         [:span.self-profile-status-icon
+          [icons/smiley {:width "14px" :height "14px"}]]
+         [:input.self-profile-status-input
+          {:type        "text"
+           :max-length  120
+           :value       draft-val
+           :placeholder (tr [:settings.profile/status-message-placeholder])
+           :on-change   #(reset! !status-draft (.. % -target -value))
+           :on-key-down (fn [e]
+                          (case (.-key e)
+                            "Enter"  (do (.preventDefault e)
+                                         (commit-msg!)
+                                         (.blur (.-currentTarget e)))
+                            "Escape" (do (.stopPropagation e)
+                                         (reset! !status-draft nil)
+                                         (.blur (.-currentTarget e)))
+                            nil))}]
+         (cond
+           dirty-msg?
+           [:button.self-profile-status-btn.is-save
+            {:type     "button"
+             :title    (tr [:settings.profile/save-changes])
+             :on-click (fn [e]
+                         (.stopPropagation e)
+                         (commit-msg!))}
+            [icons/check {:size "13px"}]]
+
+           (not (str/blank? saved-msg))
+           [:button.self-profile-status-btn
+            {:type     "button"
+             :title    (tr [:settings.profile/clear-status-message])
+             :on-click (fn [e]
+                         (.stopPropagation e)
+                         (reset! !status-draft nil)
+                         (re-frame/dispatch [:presence/set-own-status-message ""]))}
+            [icons/exit {:width "12px" :height "12px"}]])]]
+
+       [:div.self-profile-menu
+        [:div.context-menu-item
+         {:on-click (fn [e]
+                      (.stopPropagation e)
+                      (finish!)
+                      (re-frame/dispatch [:settings/open :my-account]))}
+         [:span.item-icon [icons/edit {:size "15px"}]]
+         [:span.item-label (tr [:settings.profile/edit-profile])]]
+
+        [context-menu-submenu
+         {:id              "self-popout-status"
+          :icon            [:span.status-menu-swatch-wrap
+                            [:span.avatar-status {:class (name (or own-status :online))}]]
+          :label           (str (tr [:settings.context-menu/set-status])
+                                " · "
+                                (presence-label tr own-status))
+          :close-fn        finish!
+          :render-children status-submenu-items}]
+
+        [context-menu-submenu
+         {:id              "self-popout-switch-account"
+          :icon            [icons/members {:size "15px"}]
+          :label           (tr [:settings.profile/switch-account])
+          :close-fn        finish!
+          :render-children account-switch-submenu-items}]
+
+        [:div.context-menu-divider]
+
+        [:div.context-menu-item
+         {:on-click (fn [e]
+                      (.stopPropagation e)
+                      (re-frame/dispatch [:ui/copy-to-clipboard copy-target])
+                      (reset! !copied? true)
+                      (js/setTimeout #(reset! !copied? false) 1200))}
+         [:span.item-icon
+          (if @!copied?
+            [icons/check {:size "15px"}]
+            [icons/copy {:size "15px"}])]
+         [:span.item-label
+          (if @!copied?
+            (tr [:settings.profile/copied-id])
+            (tr [:settings.context-menu/copy-id]))]]]])))
+
+(defmethod popover-component
+  :self-profile-popout
+  [_]
+  self-profile-popout-content)
+
+(defn- audio-device-options-menu
+  [{:keys [kind
+           device-icon
+           device-label
+           volume-label
+           volume-sub
+           volume-event
+           fallback-label
+           close-fn]}]
+  (r/with-let [!devices (r/atom {:audioinput [] :videoinput [] :audiooutput []})
+               !error   (r/atom nil)
+               _        (voice-video/load-call-devices! !devices !error)]
+    (let [tr              @(re-frame/subscribe [:i18n/tr])
+          selected-device @(re-frame/subscribe [:settings/call-device kind])
+          volume          @(re-frame/subscribe [volume-sub])
+          devices         (get @!devices kind [])
+          default-label   (tr [:settings.voice-video.devices/default])
+          finish!         (or close-fn #(re-frame/dispatch [:ui/close-context-menu]))
+          default-active? (str/blank? (str (or selected-device "")))]
+      [:<>
+       [context-menu-submenu
+        {:id       (str "audio-device-" (name kind))
+         :icon     device-icon
+         :label    device-label
+         :close-fn finish!
+         :render-children
+         (fn [_]
+           [:<>
+            [:div.context-menu-item
+             {:class    (when default-active? "is-selected")
+              :on-click (fn [e]
+                          (.stopPropagation e)
+                          (re-frame/dispatch [:settings/set-call-device kind ""])
+                          (finish!))}
+             [:span.item-label default-label]
+             (when default-active?
+               [:span.context-menu-item-check [icons/check {:size "14px"}]])]
+            (when (seq devices)
+              [:div.context-menu-divider])
+            (for [[idx device] (map-indexed vector devices)
+                  :let [dev-id  (.-deviceId device)
+                        active? (and (not default-active?)
+                                     (= selected-device dev-id))
+                        label   (voice-video/media-device-label device fallback-label idx)]]
+              ^{:key (str (name kind) "-" idx "-" dev-id)}
+              [:div.context-menu-item
+               {:class    (when active? "is-selected")
+                :on-click (fn [e]
+                            (.stopPropagation e)
+                            (re-frame/dispatch [:settings/set-call-device kind dev-id])
+                            (finish!))}
+               [:span.item-label label]
+               (when active?
+                 [:span.context-menu-item-check [icons/check {:size "14px"}]])])])}]
+
+       [:div.context-menu-divider]
+
+       [:div.context-menu-slider-block
+        {:on-click        #(.stopPropagation %)
+         :on-pointer-down #(.stopPropagation %)}
+        [:div.context-menu-slider-header
+         [:span.context-menu-slider-label volume-label]
+         [:span.context-menu-slider-value
+          {:title           (tr [:container.call/reset-volume])
+           :on-double-click #(re-frame/dispatch [volume-event 100])}
+          (str volume "%")]]
+        [:input.context-menu-slider-input
+         {:type      "range"
+          :min       0
+          :max       200
+          :step      1
+          :value     volume
+          :on-change #(re-frame/dispatch [volume-event (.. % -target -value)])}]]
+
+       [:div.context-menu-divider]
+
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish!)
+                     (re-frame/dispatch [:settings/open :voice-video]))}
+        [:span.item-icon [icons/settings {:size "15px"}]]
+        [:span.item-label (tr [:settings.tabs/voice-video])]]])))
+
+(defn ^:ui mic-options-context-menu [{:keys [close-fn]}]
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [audio-device-options-menu
+     {:kind           :audioinput
+      :device-icon    [icons/mic {:width "15px" :height "15px"}]
+      :device-label   (tr [:settings.voice-video.devices/input-label])
+      :volume-label   (tr [:settings.voice-video.microphone/input-volume])
+      :volume-sub     :settings/input-volume
+      :volume-event   :settings/set-input-volume
+      :fallback-label (tr [:settings.voice-video.devices/microphone])
+      :close-fn       close-fn}]))
+
+(defmethod context-menu-component
+  :mic-options
+  [_]
+  mic-options-context-menu)
+
+(defn ^:ui deafen-options-context-menu [{:keys [close-fn]}]
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [audio-device-options-menu
+     {:kind           :audiooutput
+      :device-icon    [icons/headphones {:width "15px" :height "15px"}]
+      :device-label   (tr [:settings.voice-video.devices/output-label])
+      :volume-label   (tr [:settings.voice-video.output/output-volume])
+      :volume-sub     :settings/output-volume
+      :volume-event   :settings/set-output-volume
+      :fallback-label (tr [:settings.voice-video.devices/output])
+      :close-fn       close-fn}]))
+
+(defmethod context-menu-component
+  :deafen-options
+  [_]
+  deafen-options-context-menu)
 
 (defn ^:ui status-picker-modal [_props]
   (let [tr         @(re-frame/subscribe [:i18n/tr])
@@ -289,13 +720,13 @@ spaces navigation bar.
     [:div.status-picker-modal
      [:div.status-picker-header
       [:span.status-picker-title
-       (tr-or tr :settings.profile/status-picker-title "Set Activity Status")]
+       (tr [:settings.profile/status-picker-title])]
       [:button.status-picker-close
        {:type     "button"
         :on-click #(re-frame/dispatch [:ui/close-modal])}
        [icons/exit {:width "16px" :height "16px"}]]]
      [:div.status-picker-list
-      (for [{:keys [id label-key fallback desc-key desc-fb]} presence-options
+      (for [{:keys [id label-key desc-key]} presence-options
             :let [active? (= own-status id)]]
         ^{:key id}
         [:button.status-picker-option
@@ -307,8 +738,8 @@ spaces navigation bar.
          [:span.status-picker-swatch-wrap
           [:span.avatar-status {:class (name id)}]]
          [:span.status-picker-copy
-          [:span.status-picker-label (tr-or tr label-key fallback)]
-          [:span.status-picker-desc (tr-or tr desc-key desc-fb)]]
+          [:span.status-picker-label (tr [label-key])]
+          [:span.status-picker-desc (tr [desc-key])]]
          (when active?
            [:span.status-picker-check [icons/check {:size "16px"}]])])]]))
 

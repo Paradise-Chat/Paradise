@@ -23,8 +23,7 @@ aspect.
    [paradise.shared.utils.helpers :refer [decode-edn-field
                                           first-non-blank
                                           local-media-url?
-                                          ok-status?
-                                          tr-or]]
+                                          ok-status?]]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [context-menu-component
                                       engine-option-items
@@ -172,7 +171,7 @@ aspect.
        (when (:bio st)
          [:div.profile-preview-bio-card
           [:div.profile-preview-section-label
-           (tr-or tr :settings.profile/bio-label "About Me")]
+           (tr [:settings.profile/bio-label])]
           [:div.profile-preview-bio (:bio st)]])
        (when room-id
          [member-popover-roles-and-mod
