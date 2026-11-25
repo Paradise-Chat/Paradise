@@ -40,6 +40,16 @@ Mildly temporary until we better place these with the engine.
        (re-frame/dispatch [:sdk/update-space-view
                            (get-val "space-id" :space-id)
                            (get-val "rooms" :rooms)]))
+     "space-unreads-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:spaces/set-unreads-sync
+                           {:space-unreads (get-val "space-unreads" :space-unreads)
+                            :patch?        (boolean (get-val "patch?" :patch?))
+                            :removals      (get-val "removals" :removals)}]))
+     "dm-pops-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:rooms/set-dm-pops-sync
+                           (get-val "dms" :dms)]))
      "room-parent-resolved"
      (fn [_ get-val]
        (re-frame/dispatch [:rooms/apply-parent-resolution
