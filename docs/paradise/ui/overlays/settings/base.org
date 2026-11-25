@@ -72,6 +72,8 @@ file.
    "call_audio_input"       {:event :settings/hydrate-audio-input       :default nil      :stage :boot}
    "call_video_input"       {:event :settings/hydrate-video-input       :default nil      :stage :boot}
    "call_audio_output"      {:event :settings/hydrate-audio-output      :default nil      :stage :boot}
+   "call_input_volume"      {:event :settings/hydrate-input-volume      :default 100      :stage :boot}
+   "call_output_volume"     {:event :settings/hydrate-output-volume     :default 100      :stage :boot}
    "call_voice_threshold"     {:event :settings/hydrate-voice-threshold   :default 0.12     :stage :boot}
    "call_noise_suppression"   {:event :settings/hydrate-noise-suppression :default true     :stage :boot}
    "submit_on_enter"          {:event :settings/hydrate-submit-on-enter   :default nil      :stage :boot}
