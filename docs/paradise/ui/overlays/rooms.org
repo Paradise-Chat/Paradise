@@ -17,7 +17,7 @@ given room, space, server, channel, community, or direct message.
    [clojure.string :as str]
    [paradise.shared.utils.helpers :refer [decode-edn-field ok-status? resolve-item-label]]
    [paradise.shared.utils.svg :refer [resolve-icon]]
-   [paradise.ui.overlays.base :refer [context-menu-component]]
+   [paradise.ui.overlays.base :as overlays-base :refer [context-menu-component engine-option-items]]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
@@ -31,46 +31,7 @@ given room, space, server, channel, community, or direct message.
 
 (def resolve-option-label resolve-item-label)
 
-(defn- normalize-dispatch-event [ev]
-  (if (and (sequential? ev) (seq ev))
-    (let [v (vec ev)]
-      (if (string? (first v))
-        (assoc v 0 (keyword (first v)))
-        v))
-    ev))
-
-(defn execute-option-command! [{:keys [action command]}]
-  (cond
-    (fn? action)
-    (action)
-
-    (map? command)
-    (case (keyword (:type command))
-      :dispatch
-      (when-let [ev (normalize-dispatch-event (:event command))]
-        (re-frame/dispatch ev))
-
-      :dispatch-many
-      (doseq [ev (:events command)]
-        (when-let [norm (normalize-dispatch-event ev)]
-          (re-frame/dispatch norm)))
-
-      :engine-rpc
-      (let [{:keys [handler arguments on-success-dispatch]} command]
-        (go
-          (try
-            (let [res (<! (mesh/do-with-thread!
-                           :engine-pool
-                           {:handler   (keyword handler)
-                            :arguments (or arguments {})}))]
-              (when (and on-success-dispatch (ok-status? res))
-                (re-frame/dispatch (normalize-dispatch-event on-success-dispatch))))
-            (catch :default e
-              (log/error "Room option RPC failed:" handler e)))))
-
-      nil)
-
-    :else nil))
+(def execute-option-command! overlays-base/execute-option-command!)
 #+end_src
 
 
@@ -171,27 +132,10 @@ given room, space, server, channel, community, or direct message.
                           (reset! !last-req cache-key)
                           (re-frame/dispatch [:room-options/fetch req]))
           items         @(re-frame/subscribe [:room-options/items cache-key])]
-      [:<>
-       (for [{:keys [id class-name icon divider?] :as item} items]
-         (if divider?
-           ^{:key (or id (str (random-uuid)))}
-           [:div.context-menu-divider]
-           (let [lbl     (resolve-option-label tr item)
-                 icon-el (resolve-option-icon icon)]
-             ^{:key (or id lbl)}
-             [:div.context-menu-item
-              {:class    class-name
-               :on-click (fn [e]
-                           (.stopPropagation e)
-                           (if on-item-click
-                             (on-item-click #(execute-option-command! item))
-                             (do
-                               (execute-option-command! item)
-                               (if close-fn
-                                 (close-fn)
-                                 (re-frame/dispatch [:ui/close-context-menu])))))}
-              (when icon-el [:span.item-icon icon-el])
-              [:span.item-label lbl]])))])))
+      [engine-option-items {:tr            tr
+                            :items         items
+                            :close-fn      close-fn
+                            :on-item-click on-item-click}])))
 
 (defn ^:ui room-context-menu-content [props]
   [engine-room-option-items props])
