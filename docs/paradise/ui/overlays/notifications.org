@@ -16,6 +16,7 @@ They are technically an overlay, so we'll group them here also.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/notifications.cljs
 (ns paradise.ui.overlays.notifications
   (:require [re-frame.core :as re-frame]
+            [reagent.core :as r]
             [taoensso.timbre :as log]
             [clojure.string :as str]
             [promesa.core :as p]
@@ -26,6 +27,8 @@ They are technically an overlay, so we'll group them here also.
             [paradise.shared.client.state :refer [!config] :as state]
             [paradise.shared.client.session-store :as store]
             [paradise.shared.utils.helpers :refer [base64url->uint8 bytes->base64url]]
+            [paradise.shared.utils.svg :as icons]
+            [paradise.ui.global :refer [avatar]]
             [cljs-workers.mesh :as mesh]))
 #+end_src
 
