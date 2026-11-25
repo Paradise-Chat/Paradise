@@ -21,9 +21,10 @@ account in ~session-store~ and synchronized with the active protocol engine.
    [paradise.shared.utils.helpers :refer [hex->rgba normalize-id parse-edn-map resolve-dm-display]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar long-press-props]]
-   [paradise.ui.overlays.base :refer [context-menu-component modal-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component
+                                      context-menu-submenu
+                                      modal-component]]
    [paradise.ui.overlays.rooms :refer [engine-room-option-items]]
-   [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 #+end_src
