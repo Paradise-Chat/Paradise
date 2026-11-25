@@ -29,6 +29,8 @@ pieces.
    [re-frame.db :as db]
    [service-worker-handler :refer [register-sw!]]
    [taoensso.timbre :as log]))
+
+(capacitor-proxy/init!)
 #+end_src
 
 
