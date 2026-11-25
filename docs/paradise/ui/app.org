@@ -884,19 +884,22 @@ providing the encapsulation and parsing for us.
 
         [persistent-call-container]
         (into [:div.app-root
-               (merge {:class         (when sidebar-open? "sidebars-open")
+               (merge {:class         [(when sidebar-open? "sidebars-open")
+                                       (when active-call-id "has-active-call")]
                        :data-platform platform
                        :style         {:touch-action   "pan-y"
                                        :padding-bottom cushion}}
                       swipe-props)]
               [[spaces-sidebar]
                [room-list]
+               [sidebar-profile-mini]
                (when sidebar-open?
                  [:div.mobile-overlay {:on-click #(re-frame/dispatch [:ui/set-sidebar false])}])
                [container]])
         [modal-root]
         [popover-root]
         [context-menu-root]
+        [notifications/notification-toast-root]
         [global-key-listener]]
        [:div "Unknown State"])]))
 #+end_src
@@ -949,6 +952,7 @@ when we detatch and reload (basically when you hit control + s to save).
 
 (defn ^:export init []
   (re-frame/dispatch-sync [:initialize-db])
+  (notifications/init-audio-unlock!)
   (call/init-native-listeners!)
   (tray/init-tray!)
   (re-frame/dispatch [:app/load-settings-by-stage :boot])
