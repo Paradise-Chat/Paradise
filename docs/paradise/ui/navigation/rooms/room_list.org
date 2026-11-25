@@ -529,17 +529,10 @@ themselves we want to flatten as we have described above.
 
 **** Notifications and unread data
 
-So notification handling is actually a fairly annoying process if we want the
-smooth visual users expect. We need to bubble up the unread count for every room
-within a space. This meant we needed to have the parent-child relationships
-mapped out and then flatten them into a calculatable total. The parent-child
-mapping process is documented above, but amusingly is one of the more complex
-aspects of spaces and rooms.
-
-To a much easier degree, we need to also calculate the unread count for DMs.
-This is mostly useful for presenting that info on the space bar cleanly.
-Otherwise we would just re-use (and probably should see if we can) the method we
-have for all other rooms.
+Space unread summaries and active DM pop entries are computed inside each
+protocol engine and delivered via the ~space-unreads-sync~ and ~dm-pops-sync~
+worker streams. The UI keeps only $O(1)$ map/vector subscriptions instead of
+walking space trees or scanning every cached room on the main thread.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
 (def ^:private empty-unread-stats
   {:unread?     false
@@ -547,81 +540,126 @@ have for all other rooms.
    :mentions    0
    :highlight?  false})
 
-(defn- space-unread-totals [rooms-map children-map manual-children-map root-space-id]
-  (loop [cs      nil
-         stack   [root-space-id]
-         visited #{root-space-id}
-         seen-r  (transient #{})
-         notifs  0
-         ments   0]
-    (if cs
-      (let [{:keys [id is-space?]} (first cs)]
-        (if (or (nil? id) (contains? seen-r id))
-          (recur (next cs) stack visited seen-r notifs ments)
-          (let [summary  (get rooms-map id)
-                sr'      (conj! seen-r id)
-                r-notifs (if summary
-                           (or (safe-get summary
-                                         "unreadNotificationsCount"
-                                         :unreadNotificationsCount)
-                               0)
-                           0)
-                r-ments  (if summary
-                           (or (safe-get summary
-                                         "unreadMentionsCount"
-                                         :unreadMentionsCount)
-                               0)
-                           0)
-                next-stk (if (and is-space? (not (contains? visited id)))
-                           (conj stack id)
-                           stack)
-                next-vis (if is-space? (conj visited id) visited)]
-            (recur (next cs)
-                   next-stk
-                   next-vis
-                   sr'
-                   (+ notifs r-notifs)
-                   (+ ments r-ments)))))
-      (if (empty? stack)
-        (if (and (zero? notifs) (zero? ments))
-          empty-unread-stats
-          {:unread?     (pos? notifs)
-           :notif-count notifs
-           :mentions    ments
-           :highlight?  (pos? ments)})
-        (let [curr-id  (peek stack)
-              stack'   (pop stack)
-              sdk-ch   (get children-map curr-id)
-              man-ch   (get manual-children-map curr-id)
-              combined (cond
-                         (and (seq sdk-ch) (seq man-ch)) (concat sdk-ch man-ch)
-                         (seq sdk-ch)                    sdk-ch
-                         :else                           man-ch)]
-          (recur (seq combined) stack' visited seen-r notifs ments))))))
+(defn- normalize-map-key [k]
+  (cond
+    (string? k)  k
+    (keyword? k) (subs (str k) 1)
+    (some? k)    (str k)
+    :else        nil))
 
-(defn- build-spaces-unread-stats-map [spaces rooms-map children-map manual-children-map]
-  (let [space-ids (into (set (keep :id spaces))
-                        (concat (keys children-map) (keys manual-children-map)))]
-    (persistent!
-     (reduce
-      (fn [acc sid]
-        (if sid
-          (assoc! acc sid (space-unread-totals rooms-map
-                                               children-map
-                                               manual-children-map
-                                               sid))
-          acc))
-      (transient {})
-      space-ids))))
+(defn- map-get [m k]
+  (when (map? m)
+    (let [v (get m k ::not-found)]
+      (if (= v ::not-found)
+        (get m (name k))
+        v))))
+
+(defn- normalize-space-unread-entry [raw]
+  (let [m          (cond
+                     (map? raw)    raw
+                     (object? raw) (js->clj raw :keywordize-keys true)
+                     :else         nil)
+        notifs     (int (or (map-get m :notif-count) (map-get m :notifCount) 0))
+        mentions   (int (or (map-get m :mentions) 0))
+        highlight? (boolean (or (map-get m :highlight?) (pos? mentions)))
+        unread?    (boolean (or (map-get m :unread?) highlight? (pos? notifs)))]
+    (if (and (not unread?) (zero? notifs) (zero? mentions))
+      empty-unread-stats
+      {:unread?     unread?
+       :notif-count notifs
+       :mentions    mentions
+       :highlight?  highlight?})))
+
+(defn- normalize-space-unreads-map [raw]
+  (let [m (cond
+            (map? raw)    raw
+            (object? raw) (js->clj raw)
+            :else         nil)]
+    (if (seq m)
+      (persistent!
+       (reduce-kv
+        (fn [acc k v]
+          (if-let [sid (normalize-map-key k)]
+            (let [entry (normalize-space-unread-entry v)]
+              (if (= entry empty-unread-stats)
+                acc
+                (assoc! acc sid entry)))
+            acc))
+        (transient {})
+        m))
+      {})))
+
+(defn- normalize-dm-pop-item [raw]
+  (let [m  (cond
+             (map? raw)    raw
+             (object? raw) (js->clj raw :keywordize-keys true)
+             :else         nil)
+        id (or (map-get m :id) (map-get m :roomId))]
+    (when id
+      (let [mentions   (int (or (map-get m :mentions) 0))
+            msg-count  (int (or (map-get m :msg-count) (map-get m :msgCount) 0))
+            raw-unread (map-get m :unread?)]
+        {:id                (str id)
+         :name              (or (map-get m :name) "Loading...")
+         :avatar-url        (or (map-get m :avatar-url)
+                                (map-get m :avatarUrl)
+                                (map-get m :avatar))
+         :is-dm?            true
+         :is-group-dm?      (boolean (or (map-get m :is-group-dm?)
+                                         (map-get m :isGroupDm)))
+         :recipient-avatars (or (map-get m :recipient-avatars)
+                                (map-get m :recipientAvatars))
+         :unread?           (boolean (if (some? raw-unread) raw-unread true))
+         :highlight?        (boolean (or (map-get m :highlight?) (pos? mentions)))
+         :mentions          mentions
+         :msg-count         msg-count}))))
+
+(re-frame/reg-event-db
+ :spaces/set-unreads-sync
+ (fn [db [_ {:keys [space-unreads patch? removals]}]]
+   (let [prev     (:space-unreads db {})
+         incoming (normalize-space-unreads-map space-unreads)
+         next-map (if patch?
+                    (let [raw-map  (cond
+                                     (map? space-unreads)    space-unreads
+                                     (object? space-unreads) (js->clj space-unreads)
+                                     :else                   nil)
+                          cleared  (reduce
+                                    (fn [acc rid]
+                                      (if-let [sid (normalize-map-key rid)]
+                                        (dissoc acc sid)
+                                        acc))
+                                    prev
+                                    (or removals []))
+                          updated  (reduce-kv
+                                    (fn [acc k v]
+                                      (if-let [sid (normalize-map-key k)]
+                                        (let [entry (normalize-space-unread-entry v)]
+                                          (if (= entry empty-unread-stats)
+                                            (dissoc acc sid)
+                                            (assoc acc sid entry)))
+                                        acc))
+                                    cleared
+                                    (or raw-map {}))]
+                      updated)
+                    incoming)]
+     (if (= prev next-map)
+       db
+       (assoc db :space-unreads next-map)))))
+
+(re-frame/reg-event-db
+ :rooms/set-dm-pops-sync
+ (fn [db [_ raw-dms]]
+   (let [prev     (:dm-pops db [])
+         next-dms (into [] (keep normalize-dm-pop-item) (or raw-dms []))]
+     (if (= prev next-dms)
+       db
+       (assoc db :dm-pops next-dms)))))
 
 (re-frame/reg-sub
  :spaces/unread-stats-map
- :<- [:spaces/all]
- :<- [:rooms/unfiltered-indexed-map]
- :<- [:space-children/map]
- :<- [:rooms/manual-children-map]
- (fn [[spaces rooms-map children-map manual-children-map] _]
-   (build-spaces-unread-stats-map spaces rooms-map children-map manual-children-map)))
+ (fn [db _]
+   (get db :space-unreads {})))
 
 (re-frame/reg-sub
  :space/unread-stats
@@ -631,57 +669,8 @@ have for all other rooms.
 
 (re-frame/reg-sub
  :rooms/active-dm-pops
- :<- [:rooms/unfiltered-indexed-map]
- (fn [rooms-map _]
-   (->> (vals rooms-map)
-        (keep (fn [raw-room]
-                (let [is-dm?     (or (safe-get raw-room "is-direct?" :is-direct?)
-                                     (safe-get raw-room "isDirect" :isDirect)
-                                     (safe-get raw-room "is-direct" :is-direct))
-                      is-spam?   (boolean (or (safe-get raw-room "isSpam" :isSpam)
-                                              (safe-get raw-room "is-spam?" :is-spam?)))
-                      membership (some-> (or (safe-get raw-room "membership" :membership)
-                                             "Joined")
-                                         str)
-                      invited?   (= (.toLowerCase membership) "invited")
-                      msg-count  (when (and is-dm? (not is-spam?) (not invited?))
-                                   (or (safe-get raw-room
-                                                 "unread-messages-count"
-                                                 :unread-messages-count)
-                                       (safe-get raw-room
-                                                 "unreadMessagesCount"
-                                                 :unreadMessagesCount)
-                                       0))]
-                  (when (and is-dm? (not is-spam?) (not invited?) (pos? msg-count))
-                    (let [mentions (or (safe-get raw-room "highlight-count" :highlight-count)
-                                       (safe-get raw-room
-                                                 "unreadMentionsCount"
-                                                 :unreadMentionsCount)
-                                       0)
-                          ts       (or (safe-get raw-room "last_message_ts" :last_message_ts)
-                                       (safe-get raw-room "lastMessageTs" :lastMessageTs)
-                                       0)]
-                      {:id                (or (safe-get raw-room "id" :id)
-                                              (safe-get raw-room "roomId" :roomId))
-                       :name              (or (safe-get raw-room "name" :name) "Loading...")
-                       :avatar-url        (or (safe-get raw-room "avatar" :avatar)
-                                              (safe-get raw-room "avatarUrl" :avatarUrl))
-                       :is-dm?            true
-                       :is-group-dm?      (boolean (or (safe-get raw-room "isGroupDm" :isGroupDm)
-                                                       (safe-get raw-room "is-group-dm?" :is-group-dm?)))
-                       :recipient-avatars (or (safe-get raw-room
-                                                        "recipientAvatars"
-                                                        :recipientAvatars)
-                                              (safe-get raw-room
-                                                        "recipient-avatars"
-                                                        :recipient-avatars))
-                       :unread?           true
-                       :highlight?        (pos? mentions)
-                       :mentions          mentions
-                       :msg-count         msg-count
-                       :ts                ts})))))
-        (sort-by :ts >)
-        (mapv #(dissoc % :ts)))))
+ (fn [db _]
+   (get db :dm-pops [])))
 #+end_src
 
 

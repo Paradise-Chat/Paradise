@@ -1063,9 +1063,9 @@ need out.
                    :active-room       active-room
                    :space-id          (:id active-space)
                    :active-filter     active-filter
-                   :unread?           (pos? notif-count)
+                   :unread?           (or (pos? notif-count) (pos? high-count))
                    :highlight?        (pos? high-count)
-                   :notif-count       notif-count
+                   :notif-count       (max notif-count high-count)
                    :call-participants call-parts
                    :avatar-url        url
                    :open-menu-fn      open-menu}]))))
