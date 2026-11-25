@@ -2151,6 +2151,5 @@ spaces, or folders are displayed.
            [space-icon-item dm active-id nil])
          [:div.sidebar-divider]])
       [spaces-rail-items rail-items active-id]]
-     [sidebar-profile-mini]
      [space-touch-drag-ghost]]))
 #+end_src
