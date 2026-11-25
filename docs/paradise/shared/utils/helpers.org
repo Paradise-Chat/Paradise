@@ -631,43 +631,27 @@ Reusable pure helpers shared across UI, workers, and client modules.
               (when (seq s) s))))
         vals))
 
-(defn tr-or
-  "Translates key `k` with `tr`, falling back cleanly when missing or unresolved."
-  ([tr k]
-   (tr-or tr k nil nil))
-  ([tr k fallback]
-   (tr-or tr k nil fallback))
-  ([tr k args fallback]
-   (let [kw (normalize-keyword k)
-         v  (when (and tr kw)
-              (if (seq args)
-                (tr [kw] (vec args))
-                (tr [kw])))]
-     (if (and (string? v)
-              (not (str/blank? v))
-              (not (str/starts-with? v "[")))
-       v
-       (or fallback (when kw (name kw)) "")))))
-
 (defn resolve-item-label
-  "Resolves a declarative item's display label from `:title-key`/`:label-key` or literal fallback."
+  "Resolves a declarative item's display label from `:title-key`/`:label-key` or literal `:title`/`:label`."
   [tr {:keys [title title-key title-args label label-key label-args]}]
-  (let [k    (or title-key label-key)
-        args (or title-args label-args)
-        lit  (or title label)]
-    (or (when k (tr-or tr k args lit))
-        lit
-        "")))
+  (let [k    (normalize-keyword (or title-key label-key))
+        args (or title-args label-args)]
+    (cond
+      k     (if (seq args) (tr [k] (vec args)) (tr [k]))
+      title title
+      label label
+      :else "")))
 
 (defn resolve-item-desc
-  "Resolves a declarative item's description/subtitle from `:desc-key`/`:subtitle-key` or literal."
+  "Resolves a declarative item's description/subtitle from `:desc-key`/`:subtitle-key` or literal `:desc`/`:subtitle`."
   [tr {:keys [desc desc-key desc-args subtitle subtitle-key subtitle-args]}]
-  (let [k    (or desc-key subtitle-key)
-        args (or desc-args subtitle-args)
-        lit  (or desc subtitle)]
-    (or (when k (tr-or tr k args lit))
-        lit
-        "")))
+  (let [k    (normalize-keyword (or desc-key subtitle-key))
+        args (or desc-args subtitle-args)]
+    (cond
+      k        (if (seq args) (tr [k] (vec args)) (tr [k]))
+      desc     desc
+      subtitle subtitle
+      :else    "")))
 
 (defn resolve-dm-display
   "Derives DM / Group-DM peer list, avatar, and display name from room membership."
