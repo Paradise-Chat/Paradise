@@ -18,7 +18,7 @@ Room Lists sauce here.
    [paradise.shared.client.session-store :as store]
    [paradise.shared.utils.svg :as icons]
    ["react-virtuoso" :refer [Virtuoso]]
-   [paradise.ui.navigation.rooms.entry :refer [render-room-item active-call-panel]]
+   [paradise.ui.navigation.rooms.entry :refer [render-room-item]]
    [cljs.core.async :refer [go <!]]))
 #+end_src
 
