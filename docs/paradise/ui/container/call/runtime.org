@@ -33,6 +33,7 @@ Paradise binds a completely protocol-agnostic calling runtime.
 (defonce !voice-threshold (atom 0.004))
 (defonce !voice-gate-enabled? (atom true))
 (defonce !noise-suppression-enabled? (atom true))
+(defonce !input-volume (atom 100))
 (defonce !audio-processor (atom nil))
 #+end_src
 
@@ -96,6 +97,7 @@ Paradise binds a completely protocol-agnostic calling runtime.
                        {:threshold     @!voice-threshold
                         :gate-enabled? (and @!voice-gate-enabled? (not ios?))
                         :ios-direct?   ios?
+                        :input-gain    (/ @!input-volume 100.0)
                         :hangover-ms   180})]
         (reset! !audio-processor processor)
         (when-not ios?
@@ -107,6 +109,7 @@ Paradise binds a completely protocol-agnostic calling runtime.
   (let [processor (audio-processor/create-processor
                    {:threshold     @!voice-threshold
                     :gate-enabled? @!voice-gate-enabled?
+                    :input-gain    (/ @!input-volume 100.0)
                     :hangover-ms   180})]
     (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
       (set-enabled @!noise-suppression-enabled?))
@@ -313,6 +316,14 @@ local camera automatically on foreground return if video was enabled.
       (when-let [set-threshold (aget processor "setThreshold")]
         (set-threshold threshold)))
     threshold))
+
+(defn set-input-volume! [volume]
+  (let [clamped (-> (js/Number (or volume 100)) (max 0) (min 200) js/Math.round)]
+    (reset! !input-volume clamped)
+    (when-let [processor @!audio-processor]
+      (when-let [set-gain (aget processor "setInputGain")]
+        (set-gain (/ clamped 100.0))))
+    clamped))
 
 (defn notify-visibility-changed!
   "Notifies active audio processors, remote audio/video sinks, and camera capture
