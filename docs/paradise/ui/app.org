@@ -496,10 +496,24 @@ html, body {
 
 .app-root {
     --app-bottom-cushion: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+    --floating-dock-clearance: 76px;
+    position: relative;
     display: flex;
     height: 100dvh;
     width: 100dvw;
     overflow: hidden;
+}
+
+.app-root.has-active-call {
+    --floating-dock-clearance: 164px;
+}
+
+.app-root .spaces-scroll-area {
+    padding-bottom: calc(var(--floating-dock-clearance, 76px) + var(--app-bottom-cushion, 0px));
+}
+
+.app-root .sidebar-rooms {
+    padding-bottom: calc(var(--floating-dock-clearance, 76px) + var(--app-bottom-cushion, 0px));
 }
 
 .app-root[data-platform="ios"] {
