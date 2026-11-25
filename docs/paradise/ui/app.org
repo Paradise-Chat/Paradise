@@ -43,6 +43,7 @@ actual UI components themselves.
    [paradise.ui.overlays.notifications :as notifications]
    [paradise.ui.overlays.messages]
    [paradise.ui.overlays.settings.base]
+   [paradise.ui.overlays.settings.profile :refer [sidebar-profile-mini]]
    [paradise.ui.overlays.invites]
    [paradise.ui.overlays.creation]
    [paradise.ui.overlays.emotes-manager]
