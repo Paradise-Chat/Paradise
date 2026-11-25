@@ -41,6 +41,7 @@ Not entirely important to read, but certainly interesting.
    [paradise.ui.overlays.settings.keybinds :refer [keybinds-tab]]
    [paradise.ui.overlays.settings.verification :refer [verification-tab]]
    [paradise.ui.overlays.settings.about :refer [credits-tab about-tab]]
+   [paradise.ui.overlays.emotes-manager :refer [user-emotes-settings-tab]]
    [paradise.ui.overlays.settings.voice-video :refer [voice-video-tab]]))
 #+end_src
 
@@ -200,6 +201,11 @@ file.
              :subtitle (tr [:settings.voice-video/description])
              :accent   "teal"
              :icon     [icons/mic]}
+            {:id       :emotes
+             :title    (tr [:settings.tabs/emotes])
+             :subtitle (tr [:settings.emotes/description])
+             :accent   "amber"
+             :icon     [icons/smiley]}
             {:id       :language-time
              :title    (tr [:settings.tabs/language-time])
              :subtitle (tr [:settings.language/description])
@@ -234,6 +240,7 @@ file.
     :accounts      (tr [:settings.tabs/accounts])
     :notifications (tr [:settings.tabs/notifications])
     :voice-video   (tr [:settings.tabs/voice-video])
+    :emotes        (tr [:settings.tabs/emotes])
     :language-time (tr [:settings.tabs/language-time])
     :keybinds      (tr [:settings.tabs/keybinds])
     :advanced      (tr [:settings.tabs/advanced])
@@ -422,6 +429,7 @@ file.
              :accounts      [accounts-tab]
              :notifications [notifications-tab]
              :voice-video   [voice-video-tab]
+             :emotes        [user-emotes-settings-tab]
              :language-time [language-time-tab]
              :keybinds      [keybinds-tab]
              :about         [about-tab]
