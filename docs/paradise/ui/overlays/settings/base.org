@@ -79,6 +79,7 @@ file.
    "submit_on_enter"          {:event :settings/hydrate-submit-on-enter   :default nil      :stage :boot}
    "close_to_tray"            {:event :settings/hydrate-close-to-tray     :default true     :stage :boot}
    "user_presence"            {:event :presence/hydrate-own-status        :default "online" :stage :login}
+   "user_status_message"      {:event :presence/hydrate-own-status-message :default ""      :stage :login}
    "encrypted_search_crawler" {:event :search/hydrate-crawler-enabled     :default true     :stage :login}})
 
 (defn default-submit-on-enter? []
