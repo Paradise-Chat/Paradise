@@ -285,7 +285,8 @@ Likely we'll need some more tweaks in the future for other protocol support stil
   (let [audio-ref  (react/useRef nil)
         gain-ref   (react/useRef nil)
         live-track (rtc/resolve-media-track track)
-        norm-vol   (-> (/ (or volume 100) 100.0) (max 0.0) (min 1.0))
+        raw-gain   (-> (/ (or volume 100) 100.0) (max 0.0) (min 2.0))
+        norm-vol   (min 1.0 raw-gain)
         eff-muted  (boolean (or muted? (<= (or volume 100) 0)))]
     (react/useEffect
      (fn []
@@ -312,7 +313,7 @@ Likely we'll need some more tweaks in the future for other protocol support stil
                    (try
                      (let [^js src  (.createMediaStreamSource ctx stream)
                            ^js gain (.createGain ctx)]
-                       (set! (.. gain -gain -value) (if eff-muted 0.0 norm-vol))
+                       (set! (.. gain -gain -value) (if eff-muted 0.0 raw-gain))
                        (.connect src gain)
                        (.connect gain (.-destination ctx))
                        (set! (.-current gain-ref) gain)
@@ -356,14 +357,14 @@ Likely we'll need some more tweaks in the future for other protocol support stil
      (fn []
        (if-let [^js gain (.-current gain-ref)]
          (do
-           (set! (.. gain -gain -value) (if eff-muted 0.0 norm-vol))
+           (set! (.. gain -gain -value) (if eff-muted 0.0 raw-gain))
            (when-let [^js el (.-current audio-ref)]
              (set! (.-muted el) true)))
          (when-let [^js el (.-current audio-ref)]
            (set! (.-volume el) norm-vol)
            (set! (.-muted el) eff-muted)))
        js/undefined)
-     #js [norm-vol eff-muted])
+     #js [raw-gain norm-vol eff-muted])
     (react/useEffect
      (fn []
        (when-let [el (.-current audio-ref)]
@@ -579,6 +580,7 @@ Likely we'll need some more tweaks in the future for other protocol support stil
         stage-mounted?                   @(rf/subscribe [:call/stage-mounted?])
         audio-enabled?                   @(rf/subscribe [:call/audio-enabled?])
         output-device-id                 @(rf/subscribe [:settings/call-device :audiooutput])
+        master-output-vol                @(rf/subscribe [:settings/output-volume])
         volumes                          @(rf/subscribe [:call/volumes])
         local-mutes                      @(rf/subscribe [:call/local-mutes])]
     (react/useEffect
@@ -605,10 +607,13 @@ Likely we'll need some more tweaks in the future for other protocol support stil
              :when (and (not local?) live-track)
              :let [vol-key (participant-volume-key p)
                    vol     (get volumes vol-key 100)
-                   muted?  (or deafened? (contains? local-mutes vol-key))]]
+                   eff-vol (* vol (/ (or master-output-vol 100) 100.0))
+                   muted?  (or deafened?
+                               (<= (or master-output-vol 100) 0)
+                               (contains? local-mutes vol-key))]]
          ^{:key (str id "-audio")}
          [:f> remote-audio-track {:track            live-track
-                                  :volume           vol
+                                  :volume           eff-vol
                                   :muted?           muted?
                                   :output-device-id output-device-id}]))]
      [plugins/plugin-slot
