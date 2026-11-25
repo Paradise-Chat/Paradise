@@ -50,6 +50,18 @@ Mildly temporary until we better place these with the engine.
      (fn [_ get-val]
        (re-frame/dispatch [:rooms/set-dm-pops-sync
                            (get-val "dms" :dms)]))
+     "in-app-notification"
+     (fn [_ get-val]
+       (re-frame/dispatch [:notif/incoming
+                           {:room-id     (get-val "room-id" :room-id)
+                            :event-id    (get-val "event-id" :event-id)
+                            :room-name   (get-val "room-name" :room-name)
+                            :sender-name (get-val "sender-name" :sender-name)
+                            :avatar-url  (get-val "avatar-url" :avatar-url)
+                            :body        (get-val "body" :body)
+                            :is-dm?      (boolean (get-val "is-dm?" :is-dm?))
+                            :is-mention? (boolean (get-val "is-mention?" :is-mention?))
+                            :ts          (get-val "ts" :ts)}]))
      "room-parent-resolved"
      (fn [_ get-val]
        (re-frame/dispatch [:rooms/apply-parent-resolution
