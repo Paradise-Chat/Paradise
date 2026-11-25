@@ -114,7 +114,7 @@ we can lean more on Eve.
             [paradise.ui.app]
             [paradise.ui.container.timeline.item]
             [paradise.ui.container.members]
-            [virtualizer.protocol :as proto]
+            [virtualizer.spec :as vspec]
             [virtualizer.worker.ast :as ast]
             [virtualizer.worker.pretext :as pretext]
             [virtualizer.worker.engine :as engine]
