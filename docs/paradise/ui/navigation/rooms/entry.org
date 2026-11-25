@@ -297,6 +297,16 @@ but regular counts should be much softer.
     background-color: #f23f43;
 }
 
+.unread-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: #e3e5e8;
+    margin-left: auto;
+    margin-right: 4px;
+    flex-shrink: 0;
+}
+
 
 
 #+end_src
