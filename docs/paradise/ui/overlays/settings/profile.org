@@ -748,6 +748,25 @@ spaces navigation bar.
   [_]
   status-picker-modal)
 
+(defn ^:ui soundboard-popover-content [{:keys [room-id]}]
+  (let [tr @(re-frame/subscribe [:i18n/tr])]
+    [:div.soundboard-popover
+     [:div.soundboard-popover-header
+      [:span.soundboard-popover-title
+       [icons/music-note {:width "15px" :height "15px"}]
+       [:span (tr [:container.call/soundboard])]]
+      [:button.soundboard-popover-close
+       {:type     "button"
+        :on-click #(re-frame/dispatch [:ui/close-popover])}
+       [icons/exit {:width "14px" :height "14px"}]]]
+     [:div.soundboard-popover-body
+      [plugins/plugin-slot :call/soundboard {:room-id room-id}
+       [:div.soundboard-popover-empty
+        (tr [:container.call/soundboard-empty])]]]]))
+
+(defmethod popover-component :soundboard [_]
+  soundboard-popover-content)
+
 (defn ^:ui sidebar-profile-mini []
   (let [profile    @(re-frame/subscribe [:sdk/profile])
         own-status @(re-frame/subscribe [:presence/own-status])]
