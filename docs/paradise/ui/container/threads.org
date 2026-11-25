@@ -387,10 +387,18 @@ and Nostr in both layout modes:
                     :loading?       false}])))
              (catch :default e
                (log/error "Failed to send thread message:" e))))))
-     {:db (-> db
-              (assoc-in [:composer draft-key] {:text "" :html "" :loaded-text "" :uploading? false})
-              (assoc-in [:drafts draft-key :attachments] [])
-              (update :input-context dissoc draft-key))})))
+     (when-let [old-timer (get-in db [:composer draft-key :save-timer])]
+       (js/clearTimeout old-timer))
+     (let [next-seq (inc (get-in db [:composer draft-key :edit-seq] 0))]
+       {:db (-> db
+                (assoc-in [:composer draft-key] {:text            ""
+                                                 :html            ""
+                                                 :loaded-text     nil
+                                                 :uploading?      false
+                                                 :draft-hydrated? true
+                                                 :edit-seq        next-seq})
+                (assoc-in [:drafts draft-key :attachments] [])
+                (update :input-context dissoc draft-key))}))))
 
 (re-frame/reg-event-fx
  :threads/create-forum-post
@@ -443,12 +451,20 @@ and Nostr in both layout modes:
              (catch :default e
                (log/error "Failed to create forum post:" e)
                (re-frame/dispatch [:threads/set-forum-posting room-id false]))))))
-     {:db (-> db
-              (assoc-in [:threads/by-room room-id :forum-posting?] true)
-              (assoc-in [:threads/by-room room-id :composer-open?] false)
-              (assoc-in [:threads/by-room room-id :forum-post-title] "")
-              (assoc-in [:composer draft-key] {:text "" :html "" :loaded-text "" :uploading? false})
-              (assoc-in [:drafts draft-key :attachments] []))})))
+     (when-let [old-timer (get-in db [:composer draft-key :save-timer])]
+       (js/clearTimeout old-timer))
+     (let [next-seq (inc (get-in db [:composer draft-key :edit-seq] 0))]
+       {:db (-> db
+                (assoc-in [:threads/by-room room-id :forum-posting?] true)
+                (assoc-in [:threads/by-room room-id :composer-open?] false)
+                (assoc-in [:threads/by-room room-id :forum-post-title] "")
+                (assoc-in [:composer draft-key] {:text            ""
+                                                 :html            ""
+                                                 :loaded-text     nil
+                                                 :uploading?      false
+                                                 :draft-hydrated? true
+                                                 :edit-seq        next-seq})
+                (assoc-in [:drafts draft-key :attachments] []))}))))
 
 (re-frame/reg-event-db
  :threads/set-forum-posting
@@ -617,7 +633,10 @@ and Nostr in both layout modes:
                                                       []
                                                       (range (or (.-length files) 0)))]
                                     (when (seq fvec)
-                                      (handle-files! draft-key fvec))
+                                      (handle-files! draft-key fvec)
+                                      (when-not is-mobile?
+                                        (when-let [ed @!editor]
+                                          (js/requestAnimationFrame #(.commands.focus ed)))))
                                     (set! (.-value (.-target e)) "")))}]
             [icons/plus]]
            [:div.timeline-editor-container
