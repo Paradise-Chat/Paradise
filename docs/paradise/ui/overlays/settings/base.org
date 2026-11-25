@@ -58,6 +58,10 @@ file.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
 (def settings-registry
   {"show_previews"          {:event :push/hydrate-previews-setting      :default true     :stage :login}
+   "in_app_toasts_enabled"  {:event :notif/hydrate-toasts-enabled       :default true     :stage :boot}
+   "in_app_sound_enabled"   {:event :notif/hydrate-sound-enabled        :default true     :stage :boot}
+   "in_app_sound_preset"    {:event :notif/hydrate-sound-preset         :default "chime"  :stage :boot}
+   "in_app_sound_volume"    {:event :notif/hydrate-sound-volume         :default 70       :stage :boot}
    "theme"                  {:event :ui/hydrate-theme                   :default :default :stage :boot}
    "custom_registries"      {:event :registry/hydrate-custom-urls       :default []       :stage :boot}
    "disabled_plugin_urls"   {:event :plugins/hydrate-disabled-urls      :default []       :stage :boot}
