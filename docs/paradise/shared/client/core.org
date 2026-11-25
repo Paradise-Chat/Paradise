@@ -34,30 +34,78 @@ pieces.
 #+end_src
 
 
+**** Worker Init
+
+
 Now we want to just create a pool of one for the rust-sdk to execute on.
 
 We also want to create a media pool for decryption events (especially on iOS)
 and a pool for our virtualizer.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
-(defn init-worker! []
+(def ^:private media-pool-size 3)
+
+(defonce !retained-channels (atom []))
+(defonce !threads-started? (atom false))
+(defonce !media-pool-ready (promise-chan))
+(defonce !media-broadcast-lock
+  (let [c (chan 1)]
+    (put! c true)
+    c))
+
+(defn- make-channel! []
+  (let [ch (js/MessageChannel.)]
+    (swap! !retained-channels conj ch)
+    ch))
+
+(defn- broadcast-media-pool! [pool make-payload]
   (go
-    (when-not @state/!engine-pool
+    (<! !media-broadcast-lock)
+    (let [workers-ch (:workers pool)
+          pool-n     (or (:count pool) media-pool-size)
+          taken      (loop [i 0 acc []]
+                       (if (< i pool-n)
+                         (recur (inc i) (conj acc (<! workers-ch)))
+                         acc))]
+      (try
+        (let [chs (mapv (fn [idx w]
+                          (main/do-with-worker! w (make-payload idx)))
+                        (range (count taken))
+                        taken)]
+          (loop [rem chs
+                 acc []]
+            (if (empty? rem)
+              acc
+              (recur (rest rem) (conj acc (<! (first rem)))))))
+        (finally
+          (doseq [w taken]
+            (put! workers-ch w))
+          (put! !media-broadcast-lock true))))))
+
+
+(defn init-core-workers! []
+  (when-not @state/!virtualizer-pool
+    (reset! state/!virtualizer-pool
+            (main/create-pool 1 "virtualizer.js"
+                              {:worker-opts #js {:type "module"}
+                               :on-stream   binding/handle-worker-stream!})))
+  (when-not @state/!engine-pool
     (reset! state/!engine-pool
             (main/create-pool 1 "engine.js"
                               {:worker-opts #js {:type "module"}
-                               :on-stream binding/handle-worker-stream!})))
-  (when-not @state/!media-pool
-    (reset! state/!media-pool
-            (main/create-pool 3 "media.js"
-                              {:worker-opts #js {:type "module"}})))
+                               :on-stream   binding/handle-worker-stream!}))))
 
-  (when-not @state/!virtualizer-pool
-    (reset! state/!virtualizer-pool
-             (main/create-pool 1 "virtualizer.js"
-                              {:worker-opts #js {:type "module"}
-                               :on-stream binding/handle-worker-stream!})
-            ))))
+(defn ensure-media-pool! []
+  (or @state/!media-pool
+      (reset! state/!media-pool
+              (main/create-pool media-pool-size "media.js"
+                                {:worker-opts #js {:type "module"}}))))
+
+(defn- send-port! [pool identity-id port]
+  (main/do-with-pool! pool
+                      {:handler   :register-port
+                       :arguments {:identity-id identity-id :port port}
+                       :transfer  [:port]}))
 #+end_src
 
 
@@ -67,66 +115,72 @@ linked.
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
-(defn connect-main-to-pool! [pool pool-id]
-  (let [chan (js/MessageChannel.)]
-    (mesh/register-thread! pool-id (.-port1 chan))
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id :main-thread :port (.-port2 chan)}
-                         :transfer [:port]})))
+(defn bind-workers! [engine-pool virtualizer-pool app-db-payload]
+  (let [main-virt      (make-channel!)
+        main-eng       (make-channel!)
+        main-med-chans (mapv (fn [_] (make-channel!)) (range media-pool-size))
+        med-virt-chans (mapv (fn [_] (make-channel!)) (range media-pool-size))
+        eng-virt       (make-channel!)
+        virt-loop      (make-channel!)
+        eng-loop       (make-channel!)
+        db-chan        (when (nil? app-db-payload) (make-channel!))
+        init-db        (when db-chan
+                         (let [db-port1 (.-port1 db-chan)]
+                           (db/set-async-broadcaster! (fn [payload] (.postMessage db-port1 payload)))
+                           (set! (.-onmessage db-port1) (fn [e] (db/apply-remote-patch! (.-data e))))
+                           (db/get-encoded-state)))]
+    (mesh/register-thread! :virtualizer-pool (.-port1 main-virt))
+    (mesh/register-thread! :engine-pool (.-port1 main-eng))
+    (doseq [ch main-med-chans]
+      (mesh/register-thread! :media-pool (.-port1 ch)))
 
-(defn connect-pools! [pool-a id-a pool-b id-b]
-  (let [chan (js/MessageChannel.)]
-    (main/do-with-pool! pool-a
-                        {:handler :register-port
-                         :arguments {:identity-id id-b :port (.-port1 chan)}
-                         :transfer [:port]})
-    (main/do-with-pool! pool-b
-                        {:handler :register-port
-                         :arguments {:identity-id id-a :port (.-port2 chan)}
-                         :transfer [:port]})))
-
-(defn connect-loopback! [pool id-base loopback-id]
-  (let [chan (js/MessageChannel.)]
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id id-base :port (.-port1 chan)}
-                         :transfer [:port]})
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id loopback-id :port (.-port2 chan)}
-                         :transfer [:port]})))
-
-
-(defn bind-workers! [engine-pool media-pool virtualizer-pool app-db-payload]
-  (go
-    (let [db-chan  (js/MessageChannel.)
-          db-port1 (.-port1 db-chan)
-          db-port2 (.-port2 db-chan)]
+    (go
       (if (some? app-db-payload)
-        (main/do-with-pool! virtualizer-pool
-                            {:handler   :bind-app-db
-                             :arguments {:eve-payload app-db-payload}})
-        (do
-          (db/set-async-broadcaster! (fn [payload] (.postMessage db-port1 payload)))
-          (set! (.-onmessage db-port1) (fn [e] (db/apply-remote-patch! (.-data e))))
+        (<! (main/do-with-pool! virtualizer-pool
+                                {:handler   :bind-app-db
+                                 :arguments {:eve-payload app-db-payload}}))
+        (<! (main/do-with-pool! virtualizer-pool
+                                {:handler   :bind-app-db
+                                 :arguments {:eve-payload {:mode          :async
+                                                           :initial-state init-db}
+                                             :port        (.-port2 db-chan)}
+                                 :transfer  [:port]})))
+      (<! (send-port! virtualizer-pool :virtualizer-pool (.-port1 virt-loop)))
+      (<! (send-port! virtualizer-pool :virtualizer-loopback (.-port2 virt-loop)))
+      (doseq [ch med-virt-chans]
+        (<! (send-port! virtualizer-pool :media-pool (.-port2 ch))))
+      (<! (send-port! virtualizer-pool :engine-pool (.-port2 eng-virt)))
+      (<! (send-port! virtualizer-pool :main-thread (.-port2 main-virt)))
 
-          (main/do-with-pool! virtualizer-pool
-                              {:handler   :bind-app-db
-                               :arguments {:eve-payload {:mode :async
-                                                         :initial-state (db/get-encoded-state)}
-                                           :port        db-port2}
-                               :transfer  [:port]}))))
+      (let [media-pool (ensure-media-pool!)]
+        (<! (broadcast-media-pool!
+             media-pool
+             (fn [idx]
+               {:handler   :register-port
+                :arguments {:identity-id :virtualizer-pool
+                            :port        (.-port1 (nth med-virt-chans idx))}
+                :transfer  [:port]})))
+        (<! (broadcast-media-pool!
+             media-pool
+             (fn [idx]
+               {:handler   :register-port
+                :arguments {:identity-id :main-thread
+                            :port        (.-port2 (nth main-med-chans idx))}
+                :transfer  [:port]})))
+        (put! !media-pool-ready media-pool)))
 
-    (connect-pools! engine-pool :engine-pool virtualizer-pool :virtualizer-pool)
-    (connect-pools! media-pool :media-pool virtualizer-pool :virtualizer-pool)
+    (go
+      (<! (send-port! engine-pool :engine-pool (.-port1 eng-loop)))
+      (<! (send-port! engine-pool :engine-loopback (.-port2 eng-loop)))
+      (<! (send-port! engine-pool :virtualizer-pool (.-port1 eng-virt)))
+      (<! (send-port! engine-pool :main-thread (.-port2 main-eng))))))
 
-    (connect-main-to-pool! media-pool :media-pool)
-    (connect-main-to-pool! engine-pool :engine-pool)
-    (connect-main-to-pool! virtualizer-pool :virtualizer-pool)
-
-    (connect-loopback! virtualizer-pool :virtualizer-pool :virtualizer-loopback)
-    (connect-loopback! engine-pool :engine-pool :engine-loopback)))
+(defn boot-threads []
+  (when (compare-and-set! !threads-started? false true)
+    (init-core-workers!)
+    (bind-workers! @state/!engine-pool
+                   @state/!virtualizer-pool
+                   nil)))
 #+end_src
 
 
