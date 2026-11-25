@@ -22,15 +22,21 @@ spaces navigation bar.
    [cljs-workers.mesh :as mesh]
    [clojure.string :as str]
    [paradise.media.component :refer [media]]
+   [paradise.shared.plugins :as plugins]
    [paradise.shared.utils.helpers :refer [click-element-by-id!
                                           decode-edn-field
                                           file->array-buffer
+                                          first-non-blank
                                           local-media-url?
                                           revoke-object-url!
                                           tr-or]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
-   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items modal-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component
+                                      context-menu-submenu
+                                      modal-component
+                                      popover-component]]
+   [paradise.ui.overlays.settings.voice-video :as voice-video]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
