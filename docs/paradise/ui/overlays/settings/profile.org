@@ -782,27 +782,166 @@ spaces navigation bar.
        :height        180}])))
 
 (defn ^:ui sidebar-profile-mini []
-  (let [profile    @(re-frame/subscribe [:sdk/profile])
-        own-status @(re-frame/subscribe [:presence/own-status])]
-    [:div.sidebar-profile-mini
-     [:div.profile-trigger
-      {:on-click        (fn [e]
-                          (.preventDefault e)
-                          (re-frame/dispatch [:settings/open]))
-       :on-context-menu (fn [e]
-                          (.preventDefault e)
-                          (re-frame/dispatch
-                           [:ui/open-context-menu
-                            :profile-actions
-                            {:x       (.-clientX e)
-                             :y       (.-clientY e)
-                             :user-id (:user-id profile)}]))}
-      [avatar
-       {:id     (:user-id profile)
-        :name   (or (:display-name profile) "?")
-        :url    (:avatar-url profile)
-        :size   40
-        :status own-status}]]]))
+  (let [tr              @(re-frame/subscribe [:i18n/tr])
+        profile         @(re-frame/subscribe [:sdk/profile])
+        own-status      @(re-frame/subscribe [:presence/own-status])
+        own-status-msg  @(re-frame/subscribe [:presence/own-status-message])
+        active-call-id  @(re-frame/subscribe [:call/active-room])
+        audio-on?       @(re-frame/subscribe [:call/audio-enabled?])
+        deafened?       @(re-frame/subscribe [:call/deafened?])
+        video-on?       @(re-frame/subscribe [:call/video-enabled?])
+        screen-sharing? @(re-frame/subscribe [:call/screen-sharing?])
+        rooms-map       (when active-call-id
+                          @(re-frame/subscribe [:rooms/unfiltered-indexed-map]))
+        call-room       (when active-call-id (get rooms-map active-call-id))
+        call-room-name  (or (when call-room
+                              (if (map? call-room)
+                                (:name call-room)
+                                (aget call-room "name")))
+                            (tr [:container.call/active-call]))
+        display-name    (or (not-empty (:display-name profile))
+                            (not-empty (:username profile))
+                            (:user-id profile)
+                            "User")
+        status-line     (or (not-empty (str/trim (str (or own-status-msg ""))))
+                            (presence-label tr own-status))]
+    [:div.floating-profile-panel.sidebar-profile-mini
+     {:class (when active-call-id "in-call")}
+
+     (when active-call-id
+       [:div.floating-call-tray
+        [:div.floating-call-header
+         [:button.floating-call-info
+          {:type     "button"
+           :title    call-room-name
+           :on-click (fn []
+                       (re-frame/dispatch [:rooms/select active-call-id])
+                       (re-frame/dispatch [:container/set-main-focus :call]))}
+          [:span.floating-call-status-row
+           [:span.floating-call-dot]
+           [:span.floating-call-status (tr [:container.call/voice-connected])]]
+          [:span.floating-call-room call-room-name]]
+         [:button.floating-ctrl-btn.is-danger
+          {:type     "button"
+           :title    (tr [:container.call/disconnect])
+           :on-click #(re-frame/dispatch [:call/hangup])}
+          [icons/phone-hangup {:width "17px" :height "17px"}]]]
+
+        [:div.floating-call-actions
+         [:button.floating-call-action-btn
+          {:type     "button"
+           :class    (when video-on? "is-active")
+           :title    (if video-on?
+                       (tr [:container.call/stop-video])
+                       (tr [:container.call/start-video]))
+           :on-click #(re-frame/dispatch [:call/toggle-video])}
+          (if video-on?
+            [icons/video {:width "16px" :height "16px"}]
+            [icons/video-off {:width "16px" :height "16px"}])]
+
+         [:button.floating-call-action-btn
+          {:type     "button"
+           :class    (when screen-sharing? "is-active-green")
+           :title    (if screen-sharing?
+                       (tr [:container.call/stop-sharing])
+                       (tr [:container.call/share-screen]))
+           :on-click #(re-frame/dispatch [:call/toggle-screen-share])}
+          (if screen-sharing?
+            [icons/screen-share {:width "16px" :height "16px"}]
+            [icons/screen-share-off {:width "16px" :height "16px"}])]
+
+         [:button.floating-call-action-btn
+          {:type     "button"
+           :title    (tr [:container.call/soundboard])
+           :on-click (fn [^js e]
+                       (let [rect (.getBoundingClientRect (.-currentTarget e))]
+                         (re-frame/dispatch
+                          [:ui/open-popover :soundboard
+                           {:x             (.-left rect)
+                            :y             (max 12 (- (.-top rect) 216))
+                            :anchor-bottom (+ (- js/window.innerHeight (.-top rect)) 8)
+                            :width         260
+                            :height        200
+                            :backdrop?     true
+                            :room-id       active-call-id}])))}
+          [icons/music-note {:width "16px" :height "16px"}]]]])
+
+     [:div.floating-profile-row
+      [:div.floating-profile-identity.profile-trigger
+       {:title           display-name
+        :on-click        (fn [^js e]
+                           (.preventDefault e)
+                           (let [panel (or (.closest (.-currentTarget e) ".floating-profile-panel")
+                                           (.-currentTarget e))
+                                 rect  (.getBoundingClientRect panel)]
+                             (re-frame/dispatch
+                              [:ui/open-popover :self-profile-popout
+                               {:x             (.-left rect)
+                                :y             (max 12 (- (.-top rect) 380))
+                                :anchor-bottom (+ (- js/window.innerHeight (.-top rect)) 8)
+                                :width         300
+                                :height        380
+                                :backdrop?     true}])))
+        :on-context-menu (fn [e]
+                           (.preventDefault e)
+                           (re-frame/dispatch
+                            [:ui/open-context-menu
+                             :profile-actions
+                             {:x       (.-clientX e)
+                              :y       (.-clientY e)
+                              :user-id (:user-id profile)}]))}
+       [avatar
+        {:id     (:user-id profile)
+         :name   display-name
+         :url    (:avatar-url profile)
+         :size   34
+         :status own-status}]
+       [:div.floating-profile-copy
+        [:span.floating-profile-name display-name]
+        [:span.floating-profile-status status-line]]]
+
+      [:div.floating-profile-controls
+       [:div.floating-ctrl-split
+        {:class           (when-not audio-on? "is-muted")
+         :on-context-menu #(open-audio-options-menu! :mic-options %)}
+        [:button.floating-ctrl-main
+         {:type     "button"
+          :title    (if audio-on?
+                      (tr [:container.call/mute])
+                      (tr [:container.call/unmute]))
+          :on-click #(re-frame/dispatch [:call/toggle-audio])}
+         (if audio-on?
+           [icons/mic {:width "16px" :height "16px"}]
+           [icons/mic-off {:width "16px" :height "16px"}])]
+        [:button.floating-ctrl-caret
+         {:type     "button"
+          :title    (tr [:settings.voice-video.devices/input-label])
+          :on-click #(open-audio-options-menu! :mic-options %)}
+         [icons/chevron-up {:width "11px" :height "11px"}]]]
+
+       [:div.floating-ctrl-split
+        {:class           (when deafened? "is-muted")
+         :on-context-menu #(open-audio-options-menu! :deafen-options %)}
+        [:button.floating-ctrl-main
+         {:type     "button"
+          :title    (if deafened?
+                      (tr [:container.call/undeafen])
+                      (tr [:container.call/deafen]))
+          :on-click #(re-frame/dispatch [:call/toggle-deafen])}
+         (if deafened?
+           [icons/headphones-off {:width "16px" :height "16px"}]
+           [icons/headphones {:width "16px" :height "16px"}])]
+        [:button.floating-ctrl-caret
+         {:type     "button"
+          :title    (tr [:settings.voice-video.devices/output-label])
+          :on-click #(open-audio-options-menu! :deafen-options %)}
+         [icons/chevron-up {:width "11px" :height "11px"}]]]
+
+       [:button.floating-ctrl-btn.is-settings
+        {:type     "button"
+         :title    (tr [:settings.groups/user-settings])
+         :on-click #(re-frame/dispatch [:settings/open])}
+        [icons/settings {:width "17px" :height "17px"}]]]]]))
 
 (def ^:private default-profile-fields
   [{:key             :display-name
@@ -917,7 +1056,7 @@ spaces navigation bar.
           hero-name     (or (not-empty (:display-name vs))
                             (:username profile)
                             (:display-name profile)
-                            (tr-or tr :settings.profile/unknown-user "Unknown User"))
+                            (tr [:settings.profile/unknown-user]))
           hero-handle   (format-hero-handle profile)
           copy-target   (or (:copy-id profile) (:npub profile) user-id)]
       [:div.settings-tab-content
@@ -961,8 +1100,8 @@ spaces navigation bar.
              [icons/plus {:size "13px"}])
            [:span
             (if (:has-banner? vs)
-              (tr-or tr :settings.profile/change-banner "Change Banner")
-              (tr-or tr :settings.profile/add-banner "Add Banner"))]]
+              (tr [:settings.profile/change-banner])
+              (tr [:settings.profile/add-banner]))]]
           (when (or (:has-banner? vs) (:remove-bn? vs))
             [:button.settings-profile-banner-btn
              {:type     "button"
@@ -975,15 +1114,15 @@ spaces navigation bar.
                [icons/trash {:size "13px"}])
              [:span
               (if (:remove-bn? vs)
-                (tr-or tr :settings.profile/undo-remove-banner "Keep Banner")
-                (tr-or tr :settings.profile/remove-banner "Remove"))]])]]
+                (tr [:settings.profile/undo-remove-banner])
+                (tr [:settings.profile/remove-banner]))]])]]
         [:div.settings-profile-body
          [:div.settings-profile-top-row
           [:div.settings-profile-avatar-wrap
            [:button.settings-profile-avatar-btn
             {:type     "button"
              :class    (when (:av-staged? vs) "is-staged")
-             :title    (tr-or tr :settings.profile/change-avatar "Change Avatar")
+             :title    (tr [:settings.profile/change-avatar])
              :disabled saving?
              :on-click (fn [_] (trigger-avatar-file-picker!))}
             [avatar
@@ -1000,7 +1139,7 @@ spaces navigation bar.
              :disabled saving?
              :on-click (fn [_] (trigger-avatar-file-picker!))}
             [icons/edit {:size "14px"}]
-            [:span (tr-or tr :settings.profile/change-avatar "Change Avatar")]]
+            [:span (tr [:settings.profile/change-avatar])]]
            (when (or (:has-avatar? vs) (:remove-av? vs))
              [:button.settings-button.is-compact
               {:type     "button"
@@ -1011,8 +1150,8 @@ spaces navigation bar.
                 [icons/trash {:size "14px"}])
               [:span
                (if (:remove-av? vs)
-                 (tr-or tr :settings.profile/undo-remove-avatar "Keep Avatar")
-                 (tr-or tr :settings.profile/remove-avatar "Remove Avatar"))]])]]
+                 (tr [:settings.profile/undo-remove-avatar])
+                 (tr [:settings.profile/remove-avatar]))]])]]
 
          [:div.settings-profile-info
           [:div.settings-profile-name-row
@@ -1025,16 +1164,20 @@ spaces navigation bar.
 
        [:div.settings-hub-group
         [:div.settings-hub-group-label
-         (tr-or tr :settings.profile/edit-heading "Profile")]
+         (tr [:settings.profile/edit-heading])]
         [:div.settings-hub-group-card
          [:div.settings-card-stack
           (for [{:keys [key type max-length label-key label placeholder-key placeholder]} (:fields vs)
                 :let [fkey (keyword key)
                       ftyp (keyword (or type :text))
                       val  (get-in vs [:values fkey] "")
-                      lbl  (or (tr-or tr label-key label) (name fkey))
+                      lkw  (normalize-keyword label-key)
+                      pkw  (normalize-keyword placeholder-key)
+                      lbl  (or (when lkw (tr [lkw])) label (name fkey))
                       ph   (or (when (= fkey :display-name) (not-empty (:username profile)))
-                               (tr-or tr placeholder-key (or placeholder "")))]]
+                               (when pkw (tr [pkw]))
+                               placeholder
+                               "")]]
             ^{:key fkey}
             [:div.settings-field
              [:label.settings-label lbl]
@@ -1062,14 +1205,14 @@ spaces navigation bar.
              saved?
              [:span.settings-profile-saved
               [icons/check]
-              (tr-or tr :settings.profile/saved "Profile updated")])]
+              (tr [:settings.profile/saved])])]
 
           [:div.settings-profile-footer-btns
            [:button.settings-button.secondary.is-compact
             {:type     "button"
              :disabled (or (not (:has-changes? vs)) saving?)
              :on-click (fn [_] (reset-profile-draft! user-id))}
-            (tr-or tr :settings.profile/reset "Reset")]
+            (tr [:settings.profile/reset])]
            [:button.settings-button.is-compact
             {:type     "button"
              :class    (when saving? "is-busy")
@@ -1078,12 +1221,12 @@ spaces navigation bar.
                          (re-frame/dispatch
                           [:sdk/update-own-profile (:save-payload vs)]))}
             (if saving?
-              (tr-or tr :settings.profile/saving "Saving...")
-              (tr-or tr :settings.profile/save-changes "Save Changes"))]]]]]
+              (tr [:settings.profile/saving])
+              (tr [:settings.profile/save-changes]))]]]]]
 
        [:div.settings-hub-group
         [:div.settings-hub-group-label
-         (tr-or tr :settings.profile/account-actions "Account")]
+         (tr [:settings.profile/account-actions])]
         [:div.settings-hub-group-card
          [:button.settings-hub-item
           {:type     "button"
