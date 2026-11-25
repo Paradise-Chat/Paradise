@@ -17,7 +17,8 @@ them collected together
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [reagent.core :as r]
-   [paradise.ui.overlays.base :refer [modal-component popover-component context-menu-component]]
+   [paradise.ui.overlays.base :as overlays-base
+    :refer [modal-component popover-component context-menu-component]]
    [paradise.shared.utils.helpers :refer [local-media-url?]]
    [paradise.shared.utils.svg :as icons]
    [paradise.media.component :refer [media]]))
@@ -69,12 +70,14 @@ enable passing functions through them.
 (re-frame/reg-event-fx
  :ui/open-context-menu
  (fn [_ [_ id props]]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-context-menu {:id id :props props})
    {}))
 
 (re-frame/reg-event-fx
  :ui/close-context-menu
  (fn [_ _]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-context-menu nil)
    {}))
 #+end_src
