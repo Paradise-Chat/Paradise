@@ -968,10 +968,14 @@ for DMs because of this issue. Otherwise that piece can be removed as well.
                     ^{:key (str "mobile-call-" (:id p))}
                     [:div.participant-avatar-ring
                      [avatar {:id (:id p) :url (:avatar-url p) :size 20}]])])
-               (when unread?
+               (cond
+                 (pos? notif-count)
                  [:div.notification-badge
                   {:class (when highlight? "highlight")}
-                  (if (> notif-count 99) "99+" notif-count)])]])
+                  (if (> notif-count 99) "99+" notif-count)]
+
+                 unread?
+                 [:div.unread-dot])]])
            (when (and has-call? (not is-closed?))
              [:div.desktop-call-list.hide-on-mobile
               {:style {:padding-left (str (+ indent 24) "px")}}
@@ -1083,9 +1087,9 @@ need out.
                    :active-room       active-room
                    :space-id          (:id active-space)
                    :active-filter     active-filter
-                   :unread?           (or (pos? notif-count) (pos? high-count))
+                   :unread?           has-unread?
                    :highlight?        (pos? high-count)
-                   :notif-count       (max notif-count high-count)
+                   :notif-count       badge-count
                    :call-participants call-parts
                    :avatar-url        url
                    :open-menu-fn      open-menu}]))))
