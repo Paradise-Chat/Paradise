@@ -265,8 +265,162 @@ enable passing functions through them.
     color: #ffffff;
 }
 
+.context-menu-item.is-submenu-open {
+    background: #4752c4;
+    color: #ffffff;
+}
+
+.context-menu-item-copy {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 1px;
+}
+
+.context-menu-item.has-submenu .item-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.item-sublabel {
+    font-size: 11.5px;
+    color: #80848e;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.context-menu-item:hover .item-sublabel,
+.context-menu-item.is-submenu-open .item-sublabel {
+    color: rgba(255, 255, 255, 0.78);
+}
+
+.context-menu-submenu-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    color: #80848e;
+    transform: rotate(-90deg);
+    transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.context-menu-item:hover .context-menu-submenu-chevron,
+.context-menu-item.is-submenu-open .context-menu-submenu-chevron {
+    color: #ffffff;
+}
+
+.universal-context-menu.is-submenu {
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+}
+
+.context-menu-inline-submenu {
+    margin: 4px 0 6px 14px;
+    padding-left: 8px;
+    border-left: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.context-menu-item.is-muted-status {
+    opacity: 0.65;
+    cursor: default;
+}
+
+.context-menu-item.is-muted-status:hover {
+    background: transparent;
+    color: #b5bac1;
+}
+
+.context-menu-item.is-selected {
+    color: #ffffff;
+    font-weight: 600;
+}
+
 .context-menu-item.danger:hover {
     background: #da373c;
+}
+
+.context-menu-divider {
+    height: 1px;
+    margin: 5px 4px;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.context-menu-slider-block {
+    padding: 6px 8px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.context-menu-slider-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #b5bac1;
+    user-select: none;
+}
+
+.context-menu-slider-value {
+    color: #949ba4;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+
+.context-menu-slider-value:hover {
+    color: #ffffff;
+}
+
+.context-menu-slider-input {
+    width: 100%;
+    height: 5px;
+    accent-color: #5865f2;
+    cursor: pointer;
+    margin: 0;
+}
+
+.context-menu-item-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    color: #5865f2;
+    flex-shrink: 0;
+}
+
+.context-menu-item:hover .context-menu-item-check {
+    color: #ffffff;
+}
+
+.context-menu-item-copy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.context-menu-item-sub {
+    font-size: 11px;
+    color: #80848e;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.context-menu-item:hover .context-menu-item-sub {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.context-menu-empty-hint {
+    padding: 8px 10px;
+    font-size: 12px;
+    color: #80848e;
+    text-align: center;
 }
 
 .item-icon {
@@ -309,6 +463,151 @@ enable passing functions through them.
         padding: 12px 16px;
         font-size: 16px;
         border-radius: 8px;
+    }
+
+    .context-menu-submenu-chevron {
+        transform: rotate(0deg);
+    }
+
+    .context-menu-submenu-chevron.is-open {
+        transform: rotate(180deg);
+    }
+}
+
+.notif-toast-stack {
+    position: fixed;
+    top: calc(14px + var(--safe-area-inset-top, env(safe-area-inset-top, 0px)));
+    right: 16px;
+    z-index: 99990;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(360px, calc(100vw - 32px));
+    pointer-events: none;
+}
+
+@keyframes notifToastIn {
+    from {
+        opacity: 0;
+        transform: translateX(24px) scale(0.97);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+    }
+}
+
+.notif-toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 11px;
+    padding: 12px 13px;
+    background: rgba(30, 31, 34, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-left: 3px solid #5865f2;
+    border-radius: 10px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.52);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+    animation: notifToastIn 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.notif-toast.is-mention {
+    border-left-color: #f23f42;
+}
+
+.notif-toast:hover {
+    background: rgba(43, 45, 49, 0.98);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+
+.notif-toast-content {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.notif-toast-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.notif-toast-title {
+    color: #f2f3f5;
+    font-size: 13.5px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.notif-toast-pill {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #c9cdfb;
+    background: rgba(88, 101, 242, 0.22);
+}
+
+.notif-toast.is-mention .notif-toast-pill {
+    color: #ffd0d1;
+    background: rgba(242, 63, 66, 0.28);
+}
+
+.notif-toast-sender {
+    color: #dbdee1;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.notif-toast-body {
+    color: #b5bac1;
+    font-size: 12.5px;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+
+.notif-toast-close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    color: #80848e;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.notif-toast-close:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+@media (max-width: 768px) {
+    .notif-toast-stack {
+        left: 12px;
+        right: 12px;
+        width: auto;
     }
 }
 #+end_src
