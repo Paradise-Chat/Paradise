@@ -8,7 +8,13 @@ This is where we define our global reusables. They're using multi-methods for ne
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/base.cljs
 (ns paradise.ui.overlays.base
-  (:require [re-frame.core :as re-frame]))
+  (:require
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
+   [paradise.shared.utils.helpers :refer [copy-to-clipboard! ok-status? resolve-item-label]]
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]
+   [taoensso.timbre :as log]))
 #+end_src
 
 
@@ -83,6 +89,110 @@ This allows us to neatly create states and provide a single component to the mai
                    (re-frame/dispatch [:ui/close-context-menu]))}
       (when icon [:span.item-icon icon])
       [:span.item-label label]])])
+
+(defn normalize-dispatch-event
+  "Coerces a string event ID at index 0 of a re-frame dispatch vector into a keyword."
+  [ev]
+  (if (and (sequential? ev) (seq ev))
+    (let [v (vec ev)]
+      (if (string? (first v))
+        (assoc v 0 (keyword (first v)))
+        v))
+    ev))
+
+(defn execute-option-command!
+  "Executes an engine-supplied option item's `:action`, `:dispatch`, or `:command` map.
+  Optional `ctx` supplies UI-local context (such as `:x`, `:y`, `:member`, `:tags`, `:room-id`)
+  for commands like `:open-profile-preview` and `:moderate-member`."
+  ([item]
+   (execute-option-command! item nil))
+  ([{:keys [action dispatch command]} ctx]
+   (cond
+     (fn? action)
+     (action)
+
+     dispatch
+     (when-let [ev (normalize-dispatch-event dispatch)]
+       (re-frame/dispatch ev))
+
+     (map? command)
+     (case (keyword (:type command))
+       :dispatch
+       (when-let [ev (normalize-dispatch-event (:event command))]
+         (re-frame/dispatch ev))
+
+       :dispatch-many
+       (doseq [ev (:events command)]
+         (when-let [norm (normalize-dispatch-event ev)]
+           (re-frame/dispatch norm)))
+
+       :copy
+       (when-let [txt (or (:text command) (:value command))]
+         (copy-to-clipboard! txt))
+
+       :open-profile-preview
+       (let [{:keys [member tags room-id x y]} ctx]
+         (re-frame/dispatch
+          [:ui/open-popover :profile-preview
+           {:x         (or (:x command) x 100)
+            :y         (or (:y command) y 100)
+            :width     300
+            :height    300
+            :backdrop? true
+            :member    (or (:member command) member)
+            :tags      (or (:tags command) tags {})
+            :room-id   (or (:room-id command) room-id)}]))
+
+       :moderate-member
+       (let [{:keys [member room-id]} ctx]
+         (re-frame/dispatch
+          [:ui/open-modal :moderate-member
+           {:room-id (or (:room-id command) room-id)
+            :member  (or (:member command) member)
+            :mode    (keyword (or (:mode command) :kick))}]))
+
+       :engine-rpc
+       (let [{:keys [handler arguments on-success-dispatch]} command]
+         (go
+           (try
+             (let [res (<! (mesh/do-with-thread!
+                            :engine-pool
+                            {:handler   (keyword handler)
+                             :arguments (or arguments {})}))]
+               (when (and on-success-dispatch (ok-status? res))
+                 (re-frame/dispatch (normalize-dispatch-event on-success-dispatch))))
+             (catch :default e
+               (log/error "Option command RPC failed:" handler e)))))
+
+       nil)
+
+     :else nil)))
+
+(defn ^:ui engine-option-items
+  "Renders a list of declarative engine option maps (including dividers, icons,
+  i18n labels, and commands) inside a context menu."
+  [{:keys [tr items ctx close-fn on-item-click]}]
+  [:<>
+   (for [{:keys [id class-name icon divider?] :as item} items]
+     (if divider?
+       ^{:key (or id (str (random-uuid)))}
+       [:div.context-menu-divider]
+       (let [lbl     (resolve-item-label tr item)
+             icon-el (icons/resolve-icon icon)]
+         ^{:key (or id lbl)}
+         [:div.context-menu-item
+          {:class    class-name
+           :on-click (fn [e]
+                       (.stopPropagation e)
+                       (if on-item-click
+                         (on-item-click #(execute-option-command! item ctx))
+                         (do
+                           (execute-option-command! item ctx)
+                           (if close-fn
+                             (close-fn)
+                             (re-frame/dispatch [:ui/close-context-menu])))))}
+          (when icon-el [:span.item-icon icon-el])
+          [:span.item-label lbl]])))])
 
 (defn ^:ui feedback-banners
   "Renders standard error and/or success feedback banners inside overlay tabs."
