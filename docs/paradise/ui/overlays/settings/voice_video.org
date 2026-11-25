@@ -66,6 +66,50 @@ In addition to that, it provides input/output selections and testing.
                      0.004)]
      {:db (assoc-in db [:settings :voice-threshold] threshold)
       :call.audio/set-voice-threshold threshold})))
+
+(defn- clamp-audio-volume [v]
+  (let [n (js/Number v)]
+    (if (js/Number.isFinite n)
+      (-> n (max 0) (min 200) js/Math.round)
+      100)))
+
+(re-frame/reg-event-fx
+ :settings/hydrate-input-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (if (nil? volume) 100 (clamp-audio-volume volume))]
+     {:db (assoc-in db [:settings :input-volume] vol)
+      :call.audio/set-input-volume vol})))
+
+(re-frame/reg-event-fx
+ :settings/set-input-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (clamp-audio-volume volume)]
+     (store/set-setting! "call_input_volume" vol)
+     {:db (assoc-in db [:settings :input-volume] vol)
+      :call.audio/set-input-volume vol})))
+
+(re-frame/reg-sub
+ :settings/input-volume
+ (fn [db _]
+   (get-in db [:settings :input-volume] 100)))
+
+(re-frame/reg-event-db
+ :settings/hydrate-output-volume
+ (fn [db [_ volume]]
+   (let [vol (if (nil? volume) 100 (clamp-audio-volume volume))]
+     (assoc-in db [:settings :output-volume] vol))))
+
+(re-frame/reg-event-fx
+ :settings/set-output-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (clamp-audio-volume volume)]
+     (store/set-setting! "call_output_volume" vol)
+     {:db (assoc-in db [:settings :output-volume] vol)})))
+
+(re-frame/reg-sub
+ :settings/output-volume
+ (fn [db _]
+   (get-in db [:settings :output-volume] 100)))
 #+end_src
 
 
@@ -336,6 +380,9 @@ In addition to that, it provides input/output selections and testing.
                         (when-let [set-suppression (aget processor "setNoiseSuppressionEnabled")]
                           (set-suppression @!noise-suppression))
 
+                        (when-let [set-gain (aget processor "setInputGain")]
+                          (set-gain (/ @call-rtc/!input-volume 100.0)))
+
                         (when-let [get-level (aget processor "getLevel")]
                           (reset! !level (get-level)))
 
@@ -487,10 +534,29 @@ In addition to that, it provides input/output selections and testing.
       [:span
        (str (js/Math.round (* meter-threshold 100)) "%")]]]))
 
+(defn- volume-slider-field
+  [{:keys [label value on-change]}]
+  [:div.settings-field
+   [:div.settings-row
+    [:label.settings-label label]
+    [:span.settings-row-description
+     {:title    "Double-click to reset to 100%"
+      :style    {:cursor "pointer" :font-variant-numeric "tabular-nums"}
+      :on-double-click #(on-change 100)}
+     (str value "%")]]
+   [:input.settings-range-input
+    {:type      "range"
+     :min       0
+     :max       200
+     :step      1
+     :value     value
+     :on-change #(on-change (.. % -target -value))}]])
+
 (defn- microphone-section
   [{:keys [tr
            devices
            audio-input
+           input-volume
            voice-threshold
            noise-suppression-enabled?
            live-mic-active?
