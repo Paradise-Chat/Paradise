@@ -767,6 +767,20 @@ spaces navigation bar.
 (defmethod popover-component :soundboard [_]
   soundboard-popover-content)
 
+(defn- open-audio-options-menu! [menu-id ^js e]
+  (.preventDefault e)
+  (.stopPropagation e)
+  (let [anchor (or (.closest (.-currentTarget e) ".floating-ctrl-split")
+                   (.-currentTarget e))
+        rect   (.getBoundingClientRect anchor)]
+    (re-frame/dispatch
+     [:ui/open-context-menu menu-id
+      {:x             (.-left rect)
+       :y             (.-top rect)
+       :anchor-bottom (+ (- js/window.innerHeight (.-top rect)) 8)
+       :width         224
+       :height        180}])))
+
 (defn ^:ui sidebar-profile-mini []
   (let [profile    @(re-frame/subscribe [:sdk/profile])
         own-status @(re-frame/subscribe [:presence/own-status])]
