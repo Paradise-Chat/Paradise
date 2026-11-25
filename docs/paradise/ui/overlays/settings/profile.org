@@ -261,29 +261,6 @@ spaces navigation bar.
 ***** UI
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/profile.cljs
-(defn build-profile-actions
-  [tr user-id]
-  [{:id       "status"
-    :label    (tr [:settings.context-menu/set-status])
-    :dispatch [:ui/open-modal :status-picker]}
-   {:id       "copy"
-    :label    (tr [:settings.context-menu/copy-id])
-    :dispatch [:ui/copy-to-clipboard user-id]}
-   {:id         "logout"
-    :label      (tr [:settings.context-menu/logout])
-    :class-name "danger"
-    :dispatch   [:sdk/logout]}])
-
-(defn ^:ui profile-context-menu-content
-  [{:keys [user-id]}]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [context-menu-items (build-profile-actions tr user-id)]))
-
-(defmethod context-menu-component
-  :profile-actions
-  [_]
-  profile-context-menu-content)
-
 (def ^:private presence-options
   [{:id         :online
     :label-key  :settings.profile/status-online
