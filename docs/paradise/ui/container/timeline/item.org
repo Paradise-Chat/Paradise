@@ -836,12 +836,34 @@ read receipts. This prevents any sort of spamming to the home server.
      [:div.gallery-overflow-mask
       (str "+" (:overflow-count entry))])])
 
+(defn- default-gallery-grid-style [total]
+  (case total
+    1 {:height                "240px"
+       :grid-template-columns "minmax(0, 1fr)"
+       :grid-template-rows    "minmax(0, 1fr)"}
+    2 {:height                "210px"
+       :grid-template-columns "repeat(2, minmax(0, 1fr))"
+       :grid-template-rows    "minmax(0, 1fr)"}
+    3 {:height                "260px"
+       :grid-template-columns "minmax(0, 2fr) minmax(0, 1fr)"
+       :grid-template-rows    "repeat(2, minmax(0, 1fr))"}
+    4 {:height                "280px"
+       :grid-template-columns "repeat(2, minmax(0, 1fr))"
+       :grid-template-rows    "repeat(2, minmax(0, 1fr))"}
+    {:height                "280px"
+     :grid-template-columns "repeat(6, minmax(0, 1fr))"
+     :grid-template-rows    "144px 132px"}))
+
 (defn ^:ui gallery-message [_event content]
-  (let [all-items (:items content)]
+  (let [all-items  (:items content)
+        visible    (or (:visible-items content) (vec (take 5 all-items)))
+        total      (max (count all-items) (count visible))
+        grid-style (merge (default-gallery-grid-style total)
+                          (:grid-style content))]
     [:div.gallery-attachment-container
      [:div.media-gallery-grid
-      {:style (:grid-style content)}
-      (for [entry (:visible-items content)]
+      {:style grid-style}
+      (for [entry visible]
         ^{:key (:internal-id entry)}
         [gallery-cell entry all-items])]
      (when (seq (:caption content))
