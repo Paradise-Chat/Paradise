@@ -475,7 +475,8 @@ We also don't want to list our own name, so we remove that too.
                                                    :arguments {:scrolling? %}})
         render-loading     (fn [] [timeline-loading-overlay])
         render-sticks      (fn [ruler-ref-fn] [timeline-measuring-sticks ruler-ref-fn])
-        render-jump        (fn [do-jump! is-focused?] [timeline-jump-button do-jump! is-focused?])]
+        render-jump        (fn [do-jump! is-focused?] [timeline-jump-button do-jump! is-focused?])
+        render-tile        (fn [layout-node] (event-tile layout-node room-id))]
     (fn [room-id]
       (let [events           @(re-frame/subscribe [:timeline/events room-id])
             events-map       @(re-frame/subscribe [:timeline/events-map room-id])
@@ -509,7 +510,7 @@ We also don't want to list our own name, so we remove that too.
           :default-theme-metrics    default-metrics
           :wrapper-class            "timeline-wrapper"
           :scroll-container-class   "timeline-messages"
-          :render-item              event-tile
+          :render-item              render-tile
           :render-empty-state       (fn [] [timeline-empty-state room-id])
           :render-jump-button       render-jump
           :render-loading-overlay   render-loading
