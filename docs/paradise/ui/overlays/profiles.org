@@ -20,13 +20,15 @@ aspect.
    [clojure.string :as str]
    [paradise.media.component :refer [media]]
    [paradise.shared.plugins :as plugins]
-   [paradise.shared.utils.helpers :refer [copy-to-clipboard!
+   [paradise.shared.utils.helpers :refer [decode-edn-field
                                           first-non-blank
                                           local-media-url?
                                           ok-status?
                                           tr-or]]
    [paradise.ui.global :refer [avatar]]
-   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items popover-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component
+                                      engine-option-items
+                                      popover-component]]
    [paradise.ui.overlays.permissions-roles :refer [member-popover-roles-and-mod]]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
@@ -351,17 +353,27 @@ aspect.
 
 **** Member Actions
 
-
-***** TODO The engine should be informing us of the actions to populate here
+Member context menu options are supplied dynamically by the active protocol
+engine via the ~:get-member-options~ bind (mirroring ~:get-room-options~ in
+=overlays/rooms.org=), falling back to ~build-member-actions~ when an engine
+does not customize member options.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
+(defn- member-options-cache-key
+  [engine-id {:keys [user-id room-id context is-owner? is-self? power-level]}]
+  [(or engine-id :default)
+   (str user-id)
+   (some-> room-id str)
+   (keyword (or context :member-list))
+   (boolean is-owner?)
+   (boolean is-self?)
+   (int (or power-level 0))])
+
 (defn build-member-actions
   ([member active-room]
    (build-member-actions member active-room nil nil))
-  ([{:keys [user-id display-name] :as member} active-room x y]
-   (let [tr         @(re-frame/subscribe [:i18n/tr])
-         active-uid @(re-frame/subscribe [:auth/active-user-id])
-         pl-tags    (when active-room @(re-frame/subscribe [:room/power-level-tags active-room]))
+  ([{:keys [user-id] :as member} active-room _x _y]
+   (let [active-uid @(re-frame/subscribe [:auth/active-user-id])
          perms-data (when active-room @(re-frame/subscribe [:room-perms/data active-room]))
          _          (when (and active-room (nil? perms-data))
                       (re-frame/dispatch [:room-perms/fetch active-room]))
@@ -372,49 +384,105 @@ aspect.
                          (boolean (:can-kick? perms-data true)))
          can-ban?   (and (not self?) (not (:is-owner? member))
                          (boolean (:can-ban? perms-data true)))]
-     (cond-> [{:id       "view-profile"
-               :label    (tr [:container.member-actions/view-profile])
-               :dispatch [:ui/open-popover :profile-preview
-                          {:x         (or x 100)
-                           :y         (or y 100)
-                           :width     300
-                           :height    300
-                           :backdrop? true
-                           :member    member
-                           :tags      (or pl-tags {})
-                           :room-id   active-room}]}
-              {:id     "copy-id"
-               :label  (tr [:settings.context-menu/copy-id])
-               :action #(copy-to-clipboard! user-id)}]
+     (cond-> [{:id        "view-profile"
+               :label-key :container.member-actions/view-profile
+               :icon      :members
+               :command   {:type :open-profile-preview}}
+              {:id        "copy-id"
+               :label-key :settings.context-menu/copy-id
+               :icon      :copy
+               :command   {:type :copy :text (str user-id)}}]
        (and active-room can-roles?)
-       (conj {:id       "manage-roles"
-              :label    (tr [:room-settings.moderation/manage-roles])
-              :dispatch [:rooms/open-settings active-room :members]})
+       (conj {:id        "manage-roles"
+              :label-key :room-settings.moderation/manage-roles
+              :icon      :shield
+              :command   {:type  :dispatch
+                          :event [:rooms/open-settings active-room :members]}})
 
        (and active-room can-kick?)
        (conj {:id         "kick"
-              :label      (tr [:container.member-actions/kick])
+              :label-key  :container.member-actions/kick
+              :icon       :leave
               :class-name "text-danger"
-              :dispatch   [:ui/open-modal :moderate-member
-                           {:room-id active-room
-                            :member  member
-                            :mode    :kick}]})
+              :command    {:type :moderate-member :mode :kick}})
 
        (and active-room can-ban?)
        (conj {:id         "ban"
-              :label      (tr [:room-settings.moderation/ban])
+              :label-key  :room-settings.moderation/ban
               :class-name "text-danger"
-              :dispatch   [:ui/open-modal :moderate-member
-                           {:room-id active-room
-                            :member  member
-                            :mode    :ban}]})))))
-#+end_src
+              :command    {:type :moderate-member :mode :ban}})))))
 
+(re-frame/reg-event-db
+ :member-options/set
+ (fn [db [_ cache-key options]]
+   (assoc-in db [:member-options/by-key cache-key] (vec options))))
 
+(re-frame/reg-sub
+ :member-options/items
+ (fn [db [_ cache-key]]
+   (get-in db [:member-options/by-key cache-key])))
 
-#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
-(defn ^:ui member-context-menu-content [{:keys [member active-room x y]}]
-  [context-menu-items (build-member-actions member active-room x y)])
+(re-frame/reg-event-fx
+ :member-options/fetch
+ (fn [{:keys [db]} [_ req fallback-opts]]
+   (let [eng-id    (:active-engine db)
+         cache-key (member-options-cache-key eng-id req)
+         fallback! (fn [reason]
+                     (log/debug "Engine :get-member-options fallback:" reason)
+                     (re-frame/dispatch [:member-options/set cache-key (or fallback-opts [])]))]
+     (when (:user-id req)
+       (go
+         (try
+           (let [res  (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :get-member-options
+                            :arguments req}))
+                 opts (when (ok-status? res)
+                        (decode-edn-field res :options-edn :options))]
+             (if (sequential? opts)
+               (re-frame/dispatch [:member-options/set cache-key opts])
+               (fallback! res)))
+           (catch :default e
+             (fallback! e))))))
+   {}))
+
+(defn ^:ui engine-member-option-items
+  "Fetches and renders engine-supplied member option items for a context menu,
+  falling back to `build-member-actions` when the active engine does not supply them."
+  [{:keys [member active-room x y context close-fn on-item-click]}]
+  (r/with-let [!last-req (atom nil)]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          active-uid    @(re-frame/subscribe [:auth/active-user-id])
+          pl-tags       (when active-room
+                          @(re-frame/subscribe [:room/power-level-tags active-room]))
+          uid           (some-> (:user-id member) str not-empty)
+          req           (cond-> {:user-id      uid
+                                 :display-name (:display-name member)
+                                 :power-level  (int (or (:power-level member) 0))
+                                 :is-owner?    (boolean (:is-owner? member))
+                                 :is-self?     (= uid (str active-uid))
+                                 :context      (or context :member-list)}
+                          active-room (assoc :room-id (str active-room)))
+          fallback-opts (build-member-actions member active-room x y)
+          cache-key     (member-options-cache-key active-engine req)
+          _             (when (and uid (not= @!last-req cache-key))
+                          (reset! !last-req cache-key)
+                          (re-frame/dispatch [:member-options/fetch req fallback-opts]))
+          items         (or @(re-frame/subscribe [:member-options/items cache-key])
+                            fallback-opts)]
+      [engine-option-items {:tr            tr
+                            :items         items
+                            :ctx           {:member  member
+                                            :tags    (or pl-tags {})
+                                            :room-id active-room
+                                            :x       x
+                                            :y       y}
+                            :close-fn      close-fn
+                            :on-item-click on-item-click}])))
+
+(defn ^:ui member-context-menu-content [props]
+  [engine-member-option-items props])
 
 (defmethod context-menu-component :member-actions [_]
   member-context-menu-content)
