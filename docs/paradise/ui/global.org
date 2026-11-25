@@ -680,12 +680,14 @@ much simpler.
 (re-frame/reg-event-fx
  :ui/open-popover
  (fn [_ [_ id props]]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-popover {:id id :props props})
    {}))
 
 (re-frame/reg-event-fx
  :ui/close-popover
  (fn [_ _]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-popover nil)
    {}))
 #+end_src
@@ -693,17 +695,20 @@ much simpler.
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
 (defn popover-root []
-  (let [active-popover @!active-popover]
+  (let [active-popover @!active-popover
+        submenus       @overlays-base/!context-submenus
+        has-ctx-menu?  (some? @!active-context-menu)
+        is-mobile?     (<= js/window.innerWidth 768)]
     (when active-popover
       (let [{:keys [id props]} active-popover
             props    (if (map? props) props (js->clj props :keywordize-keys true))
-            {:keys [x y width height backdrop?]
+            {:keys [x y width height backdrop? anchor-bottom]
              :or {width 320 height 380 backdrop? true}} props
             close-fn #(re-frame/dispatch [:ui/close-popover])
             Target   (popover-component id)]
         (when Target
-          (let [win-w js/window.innerWidth
-                win-h js/window.innerHeight
+          (let [win-w    js/window.innerWidth
+                win-h    js/window.innerHeight
                 render-x (max 10 (if (> (+ x width) win-w) (- x width) x))
                 render-y (max 10 (if (> (+ y height) win-h) (- y height) y))]
             [:<>
@@ -711,13 +716,24 @@ much simpler.
                [:div.popover-backdrop
                 {:style {:position "fixed" :top 0 :left 0 :right 0 :bottom 0 :z-index 11999}
                  :on-click close-fn
-                 :on-context-menu (fn [e] (close-fn))}])
+                 :on-context-menu (fn [_] (close-fn))}])
              [:div.popover-container
-              {:style {:left (str render-x "px")
-                       :top  (str render-y "px")
-                       :position "fixed"
-                       :z-index 12000}}
-              [Target (assoc props :close-fn close-fn)]]]))))))
+              {:style (cond-> {:left     (str render-x "px")
+                               :position "fixed"
+                               :z-index  12000}
+                        anchor-bottom
+                        (assoc :bottom (str (max 10 anchor-bottom) "px"))
+                        (not anchor-bottom)
+                        (assoc :top (str render-y "px")))}
+              [Target (assoc props :close-fn close-fn)]]
+             (when (and (not is-mobile?) (not has-ctx-menu?) (seq submenus))
+               [:<>
+                (for [sub submenus]
+                  ^{:key (str (:level sub) "-" (:id sub))}
+                  [context-menu-submenu-panel
+                   {:sub            sub
+                    :close-fn       close-fn
+                    :safe-to-click? true}])])]))))))
 #+end_src
 
 
@@ -1164,40 +1180,79 @@ provide an avatar color.
 
 (re-frame/reg-event-db
  :presence/receive-own-status
- (fn [db [_ raw-status]]
-   (if-let [norm (normalize-presence raw-status)]
-     (if (= (:own-presence db) norm)
-       db
-       (assoc db :own-presence norm))
-     db)))
+ (fn [db [_ raw-status status-msg]]
+   (let [norm (normalize-presence raw-status)
+         db1  (if (and norm (not= (:own-presence db) norm))
+                (assoc db :own-presence norm)
+                db)]
+     (if (string? status-msg)
+       (assoc db1 :own-status-message status-msg)
+       db1))))
 
 (re-frame/reg-event-fx
  :presence/hydrate-own-status
  (fn [{:keys [db]} [_ saved-val]]
-   (let [norm (or (normalize-presence saved-val) :online)]
+   (let [norm (or (normalize-presence saved-val) :online)
+         msg  (:own-status-message db)]
      (go
        (try
          (<! (mesh/do-with-thread!
               :engine-pool
               {:handler   :set-presence
-               :arguments {:status (name norm)}}))
+               :arguments (cond-> {:status (name norm)}
+                            (not (str/blank? msg)) (assoc :status-msg msg))}))
          (catch :default _ nil)))
      {:db (assoc db :own-presence norm)})))
 
 (re-frame/reg-event-fx
+ :presence/hydrate-own-status-message
+ (fn [{:keys [db]} [_ saved-msg]]
+   (let [msg  (str/trim (str (or saved-msg "")))
+         norm (or (:own-presence db) :online)]
+     (when-not (str/blank? msg)
+       (go
+         (try
+           (<! (mesh/do-with-thread!
+                :engine-pool
+                {:handler   :set-presence
+                 :arguments {:status     (name norm)
+                             :status-msg msg}}))
+           (catch :default _ nil))))
+     {:db (assoc db :own-status-message msg)})))
+
+(re-frame/reg-event-fx
  :presence/set-own-status
  (fn [{:keys [db]} [_ status]]
-   (let [norm (or (normalize-presence status) :online)]
+   (let [norm (or (normalize-presence status) :online)
+         msg  (str/trim (str (or (:own-status-message db) "")))]
      (go
        (try
          (<! (mesh/do-with-thread!
               :engine-pool
               {:handler   :set-presence
-               :arguments {:status (name norm)}}))
+               :arguments (cond-> {:status (name norm)}
+                            (not (str/blank? msg)) (assoc :status-msg msg))}))
          (catch :default e
            (log/warn "Engine does not support :set-presence or failed:" e))))
      {:db       (assoc db :own-presence norm)
       :dispatch [:settings/save "user_presence" (name norm)]})))
+
+(re-frame/reg-event-fx
+ :presence/set-own-status-message
+ (fn [{:keys [db]} [_ raw-msg]]
+   (let [msg  (str/trim (str (or raw-msg "")))
+         norm (or (:own-presence db) :online)]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments {:status     (name norm)
+                           :status-msg msg}}))
+         (catch :default e
+           (log/warn "Engine does not support :set-presence status-msg or failed:" e))))
+     {:db       (assoc db :own-status-message msg)
+      :dispatch [:settings/save "user_status_message" msg]})))
 
 (re-frame/reg-sub
  :presence/map
@@ -1208,6 +1263,11 @@ provide an avatar color.
  :presence/own-status
  (fn [db _]
    (get db :own-presence :online)))
+
+(re-frame/reg-sub
+ :presence/own-status-message
+ (fn [db _]
+   (get db :own-status-message "")))
 
 (re-frame/reg-sub
  :presence/user
