@@ -173,14 +173,16 @@ Rough Audio Graph
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/audio_processor.cljs
 (defn create-processor
-  [{:keys [threshold gate-enabled? ios-direct? hangover-ms on-level]
+  [{:keys [threshold gate-enabled? ios-direct? hangover-ms on-level input-gain]
     :or   {threshold     0.004
            gate-enabled? true
            ios-direct?   false
-           hangover-ms   180}}]
+           hangover-ms   180
+           input-gain    1.0}}]
   (let [!threshold        (atom (clamp01 threshold))
         !gate-enabled?    (atom (boolean gate-enabled?))
         !ios-direct?      (atom (boolean ios-direct?))
+        !input-gain-val   (atom (-> (js/Number (or input-gain 1.0)) (max 0.0) (min 2.0)))
         !audio-context    (atom nil)
         !input-track      (atom nil)
         !local-track      (atom nil)
@@ -188,6 +190,7 @@ Rough Audio Graph
         !rnnoise          (atom nil)
         !analyser         (atom nil)
         !gate             (atom nil)
+        !input-gain       (atom nil)
         !destination      (atom nil)
         !keepalive-gain   (atom nil)
         !samples          (atom nil)
@@ -238,6 +241,7 @@ Rough Audio Graph
                           @!rnnoise-gain
                           @!analyser
                           @!gate
+                          @!input-gain
                           @!keepalive-gain
                           @!destination]]
           (when node
@@ -253,6 +257,7 @@ Rough Audio Graph
         (reset! !rnnoise-gain nil)
         (reset! !analyser nil)
         (reset! !gate nil)
+        (reset! !input-gain nil)
         (reset! !keepalive-gain nil)
         (reset! !destination nil)
         (reset! !samples nil)
@@ -413,6 +418,7 @@ Rough Audio Graph
                     ^js rnnoise-node (when RNNoiseNode (new RNNoiseNode audio-context))
                     ^js analyser     (.createAnalyser audio-context)
                     ^js gate         (.createGain audio-context)
+                    ^js input-gain   (.createGain audio-context)
                     ^js destination  (.createMediaStreamDestination audio-context)
                     ^js keepalive    (.createGain audio-context)
                     ^js raw-gain     (.createGain audio-context)
@@ -426,6 +432,7 @@ Rough Audio Graph
                 (set! (.-fftSize analyser) 1024)
                 (set! (.-smoothingTimeConstant analyser) 0.0)
                 (set! (.. gate -gain -value) (if init-open? 1.0 0.0))
+                (set! (.. input-gain -gain -value) @!input-gain-val)
                 (set! (.. keepalive -gain -value) 0.0)
                 (set! (.. raw-gain -gain -value) (if use-rnnoise? 0 1))
                 (set! (.. rnnoise-gain -gain -value) (if use-rnnoise? 1 0))
@@ -438,7 +445,8 @@ Rough Audio Graph
                 (.connect raw-gain mixer)
                 (.connect mixer analyser)
                 (.connect analyser gate)
-                (.connect gate destination)
+                (.connect gate input-gain)
+                (.connect input-gain destination)
                 (.connect gate keepalive)
                 (.connect keepalive (.-destination audio-context))
 
@@ -453,6 +461,7 @@ Rough Audio Graph
                 (reset! !rnnoise-gain rnnoise-gain)
                 (reset! !analyser analyser)
                 (reset! !gate gate)
+                (reset! !input-gain input-gain)
                 (reset! !keepalive-gain keepalive)
                 (reset! !destination destination)
                 (reset! !samples samples)
@@ -520,6 +529,14 @@ Rough Audio Graph
       (aset processor "setThreshold"
             (fn [threshold]
               (reset! !threshold (clamp01 threshold))))
+      (aset processor "setInputGain"
+            (fn [gain]
+              (let [clamped (-> (js/Number (or gain 1.0)) (max 0.0) (min 2.0))]
+                (reset! !input-gain-val clamped)
+                (when (and @!audio-context @!input-gain)
+                  (let [now (.-currentTime @!audio-context)]
+                    (.setValueAtTime (.. @!input-gain -gain) clamped now)))
+                clamped)))
       (aset processor "setGateEnabled"
             (fn [enabled?]
               (reset! !gate-enabled? (boolean enabled?))
