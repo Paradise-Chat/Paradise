@@ -702,7 +702,7 @@ html, body {
   height: 32px;
   min-height: 32px;
   width: 100%;
-  background: var(--bg-tertiary, #111214);
+  background: var(--bg-frame, #1e1f22);
   color: var(--text-muted, #949ba4);
   user-select: none;
   -webkit-user-select: none;
