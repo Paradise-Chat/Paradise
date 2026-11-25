@@ -26,6 +26,7 @@ Paradise binds a completely protocol-agnostic calling runtime.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (defonce !driver-instance (atom nil))
 (defonce !loaded-drivers (atom {}))
+(defonce !encoder-script-cache (atom {}))
 (defonce !encoder-worker (atom nil))
 (defonce !participants (atom []))
 (defonce !pending-crypto-queue (atom []))
@@ -61,19 +62,25 @@ Paradise binds a completely protocol-agnostic calling runtime.
              :video-track (resolve-media-track v-track)
              :audio-track (resolve-media-track a-track)))))
 
+(defn- spawn-worker-from-code! [code]
+  (let [blob     (js/Blob. #js [code] #js {:type "application/javascript"})
+        blob-url (js/URL.createObjectURL blob)
+        worker   (js/Worker. blob-url)]
+    (js/URL.revokeObjectURL blob-url)
+    worker))
+
 (defn create-remote-worker! [script-url]
-  (-> (js/fetch script-url)
-      (p/then (fn [resp]
-                (if (.-ok resp)
-                  (.text resp)
-                  (p/rejected
-                   (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
-      (p/then (fn [code]
-                (let [blob     (js/Blob. #js [code] #js {:type "application/javascript"})
-                      blob-url (js/URL.createObjectURL blob)
-                      worker   (js/Worker. blob-url)]
-                  (js/URL.revokeObjectURL blob-url)
-                  worker)))))
+  (if-let [cached-code (get @!encoder-script-cache script-url)]
+    (p/resolved (spawn-worker-from-code! cached-code))
+    (-> (js/fetch script-url)
+        (p/then (fn [resp]
+                  (if (.-ok resp)
+                    (.text resp)
+                    (p/rejected
+                     (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
+        (p/then (fn [code]
+                  (swap! !encoder-script-cache assoc script-url code)
+                  (spawn-worker-from-code! code))))))
 
 (defn- load-driver-module! [driver-url]
   (if-let [cached (get @!loaded-drivers driver-url)]
@@ -141,10 +148,11 @@ local camera automatically on foreground return if video was enabled.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/runtime.cljs
 (defn start-driver!
   [{:keys [driver-url encoder-url session-config callbacks]}]
-  (p/let [create-driver (load-driver-module! driver-url)
-          encoder       (if encoder-url
-                          (create-remote-worker! encoder-url)
-                          nil)
+  (p/let [[create-driver encoder]
+          (p/all [(load-driver-module! driver-url)
+                  (if encoder-url
+                    (create-remote-worker! encoder-url)
+                    (p/resolved nil))])
           _             (reset! !encoder-worker encoder)
           driver        (create-driver
                          #js {:sessionConfig        (clj->js session-config)
