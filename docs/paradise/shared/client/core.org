@@ -203,47 +203,66 @@ Basically, this is a mess of slow iterations to build out a nice feeling
 mechanism for multi-threaded communication.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
+(defn- broadcast-engine-and-media! [handler arguments]
+  (go
+    (let [eng-ch    (mesh/do-with-thread! :engine-pool
+                                          {:handler   handler
+                                           :arguments arguments})
+          mp        (<! !media-pool-ready)
+          media-res (<! (broadcast-media-pool!
+                         mp
+                         (fn [_]
+                           {:handler   handler
+                            :arguments arguments})))
+          eng-res   (<! eng-ch)]
+      {:engine eng-res
+       :media  media-res})))
+
+(defn- dispatch-logged-out! []
+  (net/set-auth-context! nil nil)
+  (net/clear-stream-url!)
+  (net/clear-frame-url!)
+  (re-frame/dispatch [:auth/clear-sw-session {:all? true}])
+  (re-frame/dispatch [:auth/set-status :logged-out])
+  (re-frame/dispatch [:settings/load-accounts]))
+
 (re-frame/reg-event-fx
  :app/thread-boot
- (fn [_]
-   (init-worker!)
-     (let [engine-pool      @state/!engine-pool
-           media-pool       @state/!media-pool
-           virtualizer-pool @state/!virtualizer-pool]
-       (bind-workers! engine-pool media-pool virtualizer-pool nil)
-       )
-   {}
-   ))
-#+end_src
-
-***** General Bootstrapping
-
-
-
-#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
-(defn boot-threads []
-  (go
-    (<! (init-worker!))
-    (let [engine-pool      @state/!engine-pool
-          media-pool       @state/!media-pool
-          virtualizer-pool @state/!virtualizer-pool]
-      (<! (bind-workers! engine-pool media-pool virtualizer-pool nil)))))
+ (fn [_ _]
+   (boot-threads)
+   {}))
 
 (re-frame/reg-event-fx
  :app/bootstrap
- (fn [_ [_ target-user-id engine-id]]
-   (go
+ (fn [{:keys [db]} [_ target-user-id engine-id]]
+   (let [db-engine (:active-engine db)]
+     (go
        (try
-         (let [boot-res  (<! (mesh/do-with-thread! :engine-pool
-                                                 {:handler :bootstrap
-                                                  :arguments {:target-user-id target-user-id}}))
-               status-kw (keyword (:status boot-res))]
+         (let [saved-eng       (when-not (or engine-id db-engine)
+                                 (try
+                                   (<p! (store/get-setting "last-active-engine"))
+                                   (catch :default _ nil)))
+               fallback-engine (or (normalize-keyword engine-id)
+                                   (normalize-keyword db-engine)
+                                   (normalize-keyword saved-eng)
+                                   :matrix)
+               boot-res        (<! (mesh/do-with-thread! :engine-pool
+                                                         {:handler   :bootstrap
+                                                          :arguments {:target-user-id target-user-id}}))
+               status-kw       (keyword (:status boot-res))
+               final-engine    (or (normalize-keyword (:engine-id boot-res))
+                                   fallback-engine)]
            (case status-kw
-             :success (re-frame/dispatch [:auth/login-success (assoc boot-res :engine-id engine-id)])
-             :empty   (re-frame/dispatch [:auth/set-status :logged-out])
-             :error   (log/error "Bootstrap failed:" (or (:msg boot-res) (:message boot-res) boot-res))))
+             :success (re-frame/dispatch [:auth/login-success
+                                          (assoc boot-res :engine-id final-engine)])
+             :empty   (dispatch-logged-out!)
+             :error   (do
+                        (log/error "Bootstrap failed:"
+                                   (or (:msg boot-res) (:message boot-res) (:status boot-res)))
+                        (dispatch-logged-out!))))
          (catch :default e
-           (log/error "Fatal bootstrap error:" e))))
+           (log/error "Fatal bootstrap error:" e)
+           (dispatch-logged-out!)))))
    {}))
 #+end_src
 
@@ -257,20 +276,17 @@ this method is here.
 (defn register-engine [protocol-id]
   (let [protocol-str (name protocol-id)]
     (go
-      (let [media-ch  (mesh/do-with-thread! :media-pool
-                                            {:handler   :register-engine
-                                             :arguments {:engine-id protocol-str}})
-            engine-ch (mesh/do-with-thread! :engine-pool
-                                            {:handler   :register-engine
-                                             :arguments {:engine-id protocol-str}})
-            media-res (<! media-ch)
-            eng-res   (<! engine-ch)]
-        (if (and (= "success" (:status eng-res))
-                 (= "success" (:status media-res)))
-          (js/console.log "Engine and media worker loaded successfully:" protocol-str)
+      (let [{eng-res :engine media-res :media}
+            (<! (broadcast-engine-and-media! :register-engine
+                                             {:engine-id protocol-str}))]
+        (if (and (ok-status? eng-res)
+                 (every? ok-status? media-res))
+          (do
+            (js/console.log "Engine and media pool loaded successfully:" protocol-str)
+            (re-frame/dispatch [:i18n/load-engine-extensions (keyword protocol-str)]))
           (js/console.error "Failed to load engine:"
                             {:engine (:msg eng-res)
-                             :media  (:msg media-res)}))))))
+                             :media  media-res}))))))
 #+end_src
 
 then a quick reframe event for the login to also register them on protocol selection
@@ -291,14 +307,16 @@ initialization for Matrix
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (re-frame/reg-event-fx
  :sdk/start-sync
- (fn [_ _]
+ (fn [{:keys [db]} _]
    (go
      (let [pool @state/!engine-pool
            res  (<! (main/do-with-pool! pool {:handler :start-sync}))]
-       (if (= (:status res) "success")
-         (log/info "Main sync loop started successfully.")
+       (if (ok-status? res)
+         (do
+           (log/info "Main sync loop started successfully.")
+           (re-frame/dispatch [:search/refresh-index-status]))
          (log/error "Failed to start sync:" (:msg res)))))
-   {}))
+   {:db (dissoc db :search/index-status)}))
 #+end_src
 
 
@@ -311,31 +329,20 @@ in particular.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (defn sync-worker-media-session! [{:keys [user-id server-url token]}]
   (go
-    (let [payload  {:user-id    user-id
-                    :server-url server-url
-                    :token      token}
-          media-ch (mesh/do-with-thread! :media-pool
-                                         {:handler   :set-media-session
-                                          :arguments payload})
-          eng-ch   (mesh/do-with-thread! :engine-pool
-                                         {:handler   :set-media-session
-                                          :arguments payload})
-          m-res    (<! media-ch)
-          e-res    (<! eng-ch)]
-      (or (when (= (:status m-res) "success") m-res)
-          (when (= (:status e-res) "success") e-res)))))
+    (let [{e-res :engine m-res :media}
+          (<! (broadcast-engine-and-media! :set-media-session
+                                           {:user-id    user-id
+                                            :server-url server-url
+                                            :token      token}))
+          m-hit (some #(when (ok-status? %) %) m-res)]
+      (or m-hit
+          (when (ok-status? e-res) e-res)))))
 
 (defn clear-worker-media-session! [opts]
   (go
-    (let [payload  (or opts {:all? true})
-          media-ch (mesh/do-with-thread! :media-pool
-                                         {:handler   :clear-media-session
-                                          :arguments payload})
-          eng-ch   (mesh/do-with-thread! :engine-pool
-                                         {:handler   :clear-media-session
-                                          :arguments payload})]
-      (<! media-ch)
-      (<! eng-ch))))
+    (:engine (<! (broadcast-engine-and-media! :clear-media-session
+                                              (or opts {:all? true}))))))
+
 
 (re-frame/reg-event-fx
  :engine/sync-media-session
@@ -366,16 +373,19 @@ in particular.
 If the app has been running then we just need to update some contexts.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
+(defn- activate-engine! [engine-kw]
+  (go
+    (<! (register-engine engine-kw))
+    (binding/set-active-engine! engine-kw)
+    (streams/init-engine-streams! engine-kw)))
+
 (re-frame/reg-event-fx
  :engine/switch-account-boot
- (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id]}]]
+ (fn [{:keys [db]} [_ {:keys [target-user-id engine-id]}]]
    (let [engine-kw (keyword (or engine-id :matrix))]
      (go
        (<! (clear-worker-media-session! {:all? true}))
-       (when (not= engine-kw prev-engine-id)
-         (<! (register-engine engine-kw)))
-       (binding/set-active-engine! engine-kw)
-       (streams/init-engine-streams! engine-kw)
+       (<! (activate-engine! engine-kw))
        (re-frame/dispatch [:app/bootstrap target-user-id engine-kw]))
      {:db (assoc db :active-engine engine-kw)})))
 #+end_src
@@ -394,13 +404,11 @@ the standard boot strap.
            engine-id    (when-let [e (or requested-engine saved-engine)]
                           (keyword e))]
        (when engine-id
-         (<! (register-engine engine-id))
-         (binding/set-active-engine! engine-id)
-         (streams/init-engine-streams! engine-id))
+         (<! (activate-engine! engine-id)))
        (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
        (if engine-id
          (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
-         (re-frame/dispatch [:auth/set-status :logged-out]))))
+         (dispatch-logged-out!))))
    (cond-> {}
      requested-engine
      (assoc :db (assoc db :active-engine (keyword requested-engine))))))
@@ -429,15 +437,15 @@ the user.
 Provides the entry-point for the application that Vite and the index.html enter from.
 #+begin_src clojurescript  :tangle ../../../../src/paradise/shared/client/core.cljs
 (defn ^:export init []
+  (binding/init-middleware!)
+  (boot-threads)
+  (app/init)
+  (logger/init!)
   (go
-
     (<! (registry/ensure-environment!))
-    (re-frame/dispatch [:registry/sync-manifests])
-    (binding/init-middleware!)
     (re-frame/dispatch [:registry/load-success (registry/resolve-engines)])
-
-    (<! (boot-threads))
-    (app/init)
-    (logger/init!)))
+    (re-frame/dispatch [:registry/sync-manifests])
+    (when-not (capacitor-mobile?)
+      (js/setTimeout register-sw! 1000))))
 #+end_src
 
