@@ -86,6 +86,61 @@ enable passing functions through them.
 ***** Function
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
+(defn- clamp-submenu-pos [anchor-rect panel-w panel-h]
+  (let [vw        js/window.innerWidth
+        vh        js/window.innerHeight
+        pad       8
+        w         (or panel-w 200)
+        h         (or panel-h 220)
+        right-x   (+ (:right anchor-rect) 4)
+        left-x    (- (:left anchor-rect) w 4)
+        x         (if (<= (+ right-x w pad) vw)
+                    right-x
+                    (max pad left-x))
+        raw-y     (- (:top anchor-rect) 6)
+        max-y     (max pad (- vh h pad))
+        y         (max pad (min raw-y max-y))]
+    {:left x :top y}))
+
+(defn ^:ui context-menu-submenu-panel [{:keys [sub close-fn safe-to-click?]}]
+  (r/with-let [!size (r/atom {:w 200 :h 220})
+               !ro   (atom nil)
+               measure! (fn [el]
+                          (when el
+                            (let [nw (.-offsetWidth el)
+                                  nh (.-offsetHeight el)]
+                              (when (and (pos? nw) (pos? nh)
+                                         (or (not= nw (:w @!size))
+                                             (not= nh (:h @!size))))
+                                (reset! !size {:w nw :h nh})))))]
+    (let [{:keys [level anchor-rect render-fn]} sub
+          {:keys [w h]} @!size
+          {:keys [left top]} (clamp-submenu-pos anchor-rect w h)]
+      [:div.universal-context-menu.is-submenu
+       {:ref (fn [el]
+               (when-let [prev-ro @!ro]
+                 (.disconnect prev-ro)
+                 (reset! !ro nil))
+               (when el
+                 (measure! el)
+                 (when (exists? js/ResizeObserver)
+                   (let [ro (js/ResizeObserver. (fn [_] (measure! el)))]
+                     (.observe ro el)
+                     (reset! !ro ro)))))
+        :on-context-menu (fn [e] (.preventDefault e))
+        :on-mouse-enter  (fn [_] (overlays-base/cancel-submenu-close!))
+        :on-mouse-leave  (fn [_] (overlays-base/schedule-close-submenus-from! level))
+        :style           {:left           (str left "px")
+                          :top            (str top "px")
+                          :z-index        (+ 100000 (or level 0))
+                          :pointer-events (if safe-to-click? "auto" "none")}}
+       (when render-fn
+         [render-fn close-fn])])
+    (finally
+      (when-let [ro @!ro]
+        (.disconnect ro)
+        (reset! !ro nil)))))
+
 (defn ^:ui context-menu-root []
   (r/with-let [!drag-y (r/atom 0)
                !start-y (r/atom 0)
@@ -98,7 +153,8 @@ enable passing functions through them.
                                 (.removeEventListener js/window "touchend" enable-clicks! true)
                                 (.removeEventListener js/window "pointerup" enable-clicks! true)
                                 (.removeEventListener js/window "touchcancel" enable-clicks! true))]
-    (let [active-menu @!active-context-menu]
+    (let [active-menu @!active-context-menu
+          submenus    @overlays-base/!context-submenus]
       (when-not active-menu
         (reset! !drag-y 0)
         (reset! !start-y 0)
@@ -117,27 +173,32 @@ enable passing functions through them.
 
       (when active-menu
         (let [{:keys [id props]} active-menu
-              {:keys [x y]} props
-              close-fn #(re-frame/dispatch [:ui/close-context-menu])
-              Target   (context-menu-component id)
-              menu-width  200
-              menu-height 250
-              render-x (if (> (+ x menu-width) js/window.innerWidth) (- x menu-width) x)
-              render-y (if (> (+ y menu-height) js/window.innerHeight) (- y menu-height) y)
+              {:keys [x y width height anchor-bottom]} props
+              close-fn    #(re-frame/dispatch [:ui/close-context-menu])
+              Target      (context-menu-component id)
+              menu-width  (or width 200)
+              menu-height (or height 250)
+              render-x    (max 8 (if (> (+ x menu-width) js/window.innerWidth) (- x menu-width) x))
+              render-y    (max 8 (if (> (+ y menu-height) js/window.innerHeight) (- y menu-height) y))
 
               handle-ptr-down (fn [e]
-                                (reset! !start-y (.-clientY e))
-                                (.setPointerCapture (.-target e) (.-pointerId e)))
+                                (when-not (some-> (.-target e)
+                                                  (.closest "input, select, textarea, .context-menu-slider-block"))
+                                  (reset! !start-y (.-clientY e))
+                                  (.setPointerCapture (.-target e) (.-pointerId e))))
               handle-ptr-move (fn [e]
                                 (when (pos? @!start-y)
                                   (let [delta (- (.-clientY e) @!start-y)]
                                     (reset! !drag-y (max 0 delta)))))
               handle-ptr-up   (fn [e]
-                                (if (> @!drag-y 100)
-                                  (close-fn)
-                                  (reset! !drag-y 0))
-                                (reset! !start-y 0)
-                                (.releasePointerCapture (.-target e) (.-pointerId e)))]
+                                (when (pos? @!start-y)
+                                  (if (> @!drag-y 100)
+                                    (close-fn)
+                                    (reset! !drag-y 0))
+                                  (reset! !start-y 0)
+                                  (try
+                                    (.releasePointerCapture (.-target e) (.-pointerId e))
+                                    (catch :default _ nil))))]
 
           [click-away-wrapper
            {:on-close close-fn :z-index 9998}
@@ -152,14 +213,23 @@ enable passing functions through them.
                        :transition (if (pos? @!start-y) "none" "transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)")
                        :z-index 99999
                        :pointer-events (if @!safe-to-click? "auto" "none")}
-                      {:left (str render-x "px")
-                       :top  (str render-y "px")
-                       :transform "none"
-                       :z-index 99999
-                       :pointer-events (if @!safe-to-click? "auto" "none")})}
+                      (cond-> {:left (str render-x "px")
+                               :transform "none"
+                               :z-index 99999
+                               :pointer-events (if @!safe-to-click? "auto" "none")}
+                        anchor-bottom (assoc :bottom (str (max 8 anchor-bottom) "px"))
+                        (not anchor-bottom) (assoc :top (str render-y "px"))))}
             [:div.mobile-drag-handle]
             (when Target
-              [Target (assoc props :close-fn close-fn)])]])))))
+              [Target (assoc props :close-fn close-fn)])]
+           (when (and (not is-mobile?) (seq submenus))
+             [:<>
+              (for [sub submenus]
+                ^{:key (str (:level sub) "-" (:id sub))}
+                [context-menu-submenu-panel
+                 {:sub            sub
+                  :close-fn       close-fn
+                  :safe-to-click? @!safe-to-click?}])])])))))
 #+end_src
 
 
