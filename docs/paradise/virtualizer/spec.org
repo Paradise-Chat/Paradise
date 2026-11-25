@@ -17,7 +17,7 @@ outlining the spec for it we can make it easier to digest.
 #+begin_src clojurescript :tangle ../../../src/paradise/virtualizer/spec.cljs
 (ns ^:virtualizer/skip paradise.virtualizer.spec
   (:require [clojure.string :as str]
-            [virtualizer.protocol :as proto]
+            [virtualizer.spec :as vspec]
             [virtualizer.worker.ast :as ast]
             [paradise.virtualizer.state :as state]
             [paradise.ui.container.timeline.item :refer [event-tile-render]]
