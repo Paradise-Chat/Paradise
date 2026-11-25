@@ -259,29 +259,52 @@ This allows us to neatly create states and provide a single component to the mai
 
 (defn ^:ui engine-option-items
   "Renders a list of declarative engine option maps (including dividers, icons,
-  i18n labels, and commands) inside a context menu."
-  [{:keys [tr items ctx close-fn on-item-click]}]
+  i18n labels, and commands) inside a context menu. Optional
+  `:render-submenu-by-id` maps option `:id` strings to `(fn [item close-fn] ...)`
+  submenu renderers, and `:subtitle-by-id` maps option `:id` strings to
+  secondary subtitle text."
+  [{:keys [tr items ctx close-fn on-item-click render-submenu-by-id subtitle-by-id]}]
   [:<>
    (for [{:keys [id class-name icon divider?] :as item} items]
      (if divider?
        ^{:key (or id (str (random-uuid)))}
        [:div.context-menu-divider]
-       (let [lbl     (resolve-item-label tr item)
-             icon-el (icons/resolve-icon icon)]
-         ^{:key (or id lbl)}
-         [:div.context-menu-item
-          {:class    class-name
-           :on-click (fn [e]
-                       (.stopPropagation e)
-                       (if on-item-click
-                         (on-item-click #(execute-option-command! item ctx))
-                         (do
-                           (execute-option-command! item ctx)
-                           (if close-fn
-                             (close-fn)
-                             (re-frame/dispatch [:ui/close-context-menu])))))}
-          (when icon-el [:span.item-icon icon-el])
-          [:span.item-label lbl]])))])
+       (let [lbl        (resolve-item-label tr item)
+             subtitle   (or (:subtitle item) (get subtitle-by-id id))
+             icon-el    (icons/resolve-icon icon)
+             run-item!  (fn [_]
+                          (if on-item-click
+                            (on-item-click #(execute-option-command! item ctx))
+                            (do
+                              (execute-option-command! item ctx)
+                              (if close-fn
+                                (close-fn)
+                                (re-frame/dispatch [:ui/close-context-menu])))))
+             sub-render (or (:submenu-render-fn item)
+                            (get render-submenu-by-id id))]
+         (if sub-render
+           ^{:key (or id lbl)}
+           [context-menu-submenu
+            {:id              (str "opt-" (or id lbl))
+             :icon            icon-el
+             :label           lbl
+             :subtitle        subtitle
+             :class-name      class-name
+             :close-fn        close-fn
+             :on-click        run-item!
+             :render-children (fn [cfn] (sub-render item cfn))}]
+           ^{:key (or id lbl)}
+           [:div.context-menu-item
+            {:class    class-name
+             :on-click (fn [e]
+                         (.stopPropagation e)
+                         (run-item! e))}
+            (when icon-el [:span.item-icon icon-el])
+            (if (seq subtitle)
+              [:span.context-menu-item-copy
+               [:span.item-label lbl]
+               [:span.item-sublabel subtitle]]
+              [:span.item-label lbl])]))))])
 
 (defn ^:ui feedback-banners
   "Renders standard error and/or success feedback banners inside overlay tabs."
