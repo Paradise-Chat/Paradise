@@ -132,6 +132,11 @@ Most of the call re-frame events and subscriptions are listed here
    (rtc/set-voice-threshold! threshold)))
 
 (rf/reg-fx
+ :call.audio/set-input-volume
+ (fn [volume]
+   (rtc/set-input-volume! volume)))
+
+(rf/reg-fx
  :call.driver/inject-crypto
  (fn [payload]
    (-> (rtc/inject-crypto-material! payload)
