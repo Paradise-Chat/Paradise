@@ -206,53 +206,128 @@ so we'll keep them nicely collected here.
     overflow: hidden;
 }
 
-.header-left {
+.room-header {
+  position: relative;
+  z-index: 10;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  padding: 0 16px;
+  height: 52px;
+  min-height: 52px;
+  flex-shrink: 0;
+  background: var(--bg-primary, #313338);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.14);
+}
+
+.header-left {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
   flex: 1 1 auto;
   min-width: 0;
 }
 
+.room-header-prefix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted, #949ba4);
+  flex-shrink: 0;
+}
+
+.room-header-prefix.is-avatar {
+  color: inherit;
+}
+
 .room-header-name {
-  font-weight: 600;
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary, #f2f3f5);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   margin: 0;
+  flex-shrink: 0;
+  max-width: 100%;
 }
 
-.room-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  height: 60px;
+.header-title-divider {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.1);
+  flex-shrink: 0;
+}
+
+.room-header-topic {
+  font-size: 0.82rem;
+  color: var(--text-muted, #949ba4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.header-action-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.header-actions-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: rgba(255, 255, 255, 0.09);
   flex-shrink: 0;
 }
 
 @media (max-width: 768px) {
   .room-header {
-    padding: 0 8px;
+    height: 48px;
+    min-height: 48px;
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .header-left {
+    gap: 8px;
   }
 
   .header-actions {
-    gap: 0px;
-}
+    gap: 2px;
+  }
 
- .room-header-name {
-     font-size: 1.1rem;
- }
+  .header-action-group {
+    gap: 1px;
+  }
 
- .hide-on-mobile {
-     display: none !important;
- }
+  .header-title-divider,
+  .room-header-topic,
+  .header-actions-divider {
+    display: none;
+  }
+
+  .room-header-name {
+    font-size: 0.96rem;
+    flex-shrink: 1;
+  }
+
+  .hide-on-mobile {
+    display: none !important;
+  }
 }
 
 .header-btn {
@@ -314,34 +389,35 @@ so we'll keep them nicely collected here.
 .header-icon-btn {
     background: transparent;
     border: none;
-    color: var(--text-secondary);
-    padding: 6px;
-    border-radius: 4px;
+    color: var(--text-secondary, #b5bac1);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 8px;
     cursor: pointer;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.15s ease;
+    transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 
 .header-icon-btn:hover {
-    background: var(--surface-2);
-    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary, #f2f3f5);
+}
+
+.header-icon-btn:active {
+    transform: scale(0.94);
 }
 
 .header-icon-btn.active {
-    background: var(--surface-3);
-    color: var(--primary-accent);
+    background: rgba(88, 101, 242, 0.18);
+    color: var(--primary-accent, #818cf8);
 }
 
 .header-icon-btn.active-green {
+    background: rgba(35, 165, 89, 0.16);
     color: #43b581;
-}
-
-.header-left {
-    display: flex;
-    flex-direction: row;
-
 }
 #+end_src
 
