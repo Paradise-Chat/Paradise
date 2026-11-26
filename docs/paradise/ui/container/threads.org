@@ -31,8 +31,8 @@ and Nostr in both layout modes:
                                           unregister-file!]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.container.reusable :refer [room-header]]
-   [paradise.ui.container.timeline.hydrator :refer [!local-timeline-data]]
    [paradise.ui.container.timeline.item :refer [event-tile-render]]
+   [virtualizer.client.hydrator :as vhydrator]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.input.base :refer [handle-files!]]
    [paradise.ui.input.composer :refer [extract-editor-payload tiptap-component]]
@@ -254,7 +254,7 @@ and Nostr in both layout modes:
 (re-frame/reg-event-fx
  :msg/thread
  (fn [{:keys [db]} [_ room-id msg-id maybe-summary maybe-item]]
-   (let [local-room   (get @!local-timeline-data room-id {})
+   (let [local-room   (vhydrator/get-stream-sources room-id)
          cached-items (concat (get-in db [:timeline-data room-id :live] [])
                               (get-in db [:timeline-data room-id :focused] [])
                               (:live local-room [])
