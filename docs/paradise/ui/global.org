@@ -265,6 +265,11 @@ enable passing functions through them.
     color: #ffffff;
 }
 
+.context-menu-item:hover .animate-spin {
+    animation: spin 2s linear infinite;
+    transform-origin: center;
+}
+
 .context-menu-item.is-submenu-open {
     background: #4752c4;
     color: #ffffff;
