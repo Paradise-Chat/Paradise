@@ -265,13 +265,19 @@ forward.
 
 (re-frame/reg-fx
  :input/focus-composer
- (fn [should-focus?]
-   (when should-focus?
-     (js/setTimeout
-      (fn []
-        (when-let [composer (.querySelector js/document ".ProseMirror")]
-          (.focus composer)))
-      50))))
+ (fn [arg]
+   (let [focus?    (if (map? arg) (:focus? arg) (boolean arg))
+         draft-key (when (map? arg) (:draft-key arg))
+         thread?   (and (string? draft-key) (str/starts-with? draft-key "thread::"))]
+     (when focus?
+       (js/setTimeout
+        (fn []
+          (when-let [composer (or (when thread?
+                                    (.querySelector js/document ".thread-composer-outer .ProseMirror"))
+                                  (.querySelector js/document ".timeline-input-outer .ProseMirror")
+                                  (.querySelector js/document ".ProseMirror"))]
+            (.focus composer)))
+        50)))))
 
 (defn inline-emoji-open? []
   (= (:id @!active-popover) :inline-emoji))
