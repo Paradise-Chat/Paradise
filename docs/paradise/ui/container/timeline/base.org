@@ -30,7 +30,7 @@ we've made interop with the WASM bindings.
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.shared.utils.svg :as icons]
             [virtualizer.core :refer [virtualized-list]]
-            [paradise.ui.container.timeline.hydrator :refer [!local-timeline-data]]
+            [virtualizer.client.hydrator :as vhydrator]
             [paradise.ui.container.timeline.item :refer [event-tile]]
             [paradise.ui.container.timeline.components :refer [timeline-empty-state
                                                    timeline-jump-button
@@ -45,11 +45,14 @@ we've made interop with the WASM bindings.
 
 **** Reframe event and subscriptions
 
-
-Need to remove the ref to local-timeline-data or upstream it.
-We could then remove most remaining virtualizer placeholders.
-
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/base.cljs
+(def sanitize-js-dispatch
+  (re-frame/->interceptor
+   :id :sanitize-js-dispatch
+   :before vhydrator/sanitize-dispatch-context))
+
+(re-frame/reg-global-interceptor sanitize-js-dispatch)
+
 (re-frame/reg-event-db
  :app/worker-redraw-ping
  (fn [db _]
@@ -60,7 +63,7 @@ We could then remove most remaining virtualizer placeholders.
  (fn [_ [_ room-id source]]
    (reagent.ratom/make-reaction
     (fn []
-      (get-in @!local-timeline-data [room-id (keyword source)] [])))))
+      (vhydrator/get-stream room-id source)))))
 
 (re-frame/reg-sub
  :timeline/events
