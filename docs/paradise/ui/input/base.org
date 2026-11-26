@@ -150,11 +150,19 @@ We'll need a way to generically upload to Matrix for anything from updating avat
                (log/error "Failed to send message:" (:msg res))))
            (catch :default e
              (log/error "Exception in send-message Go block:" (str e))))))
-     {:db       (-> db
-                    (assoc-in [:composer room-id] {:text "" :html "" :loaded-text "" :uploading? false})
-                    (assoc-in [:drafts room-id :attachments] [])
-                    (update :input-context dissoc room-id))
-      :dispatch [:composer/persist-draft room-id]})))
+     (when-let [old-timer (get-in db [:composer room-id :save-timer])]
+       (js/clearTimeout old-timer))
+     (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))]
+       {:db       (-> db
+                      (assoc-in [:composer room-id] {:text            ""
+                                                     :html            ""
+                                                     :loaded-text     nil
+                                                     :uploading?      false
+                                                     :draft-hydrated? true
+                                                     :edit-seq        next-seq})
+                      (assoc-in [:drafts room-id :attachments] [])
+                      (update :input-context dissoc room-id))
+        :dispatch [:composer/persist-draft room-id]}))))
 #+end_src
 
 
