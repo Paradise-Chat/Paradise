@@ -20,11 +20,126 @@ and the tab completion.
 (ns paradise.ui.input.autocomplete
   (:require
    [re-frame.core :as re-frame]
+   [re-frame.db :as rf-db]
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.ui.input.emotes :as emotes]
    [paradise.media.component :refer [media]]
    [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]))
+#+end_src
+
+
+**** Slash Commands Registry
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/autocomplete.cljs
+(def slash-commands
+  [{:name     "me"
+    :args-key :composer.commands/args-action
+    :desc-key :composer.commands/desc-me
+    :category :message}
+   {:name     "shrug"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-shrug
+    :category :message}
+   {:name     "tableflip"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-tableflip
+    :category :message}
+   {:name     "unflip"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-unflip
+    :category :message}
+   {:name     "lenny"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-lenny
+    :category :message}
+   {:name     "spoiler"
+    :args-key :composer.commands/args-text
+    :desc-key :composer.commands/desc-spoiler
+    :category :message}
+   {:name     "plain"
+    :args-key :composer.commands/args-text
+    :desc-key :composer.commands/desc-plain
+    :category :message}
+   {:name     "nick"
+    :args-key :composer.commands/args-name
+    :desc-key :composer.commands/desc-nick
+    :category :account}
+   {:name     "topic"
+    :args-key :composer.commands/args-topic
+    :desc-key :composer.commands/desc-topic
+    :category :room}
+   {:name     "roomname"
+    :args-key :composer.commands/args-name
+    :desc-key :composer.commands/desc-roomname
+    :category :room}
+   {:name     "join"
+    :args-key :composer.commands/args-room
+    :desc-key :composer.commands/desc-join
+    :category :room}
+   {:name     "leave"
+    :aliases  ["part"]
+    :desc-key :composer.commands/desc-leave
+    :category :room}
+   {:name     "invite"
+    :args-key :composer.commands/args-user-optional
+    :desc-key :composer.commands/desc-invite
+    :category :room}
+   {:name     "kick"
+    :args-key :composer.commands/args-user-reason
+    :desc-key :composer.commands/desc-kick
+    :category :moderation}
+   {:name     "ban"
+    :args-key :composer.commands/args-user-reason
+    :desc-key :composer.commands/desc-ban
+    :category :moderation}
+   {:name     "unban"
+    :args-key :composer.commands/args-user
+    :desc-key :composer.commands/desc-unban
+    :category :moderation}
+   {:name     "poll"
+    :desc-key :composer.commands/desc-poll
+    :category :ui}
+   {:name     "search"
+    :args-key :composer.commands/args-query
+    :desc-key :composer.commands/desc-search
+    :category :ui}
+   {:name     "pins"
+    :desc-key :composer.commands/desc-pins
+    :category :ui}
+   {:name     "members"
+    :desc-key :composer.commands/desc-members
+    :category :ui}
+   {:name     "settings"
+    :args-key :composer.commands/args-settings
+    :desc-key :composer.commands/desc-settings
+    :category :ui}
+   {:name     "help"
+    :desc-key :composer.commands/desc-help
+    :category :ui}])
+
+(defn parse-slash-command
+  "If trimmed `text` begins with a single `/`, returns `{:command <lower-name> :args <str>}`.
+   Returns `:escape` if `text` starts with `//`, or `nil` for normal messages."
+  [text]
+  (let [trimmed (str/trim (str (or text "")))]
+    (cond
+      (str/starts-with? trimmed "//")
+      {:escape? true
+       :text    (subs trimmed 1)}
+
+      (str/starts-with? trimmed "/")
+      (let [without-slash (subs trimmed 1)
+            [_ raw-cmd raw-args] (re-matches #"^([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$" without-slash)]
+        (when (seq raw-cmd)
+          {:command (str/lower-case raw-cmd)
+           :args    (str/trim (str (or raw-args "")))}))
+
+      :else nil)))
+
+(defn suggestion-active? []
+  (boolean (get-in @rf-db/app-db [:suggestion/menu :active?])))
 #+end_src
 
 
