@@ -48,16 +48,54 @@
                      ))
 
 (def transition-shapes
- [:path {:d "M 337.77267,39.137666 204.5901,62.689195 389.01709,146.51044 a 197.21106,190.57666 0 0 1 89.56196,81.84514 l 54.00963,96.57394 -125.89154,-79.76515 A 280.83601,271.38837 0 0 0 301.02659,204.77769 L 197.00037,187.22165 91.067825,258.62556 38.7196,369.72937 85.332774,358.96001 a 950.58864,918.60978 0 0 1 200.016736,-24.95507 325.2463,314.30465 0 0 1 185.1396,51.50073 l 19.34095,12.2251 -56.60534,-5.67614 a 447.78713,432.72307 0 0 0 -144.19171,8.17417 l -97.24627,21.07211 -90.73864,113.72432 -9.443357,149.66786 97.633317,-81.83427 a 218.63739,211.28219 0 0 1 82.86471,-43.45317 l 75.22539,-20.89278 a 726.85298,702.40084 0 0 1 104.6427,-21.15736 l 64.74334,-8.34781 1.12706,81.15732 a 175.19045,169.29685 0 0 1 -7.19801,50.35351 l -19.25205,62.80753 -10.21953,75.22177 -80.69533,12.62559 c -49.61256,7.76262 -97.15741,25.42313 -139.80698,51.9312 l -89.80021,55.81364 67.64343,17.42323 a 268.99298,268.99298 0 0 0 124.14539,2.38332 l 127.7891,-27.73268 a 302.95311,302.95311 0 0 1 130.38325,0.41393 l 120.36062,26.9229 a 315.55454,315.55454 0 0 0 125.05593,2.56987 l 57.37014,-10.3787 -74.41406,-57.69725 C 809.70774,822.20009 763.34672,801.66025 714.13006,792.98003 L 629.883,778.1215 l -29.01166,-52.55545 18.95543,-70.92694 6.57478,-139.55685 123.01059,2.42724 a 248.89357,240.52051 0 0 1 67.95089,10.53735 l 63.26591,18.76526 a 149.0982,144.08237 0 0 1 58.50082,32.87706 l 71.10214,64.74437 -17.53849,-102.19532 -30.39969,-47.19609 A 160.95661,155.54185 0 0 0 857.89699,424.8485 427.78568,413.3945 0 0 0 765.6742,416.70841 l -75.49307,1.10692 104.86389,-16.66927 a 581.74601,562.17542 0 0 1 108.61094,-7.28741 122.35137,118.23534 0 0 1 84.84443,39.55676 l 31.11331,31.88487 V 348.69189 l -90.03065,-87.75742 -67.65581,9.31932 a 424.73304,410.44455 0 0 0 -113.20963,31.5464 L 660.92452,339.6754 779.39273,228.30649 a 1128.996,1091.0153 0 0 1 71.4003,-61.6474 l 26.27747,-20.82096 a 211.54678,204.43011 0 0 1 64.92265,-35.09605 L 979.95001,98.043108 837.66361,78.808626 687.8221,113.6711 660.71575,174.05553 a 668.66123,646.16673 0 0 0 -27.94146,74.43473 L 610.64128,321.04243 606.3449,191.57539 A 202.4551,195.64429 0 0 0 579.32278,100.02077 L 553.72021,57.170154 Z m 350.99873,517.313124 43.48003,27.40195 a 65.383294,62.633314 0 0 1 24.94422,29.48347 l 11.23393,27.47481 31.53968,-23.16345 a 60.645477,58.094766 0 0 1 37.2799,-11.98944 l 42.86146,0.25838 c 0,0 -52.33,-21.76136 -78.05673,-15.33808 -10.01662,2.50087 -24.01766,19.55591 -24.01766,19.55591 l -9.47281,-21.17391 a 36.773599,35.226925 0 0 0 -25.48837,-20.43854 z m -307.91971,95.63861 -51.52863,4.08295 -6.82026,17.96687 -34.85782,-16.33337 -33.34215,26.13328 25.9984,-5.38829 a 41.367203,44.582008 0 0 1 25.71317,3.5884 l 25.5819,13.2333 6.70605,-16.71267 a 30.283074,32.636488 0 0 1 18.39526,-18.07073 z m 176.52152,277.68693 c -23.81675,0.78463 -47.6671,3.27227 -65.79598,6.61303 L 367.3998,959.27271 a 370.30062,370.30062 0 0 1 -125.75202,1.45884 L 125.16084,942.04792 58.233134,1019.1957 h 8.422232 l 949.802534,-5.4338 -59.64033,-66.33756 -90.60223,14.28751 c -34.80943,5.48932 -90.89856,3.66602 -125.33446,-3.81682 -36.02535,-7.82823 -81.31965,-17.44968 -117.91373,-24.5122 -17.99423,-3.47283 -41.77718,-4.39115 -65.59394,-3.6065 z"
-           }])
+  [:g.transition-scene
+   [:path.transition-trunk
+    {:d "M 575,420 L 516.71,509.01 L 517.84,590.17 A 175.19,169.3 0 0 1 510.64,640.52 L 491.39,703.33 L 481.17,778.55 L 400.48,791.17 C 350.86,798.94 303.32,816.6 260.67,843.1 L 170.87,898.92 L 238.51,916.34 A 268.99,268.99 0 0 0 362.66,918.72 L 490.45,890.99 A 302.95,302.95 0 0 1 620.83,891.41 L 741.19,918.33 A 315.55,315.55 0 0 0 866.25,920.9 L 923.62,910.52 L 849.2,852.82 C 809.71,822.2 763.35,801.66 714.13,792.98 L 629.88,778.12 L 600.87,725.57 L 619.83,654.64 L 626.4,515.08 Z"}]
+   [:g.transition-canopy
+    [:path.transition-crown-core
+     {:d "M 538.95,339.19 L 502.61,401.07 L 525.46,495.66 L 618.69,500.82 L 672.9,418.14 L 648.04,351.72 L 605.3,335.89 Z"}]
+    [:path.transition-frond.frond-1
+     {:d "M 575,420 L 610.64,321.04 L 606.34,191.58 A 202.46,195.64 0 0 0 579.32,100.02 L 553.72,57.17 L 337.77,39.14 L 204.59,62.69 L 389.02,146.51 A 197.21,190.58 0 0 1 478.58,228.36 L 532.59,324.93 Z"}]
+    [:path.transition-frond.frond-2
+     {:d "M 575,420 L 532.59,324.93 L 406.7,245.16 A 280.84,271.39 0 0 0 301.03,204.78 L 197,187.22 L 91.07,258.63 L 38.72,369.73 L 85.33,358.96 A 950.59,918.61 0 0 1 285.35,334 A 325.25,314.3 0 0 1 470.49,385.51 L 489.83,397.73 Z"}]
+    [:path.transition-frond.frond-3
+     {:d "M 575,420 L 489.83,397.73 L 433.22,392.05 A 447.79,432.72 0 0 0 289.03,400.23 L 191.79,421.3 L 101.05,535.03 L 91.6,684.69 L 189.24,602.86 A 218.64,211.28 0 0 1 272.1,559.41 L 347.33,538.51 A 726.85,702.4 0 0 1 451.97,517.36 L 516.71,509.01 Z"}]
+    [:path.transition-frond.frond-4
+     {:d "M 575,420 L 626.4,515.08 L 749.41,517.51 A 248.89,240.52 0 0 1 817.36,528.05 L 880.63,546.81 A 149.1,144.08 0 0 1 939.13,579.69 L 1010.23,644.43 L 992.69,542.24 L 962.29,495.04 A 160.96,155.54 0 0 0 857.9,424.85 A 427.79,413.39 0 0 0 765.67,416.71 L 690.18,417.82 Z"}]
+    [:path.transition-frond.frond-5
+     {:d "M 575,420 L 690.18,417.82 L 795.05,401.15 A 581.75,562.18 0 0 1 903.66,393.86 A 122.35,118.24 0 0 1 988.5,433.42 L 1019.61,465.3 L 1019.61,348.69 L 929.58,260.93 L 861.93,270.25 A 424.73,410.44 0 0 0 748.72,301.8 L 660.92,339.68 Z"}]
+    [:path.transition-frond.frond-6
+     {:d "M 575,420 L 660.92,339.68 L 779.39,228.31 A 1129,1091.02 0 0 1 850.79,166.66 L 877.07,145.84 A 211.55,204.43 0 0 1 941.99,110.74 L 979.95,98.04 L 837.66,78.81 L 687.82,113.67 L 660.72,174.06 A 668.66,646.17 0 0 0 632.77,248.49 L 610.64,321.04 Z"}]]
+   [:g.transition-bird.bird-right
+    [:path.bird-wing-l
+     {:d "M 688.77,556.45 L 732.25,583.85 A 65.38,62.63 0 0 1 757.2,613.34 L 768.43,640.81 L 778.04,610.13 L 768.56,588.96 A 36.77,35.23 0 0 0 743.08,568.52 Z"}]
+    [:path.bird-wing-r
+     {:d "M 768.43,640.81 L 799.97,617.65 A 60.65,58.09 0 0 1 837.25,605.66 L 880.11,605.92 C 880.11,605.92 827.78,584.16 802.05,590.58 C 792.04,593.08 778.04,610.13 778.04,610.13 Z"}]
+    [:path.bird-body
+     {:d "M 778.04,610.13 L 777.23,625.47 L 768.43,640.81 L 769.23,625.47 Z"}]]
+   [:g.transition-bird.bird-left
+    [:path.bird-wing-l
+     {:d "M 322.5,674.14 L 287.64,657.81 L 254.3,683.94 L 280.3,678.55 A 41.37,44.58 0 0 1 306.01,682.14 L 331.6,695.37 Z"}]
+    [:path.bird-wing-r
+     {:d "M 380.85,652.09 L 329.32,656.17 L 322.5,674.14 L 331.6,695.37 L 338.3,678.66 A 30.28,32.64 0 0 1 356.7,660.59 Z"}]
+    [:path.bird-body
+     {:d "M 322.5,674.14 L 330.55,684.76 L 331.6,695.37 L 323.55,684.76 Z"}]]
+   [:path.transition-wave
+    {:d "M 557.37,929.78 C 533.56,930.56 509.71,933.05 491.58,936.39 L 367.4,959.27 A 370.3,370.3 0 0 1 241.65,960.73 L 125.16,942.05 L 58.23,1019.2 L 66.66,1019.2 L 1016.46,1013.76 L 956.82,947.42 L 866.22,961.71 C 831.41,967.2 775.32,965.38 740.88,957.9 C 704.86,950.07 659.56,940.45 622.97,933.38 C 604.97,929.91 581.19,928.99 557.37,929.78 Z"}]])
 
-(defn transition [{:keys [color] :as props}]
-  (build-icon-hiccup (merge {:viewBox "0 0 1058.3333 1058.3333"
+(defn transition [{:keys [color animate class] :or {animate true} :as props}]
+  (let [cls (cond
+              (and (false? animate) class) (str class " transition-static")
+              (false? animate) "transition-static"
+              :else class)]
+    (build-icon-hiccup
+     (cond-> (merge {:viewBox "0 0 1058.3333 1058.3333"
                      :fill (or color "#ccdd51")
-                     :stroke "none"}
-                    (dissoc props :color))
-                     transition-shapes
-   ))
+                     :stroke "none"
+                     :overflow "visible"}
+                    (dissoc props :color :animate :class))
+       cls (assoc :class cls))
+     transition-shapes)))
 
 (def full-shapes
    (list [:rect {:width "1438.5" :height "1284.8" :x "-178" :y "-116" :fill (or bg-color "#72c7e3")}]
@@ -113,13 +151,7 @@
   [:g
    [:path {:d "M9 9a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"}]
    [:path {:d "M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32"
-           :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset"
-               :from "32" :to "0"
-               :dur "0.2s"
-               :fill "freeze"}]]])
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn mic-off [props]
   (build-icon-hiccup props mic-off-shapes))
@@ -131,27 +163,24 @@
   (build-icon-hiccup (merge {:animate :ears} props) headphones-shapes))
 
 (def headphones-off-shapes
-  [:g [:path {:d "M3 11a9 9 0 0 1 13.52-7.78M20.42 15h.58a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 .58-1.42M2 17v3a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32" :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset" :from "32" :to "0" :dur "0.2s" :fill "freeze"}]]])
+  [:g
+   [:path {:d "M3 11a9 9 0 0 1 13.52-7.78M20.42 15h.58a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 .58-1.42M2 17v3a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"}]
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn headphones-off [props]
   (build-icon-hiccup props headphones-off-shapes))
 
 (def video-off-shapes
-  [:g [:path {:d "M16 16v3H1V5h2m4 0h9v9l7 5V7l-7 5V7.94"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32" :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset" :from "32" :to "0" :dur "0.2s" :fill "freeze"}]]])
+  [:g
+   [:path {:d "M16 16v3H1V5h2m4 0h9v9l7 5V7l-7 5V7.94"}]
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn video-off [props]
   (build-icon-hiccup props video-off-shapes))
 
 (def screen-share-off-shapes
   [:g
-   [:rect {:x "2" :y "3" :width "20" :height "14" :rx "2" :ry "2"}
-    [:animate {:attributeName "opacity" :from "1" :to "0.3" :dur "0.4s" :fill "freeze"}]]
+   [:rect {:x "2" :y "3" :width "20" :height "14" :rx "2" :ry "2" :opacity "0.35"}]
    [:path {:d "M8 21h8M12 17v4"}]])
 
 (defn screen-share-off [props]
@@ -207,16 +236,39 @@
   [:g
    [:path {:d "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"}]])
 
+(defn shield [props]
+  (build-icon-hiccup props shield-shapes))
+
 (def globe-shapes
   [:g
    [:circle {:cx "12" :cy "12" :r "10"}]
    [:line {:x1 "2" :y1 "12" :x2 "22" :y2 "12"}]
    [:path {:d "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"}]])
 
+(defn globe [props]
+  (build-icon-hiccup props globe-shapes))
+
 (def lock-shapes
   [:g
    [:rect {:x "3" :y "11" :width "18" :height "11" :rx "2" :ry "2"}]
    [:path {:d "M7 11V7a5 5 0 0 1 10 0v4"}]])
+
+(defn lock [props]
+  (build-icon-hiccup props lock-shapes))
+
+(def ban-shapes
+  [:g
+   [:circle {:cx "12" :cy "12" :r "10"}]
+   [:line {:x1 "4.93" :y1 "4.93" :x2 "19.07" :y2 "19.07"}]])
+
+(defn ban [props]
+  (build-icon-hiccup props ban-shapes))
+
+(def chevron-up-shapes
+  [:polyline {:points "18 15 12 9 6 15"}])
+
+(defn chevron-up [props]
+  (build-icon-hiccup props chevron-up-shapes))
 
 (def phone-shapes
   [:path {:d "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"}])
@@ -350,6 +402,27 @@
 (defn smiley [props]
   (build-icon-hiccup (merge {:width "20px" :height "20px"} props) smiley-shapes))
 
+(def sticker-shapes
+  [:g
+   [:path {:d "M15.5 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3Z"
+           :fill "none"
+           :stroke-linecap "round"
+           :stroke-linejoin "round"}]
+   [:path {:d "M14 3v4a2 2 0 0 0 2 2h4"
+           :fill "none"
+           :stroke-linecap "round"
+           :stroke-linejoin "round"}]
+   [:path {:d "M8 13h.01"
+           :stroke-linecap "round"}]
+   [:path {:d "M16 13h.01"
+           :stroke-linecap "round"}]
+   [:path {:d "M9.5 16.5s1 1 2.5 1 2.5-1 2.5-1"
+           :fill "none"
+           :stroke-linecap "round"}]])
+
+(defn sticker [props]
+  (build-icon-hiccup (merge {:width "20px" :height "20px"} props) sticker-shapes))
+
 (def send-shapes
   [:g
    [:path {:d "M22 2L11 13"}]
@@ -413,10 +486,15 @@
 
 (def thread-shapes
   [:g
-   [:circle {:cx "7" :cy "7" :r "3"}]
-   [:circle {:cx "17" :cy "17" :r "3"}]
-   [:path {:d "M7 10v4a2 2 0 0 0 2 2h4"}]
-   [:path {:d "M17 14v-4a2 2 0 0 0-2-2h-4"}]])
+   [:g {:transform "rotate(35 12 11.5)"}
+    [:rect {:x "4.5" :y "3" :width "15" :height "3" :rx "1"}]
+    [:rect {:x "4.5" :y "17" :width "15" :height "3" :rx "1"}]
+    [:path {:d "M7 6v11"}]
+    [:path {:d "M17 6v11"}]
+    [:path {:d "M7 9.5h10"}]
+    [:path {:d "M7 13.5h10"}]]
+   [:path {:d "M6.5 13.5c-2.5 1.5-2 4.5.5 5.5s1.5 3-2.5 3"}]])
+
 
 (defn thread [props]
   (build-icon-hiccup props thread-shapes))
@@ -535,6 +613,99 @@
 (defn bell [props]
   (build-icon-hiccup props bell-shapes))
 
+(def folder-shapes
+  [:path {:d "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"}])
+
+(defn folder [props]
+  (build-icon-hiccup props folder-shapes))
+
+(def folder-open-shapes
+  [:path {:d (str "M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6"
+                  "a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9"
+                  "a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2")}])
+
+(defn folder-open [props]
+  (build-icon-hiccup props folder-open-shapes))
+
+(def folder-plus-shapes
+  [:g
+   [:path {:d "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"}]
+   [:line {:x1 "12" :y1 "11" :x2 "12" :y2 "17"}]
+   [:line {:x1 "9" :y1 "14" :x2 "15" :y2 "14"}]])
+
+(defn folder-plus [props]
+  (build-icon-hiccup props folder-plus-shapes))
+
+(def folder-minus-shapes
+  [:g
+   [:path {:d "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"}]
+   [:line {:x1 "9" :y1 "14" :x2 "15" :y2 "14"}]])
+
+(defn folder-minus [props]
+  (build-icon-hiccup props folder-minus-shapes))
+
+(def poll-shapes
+  [:g
+   [:rect {:x "3" :y "12" :width "4" :height "8" :rx "1"}]
+   [:rect {:x "10" :y "4" :width "4" :height "16" :rx "1"}]
+   [:rect {:x "17" :y "8" :width "4" :height "12" :rx "1"}]])
+
+(defn poll [props]
+  (build-icon-hiccup (merge {:width "20px" :height "20px"} props) poll-shapes))
+
+(def play-shapes
+  [:polygon {:points "6 4 20 12 6 20 6 4" :fill "currentColor" :stroke "none"}])
+
+(defn play [props]
+  (build-icon-hiccup props play-shapes))
+
+(def pause-shapes
+  [:g {:fill "currentColor" :stroke "none"}
+   [:rect {:x "6" :y "4" :width "4" :height "16" :rx "1"}]
+   [:rect {:x "14" :y "4" :width "4" :height "16" :rx "1"}]])
+
+(defn pause [props]
+  (build-icon-hiccup props pause-shapes))
+
+(def music-note-shapes
+  [:g
+   [:path {:d "M9 18V5l12-2v13"}]
+   [:circle {:cx "6" :cy "18" :r "3"}]
+   [:circle {:cx "18" :cy "16" :r "3"}]])
+
+(defn music-note [props]
+  (build-icon-hiccup props music-note-shapes))
+
+(def map-pin-shapes
+  [:g
+   [:path {:d "M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"}]
+   [:circle {:cx "12" :cy "10" :r "3"}]])
+
+(defn map-pin [props]
+  (build-icon-hiccup props map-pin-shapes))
+
+(def clock-shapes
+  [:g
+   [:circle {:cx "12" :cy "12" :r "10"}]
+   [:polyline {:points "12 6 12 12 16 14"}]])
+
+(defn clock [props]
+  (build-icon-hiccup props clock-shapes))
+
+(def qr-code-shapes
+  [:g
+   [:rect {:x "3" :y "3" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "15" :y "3" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "3" :y "15" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "15" :y "15" :width "2" :height "2"}]
+   [:rect {:x "19" :y "15" :width "2" :height "2"}]
+   [:rect {:x "15" :y "19" :width "2" :height "2"}]
+   [:rect {:x "19" :y "19" :width "2" :height "2"}]
+   [:rect {:x "11" :y "11" :width "2" :height "2"}]])
+
+(defn qr-code [props]
+  (build-icon-hiccup props qr-code-shapes))
+
 (defn dynamic-room-hash [{:keys [is-public? is-encrypted? is-joinable?] :as props}]
   (let [clean-props (dissoc props :is-public? :is-encrypted? :is-joinable?)]
     (composite-icon
@@ -547,3 +718,49 @@
                                                :size "5px"
                                                :stroke
                                                "var(--active-green, #10b981)"})}))))
+
+(def icon-registry
+  {:door-open    door-open
+   :leave        leave
+   :doorbell     doorbell
+   :check        check
+   :bell         bell
+   :thread       thread
+   :members-plus members-plus
+   :phone        phone
+   :search       search
+   :pins         pins
+   :members      members
+   :plus-circle  plus-circle
+   :settings     settings
+   :copy         copy
+   :trash        trash
+   :link         link
+   :edit         edit
+   :shield       shield
+   :lock         lock
+   :clock        clock
+   :qr-code      qr-code
+   :smiley       smiley
+   :sticker      sticker
+   :globe        globe
+   :compass      compass
+   :chat-bubble  chat-bubble})
+
+(defn resolve-icon
+  "Resolves a keyword, string, or hiccup vector into a rendered SVG icon vector.
+  Optional `opts` supports `:props` (passed to the icon fn) and `:default` (fallback icon)."
+  ([icon-spec]
+   (resolve-icon icon-spec nil))
+  ([icon-spec {:keys [props default]}]
+   (cond
+     (vector? icon-spec)
+     icon-spec
+
+     (or (keyword? icon-spec) (string? icon-spec))
+     (if-let [icon-fn (get icon-registry (keyword icon-spec))]
+       (if props [icon-fn props] [icon-fn])
+       default)
+
+     :else
+     default)))
