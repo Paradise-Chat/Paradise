@@ -179,6 +179,7 @@ component slots
    [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
    [paradise.shared.sci-runner.ui :as runner]
+   [paradise.shared.client.session-store :as store]
    [paradise.shared.client.state :as state]
    [paradise.shared.registry :as reg]
    [paradise.shared.client.registry]))
