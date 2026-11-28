@@ -9,9 +9,10 @@ Mildly temporary until we better place these with the engine.
 #+begin_src clojurescript :tangle ../../../src/paradise/binding/streams.cljs
 (ns paradise.binding.streams
   (:require
-  [paradise.binding.core :as binding]
-  [re-frame.core :as re-frame]
-  [paradise.shared.client.state :as state]))
+   [paradise.binding.core :as binding]
+   [re-frame.core :as re-frame]
+   [re-frame.db :as db]
+   [virtualizer.client.hydrator :as vhydrator]))
 
 (defn init-engine-streams!
   ([engine-id]
