@@ -722,94 +722,128 @@ and file structures.
  :rooms/clear-active-if-matches
  (fn [{:keys [db]} [_ room-id]]
    (if (= (:active-room-id db) room-id)
-     (let [current-user (:active-user-id db)]
-       (store/set-setting! (str "last_room_" current-user) nil)
-       {:db (assoc db :active-room-id nil)
+     (let [current-user (:active-user-id db)
+           current-eng  (:active-engine db)]
+       (when (and current-eng current-user)
+         (store/save-nav-state! current-eng current-user
+                                {:space-id  (:active-space-id db)
+                                 :room-id   nil
+                                 :filter-id (:active-filter-id db "people")}))
+       {:db       (assoc db
+                         :active-room-id nil
+                         :session/pending-room-select nil)
         :dispatch [:sdk/cleanup-timeline room-id]})
      {})))
 
 (re-frame/reg-event-fx
  :rooms/select
+ [(state/guard-session-gen #(-> % (nth 2 nil) :gen))]
  (fn [{:keys [db]} [_ room-id opts]]
-   (let [
-         _ (log/error room-id)
+   (let [gen             (:session/gen db)
+         from-restore?   (boolean (:from-restore? opts))
          current-room-id (:active-room-id db)
          current-user    (:active-user-id db)
+         current-eng     (:active-engine db)
          membership      (get-in db [:rooms/membership room-id])
-         _ (log/error membership)
-         in-cache?       (contains? (:rooms-unfiltered-cache db) room-id)
-
          needs-join?     (and (some? room-id)
-                           (#{"invited" "left" "unknown"} membership))]
+                              (#{"invited" "left" "unknown"} membership))]
+     (cond
+       (nil? room-id)
+       {}
 
-     (if (= current-room-id room-id)
-       {:db (assoc-in db [:ui :sidebar-open?] false)}
+       (= current-room-id room-id)
+       {:db (cond-> (assoc-in db [:ui :sidebar-open?] false)
+              (= (:main-focus db) :discovery) (assoc :main-focus :timeline)
+              (not from-restore?) (assoc :session/pending-restore nil))}
+
+       :else
        (do
-         (store/set-setting! (str "last_room_" current-user) room-id)
-         (let [base-db (assoc db :active-room-id nil)
-               cleanup (when current-room-id [:rooms/clear-active-if-matches current-room-id])]
+         (when (and (not from-restore?) current-eng current-user)
+           (store/save-nav-state! current-eng current-user
+                                  {:space-id  (:active-space-id db)
+                                   :room-id   room-id
+                                   :filter-id (:active-filter-id db "people")}))
+         (let [base-db  (cond-> (assoc db
+                                       :active-room-id nil
+                                       :session/pending-room-select {:room-id room-id
+                                                                     :gen     gen})
+                          (not from-restore?) (assoc :session/pending-restore nil))
+               flush-r  (when current-room-id [:msg/flush-receipts true])
+               cleanup  (when current-room-id [:sdk/cleanup-timeline current-room-id])
+               gen-opts (assoc (or opts {}) :gen gen)]
            (if needs-join?
              {:db         base-db
-              :dispatch-n (remove nil? [cleanup [:rooms/join room-id opts]])}
+              :dispatch-n (remove nil? [flush-r cleanup [:rooms/join room-id gen-opts]])}
              {:db             base-db
-              :dispatch-n     (remove nil? [cleanup])
-              :dispatch-later [{:ms 20 :dispatch [:rooms/finish-select room-id opts]}]})))))))
+              :dispatch-n     (remove nil? [flush-r cleanup])
+              :dispatch-later [{:ms       20
+                                :dispatch [:rooms/finish-select room-id gen-opts]}]})))))))
 
 
 
 (re-frame/reg-event-fx
  :rooms/finish-select
  (fn [{:keys [db]} [_ room-id opts]]
-   (let [active-call-id     (get-in db [:call :active-room-id])
-         already-loaded?    (get-in db [:room-members room-id :data])
-         loading?           (get-in db [:room-members room-id :loading?])
-         is-call-room?      (is-call-room? db room-id)
-         is-forum-room?     (is-forum-room? db room-id)
+   (let [gen         (:session/gen db)
+         pending-sel (:session/pending-room-select db)]
+     (if (and pending-sel
+              (or (not= (:gen pending-sel) gen)
+                  (not= (:room-id pending-sel) room-id)))
+       (do
+         (log/debug "Ignoring stale :rooms/finish-select for" room-id)
+         {})
+       (let [active-call-id     (get-in db [:call :active-room-id])
+             already-loaded?    (get-in db [:room-members room-id :data])
+             loading?           (get-in db [:room-members room-id :loading?])
+             is-call-room?      (is-call-room? db room-id)
+             is-forum-room?     (state/room-forum-mode? db room-id)
 
-         force-lobby?       (:force-lobby? opts)
-         focus-override     (:focus-override opts)
-         jump-event-id      (:jump-event-id opts)
-         mobile?            (get-in db [:ui :mobile?])
-         join-directly?     (if force-lobby? false (not mobile?))
-         wipe-call-state?   (not is-call-room?)
-         swapping-calls?    (and active-call-id
-                                 (not= active-call-id room-id)
-                                 is-call-room?
-                                 (not force-lobby?))
-         current-side-panel (:side-panel db)
-         new-focus          (cond
-                              is-call-room?  :call
-                              (and is-forum-room? (not jump-event-id)) :thread
-                              :else          :timeline)
-         side-panel-update  (cond
-                              (and (= current-side-panel :timeline) (not focus-override)) nil
-                              (and (= current-side-panel :threads) (= new-focus :thread)) nil
-                              :else current-side-panel)
-         base-db            (cond-> (-> db
-                                        (assoc :active-room-id room-id)
-                                        (assoc-in [:ui :sidebar-open?] false)
-                                        (assoc-in [:ui :main-focus] new-focus)
-                                        (assoc-in [:call :chat-open?] false))
-                              jump-event-id
-                              (assoc-in [:timeline/jump-target-id room-id] jump-event-id))
-         dispatches         (remove nil?
-                                    [(when swapping-calls? [:call/hangup {:wipe-state? wipe-call-state? :room-id active-call-id}])
-                                     [:composer/load-draft room-id]
-                                     (cond
-                                       jump-event-id          [:room/boot-focused-timeline room-id jump-event-id]
-                                       (= new-focus :thread)  [:threads/fetch-list room-id false]
-                                       :else                  [:sdk/boot-timeline room-id])
-                                     (when (not (or already-loaded? loading?)) [:room/fetch-members room-id])
-                                     [:sdk/fetch-room-emotes :room room-id]
-                                     [:container/set-main-focus new-focus]
-                                     (when focus-override [:container/set-side-panel focus-override])
-                                     (when (and (some? current-side-panel) (nil? side-panel-update))
-                                       [:container/set-side-panel nil])
-                                     ;;(when is-call-room? [:call/init-widget room-id {:join-directly? join-directly?}])
-                                     ])]
-     {:db                 base-db
-      :input/focus-composer (not mobile?)
-      :dispatch-n         dispatches})))
+             force-lobby?       (:force-lobby? opts)
+             focus-override     (:focus-override opts)
+             jump-event-id      (:jump-event-id opts)
+             mobile?            (get-in db [:ui :mobile?])
+             join-directly?     (if force-lobby? false (not mobile?))
+             wipe-call-state?   (not is-call-room?)
+             swapping-calls?    (and active-call-id
+                                     (not= active-call-id room-id)
+                                     is-call-room?
+                                     (not force-lobby?))
+             current-side-panel (:side-panel db)
+             new-focus          (cond
+                                  is-call-room?  :call
+                                  (and is-forum-room? (not jump-event-id)) :thread
+                                  :else          :timeline)
+             side-panel-update  (cond
+                                  (and (= current-side-panel :timeline) (not focus-override)) nil
+                                  (and (= current-side-panel :threads) (= new-focus :thread)) nil
+                                  :else current-side-panel)
+             base-db            (cond-> (-> db
+                                            (assoc :active-room-id room-id
+                                                   :session/pending-room-select nil)
+                                            (assoc-in [:ui :sidebar-open?] false)
+                                            (assoc-in [:ui :main-focus] new-focus)
+                                            (assoc-in [:call :chat-open?] false))
+                                  (not jump-event-id)
+                                  (-> (update-in [:read-receipts :sent] dissoc room-id)
+                                      (update-in [:read-receipts :in-flight] dissoc room-id))
+                                  jump-event-id
+                                  (assoc-in [:timeline/jump-target-id room-id] jump-event-id))
+             dispatches         (remove nil?
+                                        [(when swapping-calls? [:call/hangup {:wipe-state? wipe-call-state? :room-id active-call-id}])
+                                         [:composer/load-draft room-id]
+                                         (cond
+                                           jump-event-id          [:room/boot-focused-timeline room-id jump-event-id]
+                                           (= new-focus :thread)  [:threads/fetch-list room-id false]
+                                           :else                  [:sdk/boot-timeline room-id])
+                                         (when (not (or already-loaded? loading?)) [:room/fetch-members room-id])
+                                         [:sdk/fetch-room-emotes :room room-id]
+                                         [:container/set-main-focus new-focus]
+                                         (when focus-override [:container/set-side-panel focus-override])
+                                         (when (and (some? current-side-panel) (nil? side-panel-update))
+                                           [:container/set-side-panel nil])])]
+         {:db                 base-db
+          :input/focus-composer (not mobile?)
+          :dispatch-n         dispatches})))))
 #+end_src
 
 
@@ -844,20 +878,31 @@ entire room list to reload. Hopefully not.
 
 (re-frame/reg-event-fx
  :room-list/apply-filter
- (fn [{:keys [db]} [_ filter-id]]
-   (let [current-filter (:active-filter-id db)]
-     (if (= current-filter filter-id)
+ (fn [{:keys [db]} [_ filter-id opts]]
+   (let [current-filter (:active-filter-id db)
+         force?         (boolean (:force? opts))
+         persist?       (not (false? (:persist? opts)))
+         next-filter    (or (some-> filter-id str not-empty) "people")]
+     (when (and persist?
+                (nil? (:active-space-id db))
+                (:active-engine db)
+                (:active-user-id db))
+       (store/save-nav-state! (:active-engine db) (:active-user-id db)
+                              {:space-id  nil
+                               :room-id   (:active-room-id db)
+                               :filter-id next-filter}))
+     (if (and (not force?) (= current-filter next-filter))
        {}
        (do
-         (log/debug "Swapping filter to" filter-id)
+         (log/debug "Swapping filter to" next-filter)
          (go
            (let [pool @state/!engine-pool
-                 res  (<! (main/do-with-pool! pool {:handler :set-room-filter
-                                                    :arguments {:filter-id filter-id}}))]
+                 res  (<! (main/do-with-pool! pool {:handler   :set-room-filter
+                                                    :arguments {:filter-id next-filter}}))]
              (if (= (:status res) "success")
                (log/debug "Worker successfully swapped filter!")
                (log/error "Worker failed to swap filter:" res))))
-         {:db (assoc db :active-filter-id filter-id)})))))
+         {:db (assoc db :active-filter-id next-filter)})))))
 
 (re-frame/reg-sub :room-list/active-filter (fn [db _] (get db :active-filter-id "people")))
 #+end_src
