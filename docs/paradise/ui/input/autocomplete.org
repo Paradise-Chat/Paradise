@@ -23,7 +23,7 @@ and the tab completion.
    [re-frame.db :as rf-db]
    [taoensso.timbre :as log]
    [clojure.string :as str]
-   [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.shared.utils.helpers :refer [clean-shortcode safe-lower safe-lower-trim]]
    [paradise.ui.input.emotes :as emotes]
    [paradise.media.component :refer [media]]
    [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]))
