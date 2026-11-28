@@ -251,21 +251,13 @@ throw an error.
           hickory-maps  (map h/as-hickory raw-fragments)]
       (sanitize-nodes hickory-maps 0))))
 
-(defonce ^:private !sanitize-cache (atom {}))
+(defonce ^:private !sanitize-cache
+  (mem-cache/make-ttl-cache {:max-entries 300}))
 
 (defn memoized-sanitize
   "Bounded-cache wrapper around `sanitize-custom-html` for hot timeline paths."
   [html]
-  (if-let [hit (get @!sanitize-cache html)]
-    hit
-    (let [res (sanitize-custom-html html)]
-      (swap! !sanitize-cache
-             (fn [m]
-               (let [m' (assoc m html res)]
-                 (if (> (count m') 300)
-                   (dissoc m' (first (keys m')))
-                   m'))))
-      res)))
+  (mem-cache/memoize-bounded !sanitize-cache html #(sanitize-custom-html html)))
 
 (defn sanitize-text [raw-text]
   (when raw-text
