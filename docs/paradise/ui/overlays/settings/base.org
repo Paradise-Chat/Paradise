@@ -89,12 +89,9 @@ file.
    "ui_forum_view_rooms_v1"   {:event :rooms/hydrate-forum-overrides      :default {}       :stage :login}})
 
 (defn default-submit-on-enter? []
-  (let [platform (when (exists? Capacitor) (.getPlatform Capacitor))]
-    (not (or (contains? #{"android" "ios"} platform)
-             (and (exists? js/window)
-                  (<= (.-innerWidth js/window) 768)
-                  (exists? js/window.matchMedia)
-                  (.-matches (js/window.matchMedia "(pointer: coarse)")))))))
+  (not (or (platform/capacitor-mobile?)
+           (and (platform/mobile-viewport?)
+                (platform/coarse-pointer?)))))
 
 (re-frame/reg-event-db
  :settings/hydrate-submit-on-enter
