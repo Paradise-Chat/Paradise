@@ -6,25 +6,69 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 import { VitePWA } from "vite-plugin-pwa";
 
 const copyFiles = {
+    silent: true,
     targets: [
         {
-            src: normalizePath(path.resolve(__dirname, "build/config.edn")),
+            src: normalizePath(path.resolve(__dirname, "config.edn")),
             dest: ".",
         },
         {
-            src: normalizePath(path.resolve(__dirname, "build/rnnoise/*")),
+            src: normalizePath(
+                path.resolve(
+                    __dirname,
+                    "node_modules/simple-rnnoise-wasm/dist/*"
+                )
+            ),
             dest: "rnnoise",
         },
         {
-            src: normalizePath(path.resolve(__dirname, "build/i18n.edn")),
+            src: normalizePath(path.resolve(__dirname, "i18n.edn")),
             dest: ".",
         },
         {
-            src: normalizePath(path.resolve(__dirname, "build/css/*")),
+            src: normalizePath(path.resolve(__dirname, "css/*")),
             dest: "css",
         },
     ],
 };
+
+function scopedCommonjs() {
+    const plugin = commonjs({
+        filter(id) {
+            return id.includes("uniffi-bindgen-react-native");
+        },
+    });
+    return {
+        ...plugin,
+        configResolved(resolvedConfig) {
+            plugin.configResolved?.call(this, resolvedConfig);
+            const esbuildPlugins =
+                resolvedConfig.optimizeDeps?.esbuildOptions?.plugins;
+            const preBundle = esbuildPlugins?.find(
+                (p) => p.name === "vite-plugin-commonjs:pre-bundle"
+            );
+            if (preBundle) {
+                const origSetup = preBundle.setup;
+                preBundle.setup = (build) =>
+                    origSetup({
+                        ...build,
+                        onLoad(opts, cb) {
+                            return build.onLoad(
+                                { ...opts, filter: /uniffi-bindgen-react-native/ },
+                                cb
+                            );
+                        },
+                    });
+            }
+        },
+        transform(code, id) {
+            if (!id.includes("uniffi-bindgen-react-native")) {
+                return null;
+            }
+            return plugin.transform.call(this, code, id);
+        },
+    };
+}
 
 export default defineConfig({
     root: "./build",
@@ -46,17 +90,7 @@ export default defineConfig({
 
     plugins: [
         wasm(),
-        commonjs({
-            filter(id) {
-                if (id.includes("cljs-runtime")) {
-                    return false;
-                }
-                if (id.includes("uniffi-bindgen-react-native")) {
-                    return true;
-                }
-                return false;
-            },
-        }),
+        scopedCommonjs(),
         viteStaticCopy(copyFiles),
         VitePWA({
             strategies: "injectManifest",
@@ -66,7 +100,7 @@ export default defineConfig({
             manifest: false,
             injectManifest: {
                 injectionPoint: "self.__WB_MANIFEST",
-                maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+                maximumFileSizeToCacheInBytes: 32 * 1024 * 1024,
             },
             devOptions: {
                 enabled: true,
