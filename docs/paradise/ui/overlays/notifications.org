@@ -106,12 +106,10 @@ https://github.com/Paradise-Chat/paradise-push
 
 (defn- resolve-app-id []
   (let [cfg @!config]
-    (case (.getPlatform Capacitor)
+    (case (platform/current-platform)
       "ios"     (:app-id-ios cfg)
       "android" (:app-id-android cfg)
       (or (:app-id-web cfg) (:app-id cfg)))))
-
-
 
 (defn- strip-source-map [s]
   (when s
@@ -139,7 +137,7 @@ https://github.com/Paradise-Chat/paradise-push
 (re-frame/reg-event-fx
  :push/sync-engine-script
  (fn [_ _]
-   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+   (when (platform/mobile-native?)
      (go
        (try
          (if-let [script-path (<! (active-notification-script))]
@@ -197,7 +195,7 @@ not then it is safely ignored.
  :push/toggle-previews
  (fn [_ [_ enabled?]]
    (store/set-setting! "show_previews" enabled?)
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (-> (.setPreviewPreferences shadow-device #js {:enabled enabled?})
          (.catch #(log/error "Failed to save native preview prefs:" %))))
    {:dispatch [:push/hydrate-previews-setting enabled?]}))
@@ -206,7 +204,7 @@ not then it is safely ignored.
 (re-frame/reg-event-fx
  :push/create-sleepy-shadow
  (fn [{:keys [db]} [_ credentials]]
-   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+   (when (platform/mobile-native?)
      (log/info "Creating Sleepy Shadow Device...")
      (let [user-id (or (:user-id credentials) (:userId credentials) (:active-user-id db))]
        (go
@@ -233,7 +231,7 @@ not then it is safely ignored.
          old-user    (:active-push-user db)
          voip-token  (:voip-token db)
          app-id      (resolve-app-id)
-         platform    (.getPlatform Capacitor)]
+         plat        (platform/current-platform)]
      (go
        (try
          (when (and old-user (string? old-user) (not= old-user active-user))
@@ -243,7 +241,7 @@ not then it is safely ignored.
                                           :voipToken (or voip-token "")
                                           :userId    old-user
                                           :appId     app-id
-                                          :platform  platform}))
+                                          :platform  plat}))
              (catch js/Error e
                (log/warn "Silent deactivate cleanup error:" e))))
          (<p! (.activateShadow shadow-device
@@ -252,7 +250,7 @@ not then it is safely ignored.
                                     :pushUrl   (:push-url @!config)
                                     :userId    active-user
                                     :appId     app-id
-                                    :platform  platform}))
+                                    :platform  plat}))
          (re-frame/dispatch [:push/set-active-user active-user])
          (catch js/Error err
            (log/error "Shadow Activated FAILED:" err)
@@ -265,7 +263,7 @@ not then it is safely ignored.
    (let [token       (:native-token db)
          target-user (:active-push-user db)
          app-id      (resolve-app-id)
-         platform    (.getPlatform Capacitor)]
+         plat        (platform/current-platform)]
      (when (and target-user (string? target-user))
        (go
          (try
@@ -273,7 +271,7 @@ not then it is safely ignored.
                                    #js {:pushToken (or token "")
                                         :userId    target-user
                                         :appId     app-id
-                                        :platform  platform}))
+                                        :platform  plat}))
            (catch js/Error e
              (log/error "Shadow Deactivated FAILED:" e)))
          (re-frame/dispatch [:push/hydrate-status nil])))
@@ -282,7 +280,7 @@ not then it is safely ignored.
 (re-frame/reg-event-fx
  :push/verify-shadow
  (fn [_ [_ user-id recovery-key]]
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (go
        (try
          (let [prep    (<! (mesh/do-with-thread!
@@ -302,7 +300,7 @@ not then it is safely ignored.
 (re-frame/reg-event-fx
  :push/check-verification-status
  (fn [_ [_ user-id]]
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (-> (.getShadowStatus shadow-device #js {:userId user-id})
          (.then (fn [res]
                   (when (.-isVerified res)
