@@ -30,6 +30,7 @@ spaces navigation bar.
                                           local-media-url?
                                           normalize-keyword
                                           revoke-object-url!]]
+   [paradise.shared.utils.normalize :as norm]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [context-menu-component
@@ -282,14 +283,6 @@ spaces navigation bar.
     :offline (tr [:settings.profile/status-offline])
     (tr [:settings.profile/status-online])))
 
-(defn- format-account-meta [acc]
-  (let [proto (some-> (:engine acc) clojure.core/name str/capitalize)
-        url   (or (:server-url acc) (:base-url acc) (:server acc) "")]
-    (cond
-      (and proto (not (str/blank? url))) (str proto " · " url)
-      proto                              proto
-      :else                              url)))
-
 (defn- status-submenu-items [close-fn]
   (let [tr         @(re-frame/subscribe [:i18n/tr])
         own-status @(re-frame/subscribe [:presence/own-status])]
@@ -327,7 +320,7 @@ spaces navigation bar.
                    title    (or (not-empty (:label acc))
                                 (not-empty (:display-name acc))
                                 (:userId acc))
-                   sub      (format-account-meta acc)
+                   sub      (norm/format-account-subtitle acc)
                    active?  (and (= (str (:userId acc)) (str effective-uid))
                                  (or (nil? acc-eng)
                                      (nil? active-engine)
