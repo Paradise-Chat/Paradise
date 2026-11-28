@@ -244,7 +244,7 @@
                           (if (and (string? eid) (not (str/blank? eid)))
                             (re-frame/dispatch [:rooms/select rid {:jump-event-id eid}])
                             (re-frame/dispatch [:rooms/select rid])))))))))
-  (when (mobile-native-platform?)
+  (when (platform/mobile-native?)
     (re-frame/dispatch [:push/sync-engine-script])
     (.addListener PushNotifications "registration"
       (fn [token-res]
@@ -351,27 +351,27 @@
        (if (= (:status res) "success")
          (do
            (log/info "Successfully eradicated all pushers.")
-           (when (and (not (mobile-native-platform?))
-                      (not (electron-platform?)))
+           (when (and (not (platform/mobile-native?))
+                      (not (platform/electron-platform?)))
              (when-let [sw (.-serviceWorker js/navigator)]
                (-> (.-ready sw)
                    (.then (fn [reg]
                             (-> (.. reg -pushManager getSubscription)
                                 (.then (fn [sub]
                                          (when sub (.unsubscribe sub))))))))))
-           (when (electron-platform?)
+           (when (platform/electron-platform?)
              (store/set-setting! "desktop_notifs_enabled" false))
-           (when (mobile-native-platform?)
+           (when (platform/mobile-native?)
              (let [token       (:native-token db)
                    target-user (:active-push-user db)
                    app-id      (resolve-app-id)
-                   platform    (current-platform)]
+                   plat        (platform/current-platform)]
                (when target-user
                  (.deactivateShadow shadow-device
                                     #js {:pushToken (or token "")
                                          :userId    target-user
                                          :appId     app-id
-                                         :platform  platform}))))
+                                         :platform  plat}))))
            (store/set-setting! "web_push_owner" nil)
            (re-frame/dispatch [:push/hydrate-status nil]))
          (log/error "Failed to clear pushers:" (:msg res)))))
@@ -406,7 +406,7 @@
  :push/check-status
  (fn [{:keys [db]} _]
    (cond
-     (mobile-native-platform?)
+     (platform/mobile-native?)
      (go
        (try
          (let [res       (<p! (.getActivePushUser shadow-device))
@@ -416,7 +416,7 @@
          (catch js/Error e
            (log/error "Failed to check native push status:" e))))
 
-     (electron-platform?)
+     (platform/electron-platform?)
      (-> (store/get-setting "desktop_notifs_enabled")
          (.then (fn [saved]
                   (let [on? (if (boolean? saved) saved true)]
@@ -440,7 +440,7 @@
  :push/enable
  (fn [{:keys [db]} _]
    (cond
-     (mobile-native-platform?)
+     (platform/mobile-native?)
      (go
        (try
          (let [perm (<p! (.requestPermissions PushNotifications))]
@@ -452,7 +452,7 @@
          (catch js/Error e
            (log/error "Native Push setup failed:" e))))
 
-     (electron-platform?)
+     (platform/electron-platform?)
      (let [owner (or (:active-user-id db) "enabled")]
        (store/set-setting! "desktop_notifs_enabled" true)
        (re-frame/dispatch [:push/hydrate-status owner]))
@@ -478,10 +478,10 @@
  :push/disable
  (fn [_ _]
    (cond
-     (mobile-native-platform?)
+     (platform/mobile-native?)
      {:dispatch [:push/deactivate-shadow]}
 
-     (electron-platform?)
+     (platform/electron-platform?)
      (do
        (store/set-setting! "desktop_notifs_enabled" false)
        {:dispatch [:push/hydrate-status nil]})
@@ -632,7 +632,7 @@
                     :silent  os-silent?})
         (catch :default _ nil))
 
-      (and (or (not (electron-platform?)) desktop-enabled?)
+      (and (or (not (platform/electron-platform?)) desktop-enabled?)
            (exists? js/Notification)
            (= (.-permission js/Notification) "granted"))
       (try
