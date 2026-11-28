@@ -939,50 +939,21 @@ Reusable pure helpers shared across UI, workers, and client modules.
 
 **** Runtime & Platform Detection
 
-Lightweight environment checks that inspect Capacitor and navigator globals
-without importing native Capacitor plugins into worker bundles.
+Platform detection helpers live in =paradise.shared.utils.platform= and are
+re-exported here for callers and SCI plugins.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
-(defn capacitor-platform
-  "Returns the active Capacitor platform string (e.g. `\"ios\"`, `\"android\"`, `\"web\"`), or nil."
-  []
-  (try
-    (when (exists? js/window)
-      (let [^js cap (aget js/window "Capacitor")]
-        (when (and (some? cap) (fn? (.-getPlatform cap)))
-          (str (.getPlatform cap)))))
-    (catch :default _
-      nil)))
-
-(defn capacitor-mobile?
-  "Returns true when running inside a native iOS or Android Capacitor shell."
-  []
-  (contains? #{"ios" "android"} (capacitor-platform)))
-
-(defn ios-runtime?
-  "Returns true on native iOS Capacitor shells as well as iOS/iPadOS Safari/WebKit."
-  []
-  (try
-    (or (= "ios" (capacitor-platform))
-        (when (exists? js/navigator)
-          (let [ua  (str (or (.-userAgent js/navigator) ""))
-                plt (str (or (.-platform js/navigator) ""))
-                mtp (js/Number (or (.-maxTouchPoints js/navigator) 0))]
-            (or (boolean (re-find #"(?i)iPhone|iPad|iPod" ua))
-                (and (= plt "MacIntel") (> mtp 1))))))
-    (catch :default _
-      false)))
-
-(defn mobile-runtime?
-  "Returns true on native mobile shells (iOS/Android) or mobile browsers."
-  []
-  (try
-    (or (capacitor-mobile?)
-        (ios-runtime?)
-        (when (exists? js/navigator)
-          (boolean (re-find #"(?i)Android" (str (or (.-userAgent js/navigator) ""))))))
-    (catch :default _
-      false)))
+(def capacitor-platform platform/capacitor-platform)
+(def current-platform platform/current-platform)
+(def native-platform? platform/native-platform?)
+(def capacitor-mobile? platform/capacitor-mobile?)
+(def mobile-native? platform/mobile-native?)
+(def ios-native? platform/ios-native?)
+(def ios-runtime? platform/ios-runtime?)
+(def mobile-runtime? platform/mobile-runtime?)
+(def electron-platform? platform/electron-platform?)
+(def mac-os? platform/mac-os?)
+(def mobile-viewport? platform/mobile-viewport?)
 #+end_src
 
 **** Converters
