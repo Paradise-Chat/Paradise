@@ -4,19 +4,23 @@
             [re-frame.core :as re-frame]
             [taoensso.timbre :as log]
             [clojure.string :as str]
+            [paradise.ui.input.voice :refer [voice-recorder-bar]]
             [paradise.ui.input.drafts :refer [attachment-preview]]
             [paradise.ui.input.composer :refer [tiptap-component extract-editor-payload prepare-html-for-editor]]
             [paradise.ui.input.emotes :refer [emoji-sticker-board]]
-            [paradise.ui.input.autocomplete :refer [suggestion-menu]]
+            [paradise.ui.input.autocomplete :refer [suggestion-menu suggestion-active? parse-slash-command slash-commands]]
+            [paradise.ui.overlays.base :refer [modal-component]]
             [paradise.ui.global :refer [request-item-redraw! !active-popover]]
             [reagent.core :as r]
-            [paradise.shared.utils.helpers :refer [clean-shortcode unregister-file! file->array-buffer register-file! get-file truncate-name extract-metadata]]
+            [paradise.shared.utils.helpers :refer [clean-shortcode unregister-file! file->array-buffer register-file! get-file revoke-object-url! truncate-name extract-metadata]]
+            [paradise.shared.utils.platform :as platform]
             [paradise.shared.utils.svg :as icons]
             [cljs.core.async :refer [go <!]]
             [cljs-workers.core :as main]
             [cljs-workers.mesh :as mesh]
             [paradise.shared.client.state :as state]
-            [paradise.shared.plugins :as plugins]))
+            [paradise.shared.plugins :as plugins]
+            ["@capacitor/keyboard" :refer [Keyboard]]))
 
 (defn handle-files! [room-id files]
   (doseq [raw-file files]
@@ -40,20 +44,284 @@
    (if file
      (let [mime (.-type file)]
        (if-let [pool @state/!engine-pool]
-         (go
-           (try
-             (let [ab  (<p! (file->array-buffer file))
-                   res (<! (main/do-with-pool! pool {:handler   :upload-media
-                                                     :arguments {:mime mime :buffer ab}}))]
-               (if (= (:status res) "success")
-                 (let [media-uri (or (:uri res) (:url res))]
-                   (re-frame/dispatch (conj on-success-event media-uri)))
-                 (log/error "Worker upload failed:" (:msg res))))
-             (catch :default e
-               (log/error "Exception generating arrayBuffer or worker:" (str e)))))
-         (log/error "No engine pool for upload"))
-       {:db (assoc db :uploading-files? true)})
+         (do
+           (go
+             (try
+               (let [ab  (<p! (file->array-buffer file))
+                     res (<! (main/do-with-pool! pool {:handler   :upload-media
+                                                       :arguments {:mime mime :buffer ab}}))]
+                 (if (= (:status res) "success")
+                   (let [media-uri (or (:uri res) (:url res))]
+                     (re-frame/dispatch (conj on-success-event media-uri)))
+                   (log/error "Worker upload failed:" (:msg res))))
+               (catch :default e
+                 (log/error "Exception generating arrayBuffer or worker:" (str e)))
+               (finally
+                 (re-frame/dispatch [:sdk/upload-complete]))))
+           {:db (assoc db :uploading-files? true)})
+         (do
+           (log/error "No engine pool for upload")
+           {})))
      (do (log/warn "Missing file for upload") {}))))
+
+(defn- escape-html [s]
+  (-> (str (or s ""))
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")
+      (str/replace "\"" "&quot;")))
+
+(defn- text->p-html [s]
+  (str "<p>" (str/replace (escape-html s) #"\r?\n" "<br>") "</p>"))
+
+(defn- split-first-token [s]
+  (let [trimmed (str/trim (str (or s "")))]
+    (if (str/blank? trimmed)
+      ["" ""]
+      (let [[_ head tail] (re-matches #"^(\S+)(?:\s+([\s\S]*))?$" trimmed)]
+        [(or head "") (str/trim (str (or tail "")))]))))
+
+(defn- resolve-member-id [db room-id raw-target]
+  (let [target  (str/trim (str (or raw-target "")))
+        clean   (if (and (str/starts-with? target "@")
+                         (not (str/includes? target ":")))
+                  (subs target 1)
+                  target)
+        members (vals (get-in db [:room-members room-id :data] {}))]
+    (if (or (str/blank? target)
+            (and (str/starts-with? target "@") (str/includes? target ":")))
+      target
+      (let [q (str/lower-case clean)]
+        (or (some (fn [m]
+                    (let [uid   (or (:id m) (:user-id m))
+                          dname (some-> (or (:display-name m) (:name m)) str/lower-case)]
+                      (when (or (= (some-> uid str/lower-case) (str/lower-case target))
+                                (= dname q))
+                        uid)))
+                  members)
+            (some (fn [m]
+                    (let [uid   (or (:id m) (:user-id m))
+                          dname (some-> (or (:display-name m) (:name m)) str/lower-case)]
+                      (when (and dname (str/starts-with? dname q))
+                        uid)))
+                  members)
+            target)))))
+
+(defonce ^:private !notice-timer (atom nil))
+
+(re-frame/reg-event-fx
+ :composer/show-notice
+ (fn [{:keys [db]} [_ room-id {:keys [level key args text]}]]
+   (when-let [t @!notice-timer]
+     (js/clearTimeout t))
+   (reset! !notice-timer
+           (js/setTimeout #(re-frame/dispatch [:composer/clear-notice room-id]) 4800))
+   {:db (assoc-in db [:composer/notice room-id]
+                  {:level (or level :info)
+                   :key   key
+                   :args  (vec (or args []))
+                   :text  text})}))
+
+(re-frame/reg-event-db
+ :composer/clear-notice
+ (fn [db [_ room-id]]
+   (update db :composer/notice dissoc room-id)))
+
+(re-frame/reg-sub
+ :composer/notice
+ (fn [db [_ room-id]]
+   (get-in db [:composer/notice room-id])))
+
+(defn- execute-slash-command
+  "Evaluates a parsed slash command. Returns either:
+   - `{:send {:text ... :html ... :msgtype ...}}` to send a transformed message,
+   - `{:fx [...]}` to run local/RPC actions without sending a chat message."
+  [db room-id {:keys [command args]}]
+  (let [notice (fn [level i18n-key & fmt-args]
+                 {:fx [[:dispatch [:composer/show-notice room-id
+                                   {:level level
+                                    :key   i18n-key
+                                    :args  (vec fmt-args)}]]]})
+        append-kaomoji (fn [kaomoji]
+                         (let [msg (if (str/blank? args) kaomoji (str args " " kaomoji))]
+                           {:send {:text msg :html (text->p-html msg)}}))]
+    (case command
+      "me"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-me)
+        {:send {:text    args
+                :html    (text->p-html args)
+                :msgtype :emote}})
+
+      "shrug"     (append-kaomoji "¯\\_(ツ)_/¯")
+      "tableflip" (append-kaomoji "(╯°□°)╯︵ ┻━┻")
+      "unflip"    (append-kaomoji "┬─┬ノ( º _ ºノ)")
+      "lenny"     (append-kaomoji "( ͡° ͜ʖ ͡°)")
+
+      "plain"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-plain)
+        {:send {:text args :html (text->p-html args)}})
+
+      "spoiler"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-spoiler)
+        {:send {:text (str "[Spoiler] " args)
+                :html (str "<p><span data-mx-spoiler=\"\">" (escape-html args) "</span></p>")}})
+
+      "nick"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-nick)
+        {:fx [[:dispatch [:sdk/update-own-profile {:display-name args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-nick
+                           :args  [args]}]]]})
+
+      "topic"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-topic)
+        {:fx [[:dispatch [:room-settings/save-overview {:room-id room-id :topic args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-topic}]]]})
+
+      "roomname"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-roomname)
+        {:fx [[:dispatch [:room-settings/save-overview {:room-id room-id :name args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-roomname
+                           :args  [args]}]]]})
+
+      "join"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-join)
+        {:fx [[:dispatch [:rooms/join args]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :info
+                           :key   :composer.commands/status-join
+                           :args  [args]}]]]})
+
+      ("leave" "part")
+      {:fx [[:dispatch [:rooms/leave room-id]]]}
+
+      "invite"
+      (if (str/blank? args)
+        {:fx [[:dispatch [:ui/open-modal :invite-user {:room-id room-id}]]]}
+        (let [[target _] (split-first-token args)
+              uid        (resolve-member-id db room-id target)]
+          {:fx [[:dispatch [:rooms/invite-user room-id uid]]
+                [:dispatch [:composer/show-notice room-id
+                            {:level :success
+                             :key   :composer.commands/status-invite
+                             :args  [uid]}]]]}))
+
+      "kick"
+      (let [[target reason] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-kick)
+          (let [uid (resolve-member-id db room-id target)]
+            {:fx [[:dispatch [:room-perms/kick-member
+                              {:room-id room-id
+                               :user-id uid
+                               :reason  (not-empty reason)}]]
+                  [:dispatch [:composer/show-notice room-id
+                              {:level :info
+                               :key   :composer.commands/status-kick
+                               :args  [uid]}]]]})))
+
+      "ban"
+      (let [[target reason] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-ban)
+          (let [uid (resolve-member-id db room-id target)]
+            {:fx [[:dispatch [:room-perms/ban-member
+                              {:room-id room-id
+                               :user-id uid
+                               :reason  (not-empty reason)}]]
+                  [:dispatch [:composer/show-notice room-id
+                              {:level :info
+                               :key   :composer.commands/status-ban
+                               :args  [uid]}]]]})))
+
+      "unban"
+      (let [[target _] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-unban)
+          {:fx [[:dispatch [:room-perms/unban-member
+                            {:room-id room-id
+                             :user-id target}]]
+                [:dispatch [:composer/show-notice room-id
+                            {:level :info
+                             :key   :composer.commands/status-unban
+                             :args  [target]}]]]}))
+
+      "poll"
+      {:fx [[:dispatch [:ui/open-modal :create-poll {:room-id room-id}]]]}
+
+      "search"
+      {:fx (cond-> [[:dispatch [:container/set-side-panel :search]]]
+             (not (str/blank? args))
+             (conj [:dispatch [:room/execute-search room-id args]]))}
+
+      "pins"
+      (let [cur (:side-panel db)]
+        {:fx (cond-> [[:dispatch [:container/set-side-panel (if (= cur :pins) nil :pins)]]]
+               (not= cur :pins)
+               (conj [:dispatch [:room/fetch-pins room-id]]))})
+
+      "members"
+      (let [cur (:side-panel db)]
+        {:fx [[:dispatch [:container/set-side-panel (if (= cur :members) nil :members)]]]})
+
+      "settings"
+      (if (= (str/lower-case args) "app")
+        {:fx [[:dispatch [:settings/open :my-account]]]}
+        {:fx [[:dispatch [:rooms/open-settings room-id]]]})
+
+      "help"
+      {:fx [[:dispatch [:ui/open-modal :slash-help {}]]]}
+
+      (notice :error :composer.commands/unknown command))))
+
+(defn ^:ui slash-help-modal-content [_]
+  (let [close-fn #(re-frame/dispatch [:ui/close-modal])
+        tr       @(re-frame/subscribe [:i18n/tr])]
+    [:div.slash-help-modal
+     [:div.slash-help-header
+      [:h3 (tr [:composer.commands/help-title])]
+      [:button.slash-help-close
+       {:type "button" :on-click close-fn :title (tr [:composer.commands/help-close])}
+       [icons/exit]]]
+     [:p.slash-help-hint
+      (tr [:composer.commands/help-hint-prefix])
+      [:code "/"]
+      (tr [:composer.commands/help-hint-middle])
+      [:code "//"]
+      (tr [:composer.commands/help-hint-suffix])]
+     [:div.slash-help-list
+      (for [{:keys [name args-key desc-key aliases]} slash-commands]
+        ^{:key name}
+        [:div.slash-help-row
+         [:div.slash-help-cmd
+          [:code (str "/" name (when args-key (str " " (tr [args-key]))))]
+          (when (seq aliases)
+            [:span.slash-help-aliases
+             (str " (" (str/join ", " (map #(str "/" %) aliases)) ")")])]
+         (when desc-key
+           [:span.slash-help-desc (tr [desc-key])])])]]))
+
+(defmethod modal-component :slash-help [_]
+  slash-help-modal-content)
+
+(defn- build-reply-context [raw-context]
+  (when (= (:mode raw-context) :reply)
+    {:mode        :reply
+     :target      (get-in raw-context [:target :id])
+     :msg-tag     (get-in raw-context [:target :content :inner :tag])
+     :ffi-content (get-in raw-context [:target :content :inner :content :ffi-content])}))
 
 (re-frame/reg-event-fx
  :composer/submit
@@ -63,73 +331,139 @@
                                    {:text payload-or-text :html maybe-html :ast nil})
          attachments    (get-in db [:drafts room-id :attachments])
          raw-context    (get-in db [:input-context room-id])
-         worker-context (when raw-context
-                          {:mode        (:mode raw-context)
-                           :target      (get-in raw-context [:target :id])
-                           :msg-tag     (get-in raw-context [:target :content :inner :tag])
-                           :ffi-content (get-in raw-context [:target :content :inner :content :ffi-content])})
-         pool           @state/!engine-pool]
-     (if (seq attachments)
-       (go
-         (try
-           (let [worker-atts
-                 (<p! (p/all (map (fn [att]
-                                    (p/let [f  (get-file (:file-id att))
-                                            ab (if f (file->array-buffer f) (js/Promise.resolve (js/ArrayBuffer. 0)))]
-                                      (assoc att :buffer ab)))
-                                  attachments)))]
-             (doseq [att attachments]
-               (when (:preview-url att) (js/URL.revokeObjectURL (:preview-url att)))
-               (when (:file-id att) (unregister-file! (:file-id att))))
-             (let [res (<! (main/do-with-pool! pool {:handler   :send-attachments
-                                                     :arguments {:room-id     room-id
-                                                                 :attachments worker-atts
-                                                                 :text        text
-                                                                 :html        html
-                                                                 :ast         ast}}))]
+         reply-ctx?     (= (:mode raw-context) :reply)
+         worker-context (build-reply-context raw-context)
+         pool           @state/!engine-pool
+         parsed-cmd     (when (and (empty? attachments)
+                                   (not (str/includes? (str html) "<img")))
+                          (parse-slash-command text))
+         cmd-outcome    (cond
+                          (:escape? parsed-cmd)
+                          {:send {:text (:text parsed-cmd)
+                                  :html (text->p-html (:text parsed-cmd))}}
+
+                          (:command parsed-cmd)
+                          (execute-slash-command db room-id parsed-cmd)
+
+                          :else nil)
+         send-text      (if (:send cmd-outcome) (:text (:send cmd-outcome)) text)
+         send-html      (if (:send cmd-outcome) (:html (:send cmd-outcome)) html)
+         send-ast       (if (:send cmd-outcome) nil ast)
+         send-msgtype   (get-in cmd-outcome [:send :msgtype])
+         should-send?   (or (seq attachments)
+                            (nil? cmd-outcome)
+                            (some? (:send cmd-outcome)))]
+     (when should-send?
+       (if (seq attachments)
+         (go
+           (try
+             (let [total (count attachments)]
+               (if (and (> total 1) (platform/ios-runtime?))
+                 (loop [idx 0]
+                   (when (< idx total)
+                     (let [att   (nth attachments idx)
+                           last? (= idx (dec total))
+                           f     (get-file (:file-id att))
+                           ab    (if f
+                                   (<p! (file->array-buffer f))
+                                   (js/ArrayBuffer. 0))]
+                       (revoke-object-url! (:preview-url att))
+                       (when (:file-id att) (unregister-file! (:file-id att)))
+                       (let [args (cond-> {:room-id     room-id
+                                           :attachments [(assoc att :buffer ab)]
+                                           :text        (if last? send-text "")
+                                           :html        (if last? send-html "")
+                                           :ast         (when last? send-ast)}
+                                    (and last? worker-context) (assoc :context worker-context))
+                             res  (<! (main/do-with-pool! pool {:handler   :send-attachments
+                                                                :arguments args}))]
+                         (when-not (#{"success" :success} (:status res))
+                           (log/error "Failed to send attachment:" (:msg res))))
+                       (recur (inc idx)))))
+                 (let [worker-atts (loop [remaining attachments
+                                          acc       []]
+                                     (if-let [att (first remaining)]
+                                       (let [f  (get-file (:file-id att))
+                                             ab (if f
+                                                  (<p! (file->array-buffer f))
+                                                  (js/ArrayBuffer. 0))]
+                                         (revoke-object-url! (:preview-url att))
+                                         (when (:file-id att) (unregister-file! (:file-id att)))
+                                         (recur (rest remaining)
+                                                (conj acc (assoc att :buffer ab))))
+                                       acc))
+                       args        (cond-> {:room-id     room-id
+                                            :attachments worker-atts
+                                            :text        send-text
+                                            :html        send-html
+                                            :ast         send-ast}
+                                     worker-context (assoc :context worker-context))
+                       res         (<! (main/do-with-pool! pool {:handler   :send-attachments
+                                                                 :arguments args}))]
+                   (when-not (#{"success" :success} (:status res))
+                     (log/error "Failed to send attachments:" (:msg res))))))
+             (catch :default e
+               (log/error "Exception in send-attachments Go block:" (str e)))))
+         (go
+           (try
+             (log/info "Dispatching standard :send-message to worker...")
+             (let [args (cond-> {:room-id room-id
+                                 :text    send-text
+                                 :html    send-html
+                                 :ast     send-ast
+                                 :context worker-context}
+                          send-msgtype (assoc :msgtype send-msgtype))
+                   res  (<! (main/do-with-pool! pool {:handler   :send-message
+                                                      :arguments args}))]
+               (log/info "Worker :send-message returned:" res)
                (when-not (#{"success" :success} (:status res))
-                 (log/error "Failed to send attachments:" (:msg res)))))
-           (catch :default e
-             (log/error "Exception in send-attachments Go block:" (str e)))))
-       (go
-         (try
-           (log/info "Dispatching standard :send-message to worker...")
-           (let [res (<! (main/do-with-pool! pool {:handler   :send-message
-                                                   :arguments {:room-id room-id
-                                                               :text    text
-                                                               :html    html
-                                                               :ast     ast
-                                                               :context worker-context}}))]
-             (log/info "Worker :send-message returned:" res)
-             (when-not (#{"success" :success} (:status res))
-               (log/error "Failed to send message:" (:msg res))))
-           (catch :default e
-             (log/error "Exception in send-message Go block:" (str e))))))
-     {:db       (-> db
-                    (assoc-in [:composer room-id] {:text "" :html "" :loaded-text "" :uploading? false})
-                    (assoc-in [:drafts room-id :attachments] [])
-                    (update :input-context dissoc room-id))
-      :dispatch [:composer/persist-draft room-id]})))
+                 (log/error "Failed to send message:" (:msg res))))
+             (catch :default e
+               (log/error "Exception in send-message Go block:" (str e)))))))
+     (when-let [old-timer (get-in db [:composer room-id :save-timer])]
+       (js/clearTimeout old-timer))
+     (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))
+           extra-fx (vec (or (:fx cmd-outcome) []))]
+       {:db (cond-> (-> db
+                        (assoc-in [:composer room-id] {:text            ""
+                                                       :html            ""
+                                                       :loaded-text     nil
+                                                       :uploading?      false
+                                                       :draft-hydrated? true
+                                                       :edit-seq        next-seq})
+                        (assoc-in [:drafts room-id :attachments] []))
+              reply-ctx?
+              (update :input-context dissoc room-id)
+
+              (and should-send? (not (:fx cmd-outcome)))
+              (update :composer/notice dissoc room-id))
+        :fx (into [[:dispatch [:composer/persist-draft room-id]]] extra-fx)}))))
 
 (re-frame/reg-event-fx
  :sdk/send-sticker
- (fn [_ [_ room-id sticker-or-uri & [alt-text info]]]
+ (fn [{:keys [db]} [_ room-id sticker-or-uri & [alt-text info]]]
    (let [{:keys [id uri shortcode] :as sticker-map}
          (if (map? sticker-or-uri)
            sticker-or-uri
-           {:uri sticker-or-uri :shortcode alt-text :info info})]
+           {:uri sticker-or-uri :shortcode alt-text :info info})
+         raw-ctx   (get-in db [:input-context room-id])
+         reply-ctx (build-reply-context raw-ctx)]
      (go
-       (let [res (<! (mesh/do-with-thread! :engine-pool
-                                           {:handler   :send-raw-sticker
-                                            :arguments {:room-id    room-id
-                                                        :sticker-id id
-                                                        :uri        uri
-                                                        :alt-text   shortcode
-                                                        :info       (:info sticker-map)}}))]
+       (let [args (cond-> {:room-id    room-id
+                           :sticker-id id
+                           :uri        uri
+                           :alt-text   shortcode
+                           :info       (:info sticker-map)}
+                    reply-ctx (assoc :context reply-ctx))
+             res  (<! (mesh/do-with-thread! :engine-pool
+                                            {:handler   :send-raw-sticker
+                                             :arguments args}))]
          (if (= (:status res) "success")
            (log/info "Sticker sent!")
-           (log/error "Sticker failed:" (:msg res))))))
-   {}))
+           (log/error "Sticker failed:" (:msg res)))))
+     (if reply-ctx
+       {:db (update db :input-context dissoc room-id)}
+       {}))))
 
 (re-frame/reg-event-db
  :sdk/upload-complete
@@ -148,12 +482,22 @@
      (and (= (:mode ctx) :edit)
           (= (-> ctx :target :id) event-id)))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :input/set-context
- (fn [db [_ room-id mode target-item]]
-   (when (= mode :edit)
-     (request-item-redraw! room-id (:id target-item)))
-   (assoc-in db [:input-context room-id] {:mode mode :target target-item})))
+ (fn [{:keys [db]} [_ room-id mode target-item]]
+   (let [prev-ctx (get-in db [:input-context room-id])
+         prev-id  (when (= (:mode prev-ctx) :edit)
+                    (get-in prev-ctx [:target :id]))
+         next-id  (:id target-item)
+         mobile?  (get-in db [:ui :mobile?])]
+     (when (and prev-id (not= prev-id next-id))
+       (request-item-redraw! room-id prev-id))
+     (when (= mode :edit)
+       (request-item-redraw! room-id next-id))
+     (cond-> {:db (assoc-in db [:input-context room-id] {:mode mode :target target-item})}
+       (= mode :reply)
+       (assoc :input/focus-composer {:focus?    (not mobile?)
+                                     :draft-key room-id})))))
 
 (re-frame/reg-event-db
  :input/clear-context
@@ -170,72 +514,577 @@
 
 (re-frame/reg-fx
  :input/focus-composer
- (fn [should-focus?]
-   (when should-focus?
-     (js/setTimeout
-      (fn []
-        (when-let [composer (.querySelector js/document ".ProseMirror")]
-          (.focus composer)))
-      50))))
+ (fn [arg]
+   (let [focus?    (if (map? arg) (:focus? arg) (boolean arg))
+         draft-key (when (map? arg) (:draft-key arg))
+         thread?   (and (string? draft-key) (str/starts-with? draft-key "thread::"))]
+     (when focus?
+       (js/setTimeout
+        (fn []
+          (when-let [composer (or (when thread?
+                                    (.querySelector js/document ".thread-composer-outer .ProseMirror"))
+                                  (.querySelector js/document ".timeline-input-outer .ProseMirror")
+                                  (.querySelector js/document ".ProseMirror"))]
+            (.focus composer)))
+        50)))))
 
 (defn inline-emoji-open? []
   (= (:id @!active-popover) :inline-emoji))
 
+(defn inline-emoji-mode []
+  (when (inline-emoji-open?)
+    (or (get-in @!active-popover [:props :default-mode]) :emoji)))
+
+(defonce ^:private !mobile-kb-state
+  (r/atom {:visible?          false
+           :viewport-shrunk?  false
+           :height            0
+           :last-height       nil
+           :handoff           nil
+           :handoff-mode      nil
+           :handoff-timer     nil
+           :height-locked?    false
+           :unlock-timer      nil
+           :tracker-ready?    false}))
+
+(defn- use-css-kb-inset? []
+  (and (platform/capacitor-mobile?)
+       (not (:native-resize-detected? @!mobile-kb-state))))
+
+(defn- set-mobile-keyboard-inset! [px]
+  (when (exists? js/document)
+    (when-let [doc-el (.-documentElement js/document)]
+      (let [v (if (and (number? px) (pos? px)) (Math/round px) 0)]
+        (.setProperty (.-style doc-el) "--mobile-keyboard-inset" (str v "px"))
+        (if (pos? v)
+          (.add (.-classList doc-el) "has-native-kb")
+          (.remove (.-classList doc-el) "has-native-kb"))))))
+
+(defn- clear-kb-handoff! []
+  (when-let [t (:handoff-timer @!mobile-kb-state)]
+    (js/clearTimeout t))
+  (swap! !mobile-kb-state assoc
+         :handoff       nil
+         :handoff-mode  nil
+         :handoff-timer nil))
+
+(defn- arm-to-keyboard-handoff! [& [timeout-ms]]
+  (clear-kb-handoff!)
+  (let [css-inset? (use-css-kb-inset?)
+        ms         (or timeout-ms (if css-inset? 1200 450))
+        timer      (js/setTimeout
+                    (fn []
+                      (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+                        (when css-inset?
+                          (when-let [h (:height @!mobile-kb-state)]
+                            (when (> h 100)
+                              (set-mobile-keyboard-inset! h))))
+                        (clear-kb-handoff!)
+                        (when (exists? js/document)
+                          (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+                            (set! (.. sheet -style -display) "none")))
+                        (when (inline-emoji-open?)
+                          (re-frame/dispatch-sync [:ui/close-popover])
+                          (r/flush))))
+                    ms)]
+    (swap! !mobile-kb-state assoc
+           :handoff       :to-keyboard
+           :handoff-timer timer)))
+
+(defn- unlock-app-root-height! []
+  (when-let [t (:unlock-timer @!mobile-kb-state)]
+    (js/clearTimeout t))
+  (when (:height-locked? @!mobile-kb-state)
+    (swap! !mobile-kb-state assoc
+           :height-locked? false
+           :unlock-timer   nil)
+    (when (exists? js/document)
+      (when-let [app-root (.querySelector js/document ".app-root")]
+        (set! (.. app-root -style -height) "")))))
+
+(defn- lock-app-root-height! [target-h & [timeout-ms]]
+  (when (and (exists? js/document) (number? target-h) (> target-h 200))
+    (when-let [app-root (.querySelector js/document ".app-root")]
+      (when-let [prev-t (:unlock-timer @!mobile-kb-state)]
+        (js/clearTimeout prev-t))
+      (set! (.. app-root -style -height) (str (Math/round target-h) "px"))
+      (let [timer (js/setTimeout #(unlock-app-root-height!) (or timeout-ms 900))]
+        (swap! !mobile-kb-state assoc
+               :height-locked? true
+               :unlock-timer   timer)))))
+
+(defn- current-viewport-height []
+  (let [doc-h (when (and (exists? js/document) (.-body js/document))
+                (.-clientHeight (.-body js/document)))
+        win-h (when (exists? js/window)
+                (.-innerHeight js/window))
+        vv-h  (when (and (exists? js/window) (.-visualViewport js/window))
+                (.-height (.-visualViewport js/window)))]
+    (or (when (and (number? doc-h) (pos? doc-h)
+                   (number? win-h) (< doc-h (- win-h 50)))
+          doc-h)
+        (when (and (number? win-h) (pos? win-h)) win-h)
+        (when (and (number? doc-h) (pos? doc-h)) doc-h)
+        (when (and (number? vv-h) (pos? vv-h)) vv-h)
+        0)))
+
+(defn- finish-to-keyboard-handoff! []
+  (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+    (clear-kb-handoff!)
+    (when (exists? js/document)
+      (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+        (set! (.. sheet -style -display) "none")))
+    (when (inline-emoji-open?)
+      (re-frame/dispatch-sync [:ui/close-popover])
+      (r/flush))))
+
+(defn- lock-and-close-emoji-for-keyboard!
+  "On iOS ResizeNative, keyboardDidShow fires when the opaque native keyboard
+   already covers the bottom of the screen, ~200ms BEFORE Capacitor shrinks the
+   WKWebView frame. Lock .app-root to the exact height above the emoji sheet
+   and unmount the sheet synchronously in one frame so that when WKWebView
+   later shrinks its frame, the emoji sheet is already gone and nothing jumps."
+  []
+  (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+    (clear-kb-handoff!)
+    (let [app-root (when (exists? js/document)
+                     (.querySelector js/document ".app-root"))
+          sheet    (when (exists? js/document)
+                     (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet"))]
+      (when (and app-root sheet (not (:viewport-shrunk? @!mobile-kb-state)))
+        (let [root-h   (.-clientHeight app-root)
+              sheet-h  (.-offsetHeight sheet)
+              margin-t (or (when (exists? js/getComputedStyle)
+                             (let [v (js/parseFloat (.-marginTop (js/getComputedStyle sheet)))]
+                               (when-not (js/isNaN v) v)))
+                           0)
+              locked-h (Math/round (- root-h (+ sheet-h margin-t)))]
+          (lock-app-root-height! locked-h 900)))
+      (when sheet
+        (set! (.. sheet -style -display) "none"))
+      (when (inline-emoji-open?)
+        (re-frame/dispatch-sync [:ui/close-popover])
+        (r/flush)))))
+
+(defn- finish-to-emoji-handoff! []
+  (when (= (:handoff @!mobile-kb-state) :to-emoji)
+    (let [mode (or (:handoff-mode @!mobile-kb-state) :emoji)]
+      (clear-kb-handoff!)
+      (unlock-app-root-height!)
+      (re-frame/dispatch-sync [:ui/open-popover :inline-emoji
+                               {:default-mode   mode
+                                :from-keyboard? true}])
+      (r/flush))))
+
+(defn- on-mobile-kb-event! [visible? raw-height & [authoritative?]]
+  (let [h (when (and (number? raw-height) (> raw-height 100))
+            (Math/round raw-height))]
+    (swap! !mobile-kb-state
+           (fn [cur]
+             (cond-> (assoc cur
+                            :visible? (boolean visible?)
+                            :height   (if visible? (or h (:height cur) 0) 0))
+               (and visible? h (or authoritative? (nil? (:last-height cur))))
+               (assoc :last-height h))))))
+
+(defn ensure-mobile-keyboard-tracker! []
+  (when-not (:tracker-ready? @!mobile-kb-state)
+    (swap! !mobile-kb-state assoc :tracker-ready? true)
+    (let [native?  (platform/native-platform?)
+          ios?     (platform/ios-native?)
+          !full-h  (atom (current-viewport-height))
+          !prev-h  (atom @!full-h)
+          on-frame-resize!
+          (fn []
+            (when-not ios?
+              (let [cur-h  (current-viewport-height)
+                    prev-h @!prev-h]
+                (when (> cur-h @!full-h)
+                  (reset! !full-h cur-h))
+                (reset! !prev-h cur-h)
+                (let [diff    (- @!full-h cur-h)
+                      shrank? (and (> diff 100) (< cur-h (- prev-h 40)))
+                      grew?   (and (< diff 80) (> cur-h (+ prev-h 40)))]
+                  (cond
+                    shrank?
+                    (do
+                      (swap! !mobile-kb-state assoc
+                             :viewport-shrunk?        true
+                             :native-resize-detected? true)
+                      (set-mobile-keyboard-inset! 0)
+                      (on-mobile-kb-event! true diff true)
+                      (unlock-app-root-height!)
+                      (finish-to-keyboard-handoff!))
+
+                    grew?
+                    (do
+                      (swap! !mobile-kb-state assoc :viewport-shrunk? false)
+                      (on-mobile-kb-event! false 0 true)
+                      (if (= (:handoff @!mobile-kb-state) :to-emoji)
+                        (finish-to-emoji-handoff!)
+                        (unlock-app-root-height!))))))))]
+      (when (and native? (exists? Keyboard) (fn? (.-addListener Keyboard)))
+        (try
+          (.addListener Keyboard "keyboardWillShow"
+                        (fn [^js info]
+                          (let [raw-h (some-> info .-keyboardHeight)
+                                eff-h (if (and (number? raw-h) (> raw-h 100))
+                                        (Math/round raw-h)
+                                        0)]
+                            (if (use-css-kb-inset?)
+                              (if (= (:handoff @!mobile-kb-state) :to-keyboard)
+                                (do
+                                  (arm-to-keyboard-handoff! 850)
+                                  (swap! !mobile-kb-state assoc
+                                         :visible? true
+                                         :height   eff-h))
+                                (do
+                                  (on-mobile-kb-event! true eff-h true)
+                                  (set-mobile-keyboard-inset! eff-h)))
+                              (on-mobile-kb-event! true eff-h)))))
+          (.addListener Keyboard "keyboardDidShow"
+                        (fn [^js info]
+                          (let [raw-h (some-> info .-keyboardHeight)
+                                eff-h (if (and (number? raw-h) (> raw-h 100))
+                                        (Math/round raw-h)
+                                        0)]
+                            (if (use-css-kb-inset?)
+                              (do
+                                (on-mobile-kb-event! true eff-h true)
+                                (if (= (:handoff @!mobile-kb-state) :to-keyboard)
+                                  (do
+                                    (clear-kb-handoff!)
+                                    (set-mobile-keyboard-inset! eff-h)
+                                    (when (exists? js/document)
+                                      (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+                                        (set! (.. sheet -style -display) "none")))
+                                    (when (inline-emoji-open?)
+                                      (re-frame/dispatch-sync [:ui/close-popover])
+                                      (r/flush)))
+                                  (set-mobile-keyboard-inset! eff-h)))
+                              (do
+                                (on-mobile-kb-event! true eff-h)
+                                (finish-to-keyboard-handoff!))))))
+          (.addListener Keyboard "keyboardWillHide"
+                        (fn []
+                          (on-mobile-kb-event! false 0)
+                          (if (use-css-kb-inset?)
+                            (set-mobile-keyboard-inset! 0)
+                            (when-not (= (:handoff @!mobile-kb-state) :to-emoji)
+                              (unlock-app-root-height!)))))
+          (.addListener Keyboard "keyboardDidHide"
+                        (fn []
+                          (on-mobile-kb-event! false 0)
+                          (if (use-css-kb-inset?)
+                            (do
+                              (set-mobile-keyboard-inset! 0)
+                              (when (= (:handoff @!mobile-kb-state) :to-emoji)
+                                (clear-kb-handoff!)))
+                            (if (= (:handoff @!mobile-kb-state) :to-emoji)
+                              (finish-to-emoji-handoff!)
+                              (unlock-app-root-height!)))))
+          (catch :default _ nil)))
+      (when-not ios?
+        (when (exists? js/window)
+          (.addEventListener js/window "resize" on-frame-resize!)
+          (when-let [vv (.-visualViewport js/window)]
+            (.addEventListener vv "resize" on-frame-resize!)))
+        (when (and (exists? js/ResizeObserver)
+                   (exists? js/document)
+                   (.-body js/document))
+          (try
+            (let [obs (js/ResizeObserver. (fn [_] (on-frame-resize!)))]
+              (.observe obs (.-body js/document))
+              (when-let [doc-el (.-documentElement js/document)]
+                (.observe obs doc-el)))
+            (catch :default _ nil)))))))
+
+(defn- hide-mobile-keyboard! [ed]
+  (try
+    (when (and ed (.-commands ed) (fn? (.. ed -commands -blur)))
+      (.blur (.-commands ed)))
+    (catch :default _ nil))
+  (try
+    (when-let [active-el (and (exists? js/document) (.-activeElement js/document))]
+      (when (fn? (.-blur active-el))
+        (.blur active-el)))
+    (catch :default _ nil))
+  (try
+    (when (and (platform/native-platform?)
+               (exists? Keyboard)
+               (fn? (.-hide Keyboard)))
+      (-> (.hide Keyboard)
+          (.catch (fn [_] nil))))
+    (catch :default _ nil)))
+
+(defn- show-mobile-keyboard! [ed]
+  (try
+    (when-let [dom-el (or (and ed (.-view ed) (.. ed -view -dom))
+                          (when (exists? js/document)
+                            (.querySelector js/document ".timeline-input-outer .ProseMirror")))]
+      (when (fn? (.-focus dom-el))
+        (.focus dom-el)))
+    (catch :default _ nil))
+  (try
+    (when (and ed (.-commands ed) (fn? (.. ed -commands -focus)))
+      (.focus (.-commands ed) "end"))
+    (catch :default _ nil))
+  (try
+    (when (and (platform/native-platform?)
+               (not (platform/ios-native?))
+               (exists? Keyboard)
+               (fn? (.-show Keyboard)))
+      (-> (.show Keyboard)
+          (.catch (fn [_] nil))))
+    (catch :default _ nil)))
+
+(defn- handoff-emoji-to-keyboard! [ed]
+  (let [css-inset? (use-css-kb-inset?)]
+    (if (and (not css-inset?) (:viewport-shrunk? @!mobile-kb-state))
+      (do
+        (clear-kb-handoff!)
+        (show-mobile-keyboard! ed)
+        (when (inline-emoji-open?)
+          (re-frame/dispatch-sync [:ui/close-popover])))
+      (do
+        (arm-to-keyboard-handoff! (if css-inset? 1200 450))
+        (show-mobile-keyboard! ed)))))
+
+(defn- handoff-keyboard-to-emoji! [ed mode]
+  (clear-kb-handoff!)
+  (let [css-inset?  (use-css-kb-inset?)
+        active-el   (when (exists? js/document) (.-activeElement js/document))
+        ed-focused? (or (:visible? @!mobile-kb-state)
+                        (and active-el
+                             (some-> (.-classList active-el) (.contains "ProseMirror"))))]
+    (cond
+      (and css-inset? ed-focused?)
+      (let [timer (js/setTimeout #(clear-kb-handoff!) 650)]
+        (swap! !mobile-kb-state assoc
+               :handoff       :to-emoji
+               :handoff-mode  mode
+               :handoff-timer timer)
+        (set-mobile-keyboard-inset! 0)
+        (re-frame/dispatch-sync [:ui/open-popover :inline-emoji
+                                 {:default-mode   mode
+                                  :from-keyboard? true}])
+        (r/flush)
+        (hide-mobile-keyboard! ed))
+
+      ed-focused?
+      (let [app-root (when (exists? js/document)
+                       (.querySelector js/document ".app-root"))
+            _        (when app-root
+                       (lock-app-root-height! (.-clientHeight app-root) 600))
+            timer    (js/setTimeout
+                      (fn []
+                        (finish-to-emoji-handoff!))
+                      220)]
+        (swap! !mobile-kb-state assoc
+               :handoff       :to-emoji
+               :handoff-mode  mode
+               :handoff-timer timer)
+        (hide-mobile-keyboard! ed))
+
+      :else
+      (do
+        (hide-mobile-keyboard! ed)
+        (re-frame/dispatch [:ui/open-popover :inline-emoji
+                            {:default-mode   mode
+                             :from-keyboard? false}])))))
+
 (defn ^:react inline-editor [item active-id]
-  (r/with-let [!editor (r/atom nil)]
+  (r/with-let [!editor   (r/atom nil)
+               !room-ref (atom active-id)
+               on-esc    (fn [^js e]
+                           (when (and (= (.-key e) "Escape")
+                                      (not (suggestion-active?)))
+                             (.preventDefault e)
+                             (.stopPropagation e)
+                             (re-frame/dispatch [:input/clear-context @!room-ref])))
+               _         (when (exists? js/window)
+                           (.addEventListener js/window "keydown" on-esc true))]
     (fn [item active-id]
-      (let [m-content    (get-in item [:content :inner :content])
+      (reset! !room-ref active-id)
+      (let [tr           @(re-frame/subscribe [:i18n/tr])
+            m-content    (get-in item [:content :inner :content])
             raw-html     (:html m-content)
+            orig-body    (str (or (:body m-content) ""))
             initial-text (if (seq raw-html)
                            (prepare-html-for-editor raw-html)
-                           (or (:body m-content) ""))
+                           orig-body)
+            edit-key     (str active-id ":edit:" (:id item))
+            cancel-edit! (fn []
+                           (re-frame/dispatch [:input/clear-context active-id]))
             save-edit!   (fn []
                            (when-let [ed @!editor]
-                             (let [{:keys [text html]} (extract-editor-payload ed)]
-                               (re-frame/dispatch [:msg/edit active-id item text html])
-                               (re-frame/dispatch [:input/clear-context active-id]))))]
+                             (let [{:keys [text html]} (extract-editor-payload ed)
+                                   trimmed             (str/trim (str text))
+                                   has-media?          (str/includes? (str html) "<img")
+                                   unchanged?          (and (not has-media?)
+                                                            (= trimmed (str/trim orig-body))
+                                                            (or (str/blank? (str raw-html))
+                                                                (= html raw-html)))]
+                               (cond
+                                 (and (str/blank? trimmed) (not has-media?))
+                                 false
+
+                                 unchanged?
+                                 (do
+                                   (cancel-edit!)
+                                   true)
+
+                                 :else
+                                 (do
+                                   (re-frame/dispatch [:msg/edit active-id item text html])
+                                   (re-frame/dispatch [:input/clear-context active-id])
+                                   true)))))]
         [:div.inline-editor-wrapper
+         {:on-click    #(.stopPropagation %)
+          :on-key-down (fn [^js e]
+                         (when (and (= (.-key e) "Escape")
+                                    (not (suggestion-active?)))
+                           (.preventDefault e)
+                           (.stopPropagation e)
+                           (cancel-edit!)))}
          [:div.inline-editor-box
           [:> tiptap-component
-           #js {:activeId      active-id
+           #js {:activeId      edit-key
+                :key           edit-key
+                :enterSubmits  true
                 :loadedText    initial-text
-                :onEditorReady #(reset! !editor %)
+                :onEditorReady (fn [ed]
+                                 (reset! !editor ed)
+                                 (when ed
+                                   (js/requestAnimationFrame
+                                    (fn []
+                                      (try
+                                        (.commands.focus ed "end")
+                                        (catch :default _ nil))))))
                 :onSend        (fn [_ _] (save-edit!))}]]
-         [:div.inline-editor-hint
-          "escape to "
-          [:span.link-btn {:on-click #(re-frame/dispatch [:input/clear-context active-id])} "cancel"]
-          " \u2022 enter to "
-          [:span.link-btn {:on-click save-edit!} "save"]]]))))
+         [:div.inline-editor-footer
+          [:div.inline-editor-hints
+           [:kbd.inline-editor-kbd (tr [:composer.edit/esc-key])]
+           [:span (tr [:composer.edit/to-cancel])]
+           [:span.inline-editor-sep "·"]
+           [:kbd.inline-editor-kbd (tr [:composer.edit/enter-key])]
+           [:span (tr [:composer.edit/to-save])]]
+          [:div.inline-editor-actions
+           [:button.inline-editor-btn.is-cancel
+            {:type     "button"
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (cancel-edit!))}
+            (tr [:composer.edit/cancel])]
+           [:button.inline-editor-btn.is-save
+            {:type     "button"
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (save-edit!))}
+            [icons/check {:width "13px" :height "13px"}]
+            [:span (tr [:composer.edit/save])]]]]]))
+    (finally
+      (when (exists? js/window)
+        (.removeEventListener js/window "keydown" on-esc true)))))
 
-(defn ^:ui timeline-send-button [{:keys [submit-message! active-id]}]
+(defn ^:ui timeline-send-button [{:keys [submit-message! active-id class]}]
   [:button.timeline-send-btn
-   {:on-click (fn [e]
-                (.preventDefault e)
-                (.stopPropagation e)
-                (submit-message!))}
+   {:type          "button"
+    :class         class
+    :on-mouse-down #(.preventDefault %)
+    :on-click      (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (submit-message!))}
    [plugins/plugin-slot :composer-send {:room-id active-id}]
    [icons/send]])
 
-(defn ^:ui timeline-emoji-button [{:keys [on-click room-id]}]
+(defn ^:ui timeline-emoji-button [{:keys [on-click active? room-id title]}]
   [:button.timeline-emoji-btn
-   {:on-click (fn [e]
+   {:type     "button"
+    :class    (when active? "is-active")
+    :title    title
+    :on-click (fn [e]
                 (.stopPropagation e)
                 (when on-click (on-click)))}
    [icons/smiley]
    [plugins/plugin-slot :composer-emojis {:room-id room-id}]])
 
+(defn ^:ui timeline-sticker-button [{:keys [on-click active? title]}]
+  [:button.timeline-sticker-btn
+   {:type     "button"
+    :class    (when active? "is-active")
+    :title    title
+    :on-click (fn [e]
+                (.stopPropagation e)
+                (when on-click (on-click)))}
+   [icons/sticker]])
+
 (defn ^:ui message-input []
-  (r/with-let [!editor      (r/atom nil)
-               !sug-command (r/atom nil)]
+  (r/with-let [!editor              (r/atom nil)
+               !sug-command         (r/atom nil)
+               !recording-voice?    (r/atom false)
+               !voice-hold-gesture  (r/atom nil)
+               !mobile-actions-open? (r/atom false)
+               !composer-tapping?   (atom false)
+               !rec-room            (r/atom nil)]
     (fn []
       (let [active-id       @(re-frame/subscribe [:rooms/active-id])
+            _               (when (not= @!rec-room active-id)
+                              (reset! !rec-room active-id)
+                              (when @!mobile-actions-open?
+                                (reset! !mobile-actions-open? false))
+                              (when @!recording-voice?
+                                (reset! !voice-hold-gesture nil)
+                                (reset! !recording-voice? false)))
+            is-mobile?      @(re-frame/subscribe [:ui/mobile?])
+            recording?      @!recording-voice?
+            tray-open?      @!mobile-actions-open?
             uploading?      @(re-frame/subscribe [:input/uploading?])
             attachments     @(re-frame/subscribe [:composer/attachments active-id])
             loaded-text     @(re-frame/subscribe [:composer/loaded-text active-id])
             cached-html     @(re-frame/subscribe [:composer/cached-html active-id])
+            has-content?    @(re-frame/subscribe [:composer/has-content? active-id])
+            submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
             context         @(re-frame/subscribe [:input/context active-id])
+            cmd-notice      @(re-frame/subscribe [:composer/notice active-id])
             picker-open?    (inline-emoji-open?)
+            picker-mode     (inline-emoji-mode)
+            picker-from-kb? (boolean (get-in @!active-popover [:props :from-keyboard?]))
+            kb-state        @!mobile-kb-state
+            _               (when is-mobile? (ensure-mobile-keyboard-tracker!))
             tr              @(re-frame/subscribe [:i18n/tr])
+            toggle-picker!  (fn [mode]
+                              (reset! !mobile-actions-open? false)
+                              (if (and picker-open? (= picker-mode mode))
+                                (do
+                                  (clear-kb-handoff!)
+                                  (re-frame/dispatch [:ui/close-popover]))
+                                (if is-mobile?
+                                  (if picker-open?
+                                    (re-frame/dispatch [:ui/open-popover :inline-emoji
+                                                        {:default-mode   mode
+                                                         :from-keyboard? true}])
+                                    (handoff-keyboard-to-emoji! @!editor mode))
+                                  (re-frame/dispatch [:ui/open-popover :inline-emoji
+                                                      {:default-mode mode}]))))
+            on-pick-files!  (fn [e]
+                              (let [files      (.. e -target -files)
+                                    file-array (reduce (fn [acc i]
+                                                         (if-let [f (aget files i)]
+                                                           (conj acc f)
+                                                           acc))
+                                                       []
+                                                       (range (or (.-length files) 0)))]
+                                (reset! !mobile-actions-open? false)
+                                (when (seq file-array)
+                                  (handle-files! active-id file-array)
+                                  (when-not is-mobile?
+                                    (when-let [ed @!editor]
+                                      (js/requestAnimationFrame #(.commands.focus ed)))))
+                                (set! (.-value (.-target e)) "")))
             submit-message! (fn []
                               (when-let [ed @!editor]
                                 (let [{:keys [text html] :as payload} (extract-editor-payload ed)
@@ -244,106 +1093,266 @@
                                                     (seq attachments))]
                                   (if can-send?
                                     (do
+                                      (reset! !mobile-actions-open? false)
                                       (re-frame/dispatch [:composer/submit active-id payload])
                                       (-> ed .chain .clearContent .run)
                                       true)
-                                    false))))]
+                                    false))))
+            emoji-board-el  (when picker-open?
+                              [emoji-sticker-board
+                               {:inline?         true
+                                :default-mode    picker-mode
+                                :from-keyboard?  picker-from-kb?
+                                :sheet-height-px (:last-height kb-state)
+                                :on-tab-change   #(re-frame/dispatch
+                                                   [:ui/open-popover :inline-emoji
+                                                    {:default-mode   %
+                                                     :from-keyboard? true}])
+                                :on-close        (fn []
+                                                   (clear-kb-handoff!)
+                                                   (re-frame/dispatch [:ui/close-popover]))
+                                :on-send-sticker
+                                (fn [sticker-payload]
+                                  (re-frame/dispatch [:sdk/send-sticker active-id sticker-payload])
+                                  (re-frame/dispatch [:ui/close-popover]))
+                                :on-insert-native
+                                (fn [unicode-char]
+                                  (when-let [ed @!editor]
+                                    (if is-mobile?
+                                      (-> ed .chain (.insertContent unicode-char) .run)
+                                      (-> ed .chain .focus (.insertContent unicode-char) .run))))
+                                :on-insert-emoji
+                                (fn [emote-or-shortcode & [maybe-url]]
+                                  (when-let [ed @!editor]
+                                    (let [{:keys [id shortcode uri]} (if (map? emote-or-shortcode)
+                                                                       emote-or-shortcode
+                                                                       {:shortcode emote-or-shortcode :uri maybe-url})
+                                          clean-sc                   (clean-shortcode shortcode)
+                                          node                       #js {:type  "customEmote"
+                                                                          :attrs #js {:id        id
+                                                                                      :shortcode clean-sc
+                                                                                      :uri       uri
+                                                                                      :src       uri}}]
+                                      (if is-mobile?
+                                        (-> ed .chain (.insertContent node) .run)
+                                        (-> ed .chain .focus (.insertContent node) .run)))))}])
+            editor-node     [:> tiptap-component
+                             #js {:activeId          active-id
+                                  :key               (str "editor-" active-id)
+                                  :enterSubmits      submit-enter?
+                                  :loadedText        loaded-text
+                                  :cachedHtml        cached-html
+                                  :onChange          (fn [text html]
+                                                       (when @!mobile-actions-open?
+                                                         (reset! !mobile-actions-open? false))
+                                                       (re-frame/dispatch
+                                                        [:composer/on-change active-id text html]))
+                                  :onSend            (fn [_ _] (submit-message!))
+                                  :onFiles           (fn [files]
+                                                       (let [file-array
+                                                             (reduce
+                                                              (fn [acc i]
+                                                                (if-let [f (aget files i)]
+                                                                  (conj acc f)
+                                                                  acc))
+                                                              []
+                                                              (range (or (.-length files) 0)))]
+                                                         (when (seq file-array)
+                                                           (handle-files! active-id file-array))))
+                                  :placeholder       (tr [:composer/placeholder])
+                                  :onEditorReady     #(reset! !editor %)
+                                  :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
+                                  :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
         [:div.timeline-input-outer
+         {:class       (cond-> []
+                         is-mobile?                    (conj "is-mobile-composer")
+                         (and is-mobile? picker-open?) (conj "is-emoji-docked"))
+          :on-key-down (fn [^js e]
+                         (when (and (= (.-key e) "Escape")
+                                    (= (:mode context) :reply)
+                                    (not (suggestion-active?)))
+                           (.preventDefault e)
+                           (.stopPropagation e)
+                           (re-frame/dispatch [:input/clear-context active-id])))}
          [suggestion-menu]
-         (when picker-open?
-           [emoji-sticker-board
-            {:inline?  true
-             :on-close #(re-frame/dispatch [:ui/close-popover])
-             :on-send-sticker
-             (fn [sticker-payload]
-               (re-frame/dispatch [:sdk/send-sticker active-id sticker-payload])
-               (re-frame/dispatch [:ui/close-popover]))
-             :on-insert-native
-             (fn [unicode-char]
-               (when-let [ed @!editor]
-                 (-> ed .chain .focus (.insertContent unicode-char) .run)))
-             :on-insert-emoji
-             (fn [emote-or-shortcode & [maybe-url]]
-               (when-let [ed @!editor]
-                 (let [{:keys [id shortcode uri]} (if (map? emote-or-shortcode)
-                                                    emote-or-shortcode
-                                                    {:shortcode emote-or-shortcode :uri maybe-url})
-                       clean-sc                   (clean-shortcode shortcode)]
-                   (-> ed .chain .focus
-                       (.insertContent #js {:type  "customEmote"
-                                            :attrs #js {:id        id
-                                                        :shortcode clean-sc
-                                                        :uri       uri
-                                                        :src       uri}})
-                       .run))))}])
+         (when cmd-notice
+           (let [notice-msg (if (:key cmd-notice)
+                              (if (seq (:args cmd-notice))
+                                (tr [(:key cmd-notice)] (:args cmd-notice))
+                                (tr [(:key cmd-notice)]))
+                              (:text cmd-notice))]
+             [:div.composer-command-notice
+              {:class (str "is-" (name (or (:level cmd-notice) :info)))}
+              [:span.composer-command-notice-text notice-msg]
+              [:button.composer-command-notice-close
+               {:type     "button"
+                :title    (tr [:composer.commands/help-close])
+                :on-click #(re-frame/dispatch [:composer/clear-notice active-id])}
+               [icons/exit {:width "14px" :height "14px"}]]]))
+         (when (and picker-open? (not is-mobile?))
+           emoji-board-el)
          (when (and context (= (:mode context) :reply))
-           (let [sender-name (truncate-name (-> context :target :sender-name) 32)]
+           (let [sender-name (truncate-name (-> context :target :sender-name) 32)
+                 reply-body  (or (get-in context [:target :content :inner :content :body])
+                                 (get-in context [:target :content :inner :content :caption]))]
              [:div.input-context-banner
               [:div.context-info
-               [:span (tr [:composer/replying-to] [sender-name])]]
+               [:span.context-reply-icon [icons/reply {:width "14px" :height "14px"}]]
+               [:span.context-reply-label (tr [:composer/replying-to] [sender-name])]
+               (when (not (str/blank? (str reply-body)))
+                 [:span.context-reply-snippet (truncate-name (str reply-body) 64)])]
               [:button.context-cancel-btn
-               {:on-click #(re-frame/dispatch [:input/clear-context active-id])} [icons/exit]]]))
-         [:div.timeline-input-wrapper
-          (when (seq attachments)
-            [:div.composer-attachments
-             (doall
-              (map-indexed (fn [idx att]
-                             ^{:key (str "att-" idx)}
-                             [attachment-preview active-id att idx])
-                           attachments))])
-          (when uploading?
-            ^{:key "upload-indicator"}
-            [:div.upload-indicator
-             [:span.upload-text (tr [:composer/uploading])]
-             [:div.upload-progress-bar [:div.upload-progress-fill]]])
-          ^{:key "composer-input-row"}
-          [:div.timeline-input-row
-           [:label.timeline-upload-btn
-            {:title (tr [:composer/upload-tooltip])}
-            [:input {:type      "file"
-                     :multiple  true
-                     :style     {:display "none"}
-                     :on-change (fn [e]
-                                  (let [files      (.. e -target -files)
-                                        file-array (reduce (fn [acc i]
-                                                             (if-let [f (aget files i)]
-                                                               (conj acc f)
-                                                               acc))
-                                                           []
-                                                           (range (or (.-length files) 0)))]
-                                    (when (seq file-array)
-                                      (handle-files! active-id file-array))
-                                    (set! (.-value (.-target e)) "")))}]
-            [icons/plus]]
-           [:div.timeline-editor-container
-            [:> tiptap-component
-             #js {:activeId          active-id
-                  :key               (str "editor-" active-id)
-                  :loadedText        loaded-text
-                  :cachedHtml        cached-html
-                  :onChange          (fn [text html]
-                                       (re-frame/dispatch [:composer/on-change active-id text html]))
-                  :onSend            (fn [_ _] (submit-message!))
-                  :onFiles           (fn [files]
-                                       (let [file-array (reduce (fn [acc i]
-                                                                  (if-let [f (aget files i)]
-                                                                    (conj acc f)
-                                                                    acc))
-                                                                []
-                                                                (range (or (.-length files) 0)))]
-                                         (when (seq file-array)
-                                           (handle-files! active-id file-array))))
-                  :placeholder       (tr [:composer/placeholder])
-                  :onEditorReady     #(reset! !editor %)
-                  :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
-                  :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
-           [plugins/plugin-slot :composer-actions {:room-id active-id}]
-           [timeline-emoji-button {:on-click #(if picker-open?
-                                                (re-frame/dispatch [:ui/close-popover])
-                                                (re-frame/dispatch [:ui/open-popover :inline-emoji {}]))
-                                   :active?  picker-open?
-                                   :room-id  active-id}]
-           [timeline-send-button {:submit-message! submit-message!
-                                  :active-id       active-id
-                                  :editor          @!editor
-                                  :attachments     attachments}]]]]))))
+               {:type     "button"
+                :on-click #(re-frame/dispatch [:input/clear-context active-id])}
+               [icons/exit]]]))
+         (if is-mobile?
+           [:<>
+            (when (or (seq attachments) uploading?)
+              [:div.mobile-composer-staging
+               (when (seq attachments)
+                 [:div.composer-attachments
+                  (doall
+                   (map-indexed (fn [idx att]
+                                  ^{:key (str "att-" idx)}
+                                  [attachment-preview active-id att idx])
+                                attachments))])
+               (when uploading?
+                 [:div.upload-indicator
+                  [:span.upload-text (tr [:composer/uploading])]
+                  [:div.upload-progress-bar [:div.upload-progress-fill]]])])
+            (when tray-open?
+              [:<>
+               [:div.mobile-composer-tray-backdrop
+                {:on-click #(reset! !mobile-actions-open? false)}]
+               [:div.mobile-composer-tray
+                [:label.mobile-tray-action
+                 [:input {:type      "file"
+                          :multiple  true
+                          :style     {:display "none"}
+                          :on-change on-pick-files!}]
+                 [:span.mobile-tray-icon [icons/file {:width "18px" :height "18px"}]]
+                 [:span.mobile-tray-label (tr [:composer/upload-tooltip])]]
+                [:button.mobile-tray-action
+                 {:type     "button"
+                  :on-click (fn []
+                              (reset! !mobile-actions-open? false)
+                              (re-frame/dispatch [:ui/open-modal :create-poll {:room-id active-id}]))}
+                 [:span.mobile-tray-icon [icons/poll {:width "18px" :height "18px"}]]
+                 [:span.mobile-tray-label (tr [:composer.polls/modal-title])]]
+                [:div.mobile-tray-plugins
+                 {:on-click #(reset! !mobile-actions-open? false)}
+                 [plugins/plugin-slot :composer-actions {:room-id active-id}]]]])
+            (if recording?
+              [:div.timeline-input-wrapper.is-mobile-voice
+               [voice-recorder-bar
+                {:room-id      active-id
+                 :hold-gesture @!voice-hold-gesture
+                 :on-close     (fn []
+                                 (reset! !voice-hold-gesture nil)
+                                 (reset! !recording-voice? false))}]]
+              [:div.mobile-composer-bar
+               [:button.mobile-composer-plus-btn
+                {:type     "button"
+                 :class    (when tray-open? "is-open")
+                 :title    (tr [:composer/upload-tooltip])
+                 :on-click (fn [e]
+                             (.stopPropagation e)
+                             (when picker-open?
+                               (re-frame/dispatch [:ui/close-popover]))
+                             (swap! !mobile-actions-open? not))}
+                [icons/plus {:width "20px" :height "20px"}]]
+               [:div.mobile-composer-pill
+                [:div.timeline-editor-container
+                 {:on-pointer-down   (fn []
+                                       (when picker-open?
+                                         (reset! !composer-tapping? true)
+                                         (when (use-css-kb-inset?)
+                                           (arm-to-keyboard-handoff! 1200))))
+                  :on-pointer-cancel (fn []
+                                       (reset! !composer-tapping? false))
+                  :on-click          (fn [e]
+                                       (reset! !composer-tapping? false)
+                                       (when picker-open?
+                                         (.stopPropagation e)
+                                         (handoff-emoji-to-keyboard! @!editor)))
+                  :on-focus          (fn []
+                                       (when (and picker-open?
+                                                  (not @!composer-tapping?)
+                                                  (not= (:handoff @!mobile-kb-state) :to-keyboard))
+                                         (handoff-emoji-to-keyboard! @!editor)))}
+                 editor-node]
+                [timeline-emoji-button
+                 {:on-click #(toggle-picker! :emoji)
+                  :active?  picker-open?
+                  :title    (tr [:composer/emoji-tooltip])
+                  :room-id  active-id}]]
+               (if has-content?
+                 [timeline-send-button {:submit-message! submit-message!
+                                        :active-id       active-id
+                                        :class           "is-mobile-cta"}]
+                 [:button.timeline-mic-btn.is-mobile-cta
+                  {:type            "button"
+                   :title           (tr [:composer/record-voice-tooltip])
+                   :on-context-menu #(.preventDefault %)
+                   :on-pointer-down (fn [e]
+                                      (.preventDefault e)
+                                      (reset! !mobile-actions-open? false)
+                                      (reset! !voice-hold-gesture
+                                              {:pointer-id (.-pointerId e)
+                                               :start-x    (.-clientX e)
+                                               :start-y    (.-clientY e)
+                                               :started-at (js/Date.now)})
+                                      (reset! !recording-voice? true))}
+                  [icons/mic {:width "20px" :height "20px"}]])])
+            (when picker-open?
+              emoji-board-el)]
+           [:div.timeline-input-wrapper
+            (when (seq attachments)
+              [:div.composer-attachments
+               (doall
+                (map-indexed (fn [idx att]
+                               ^{:key (str "att-" idx)}
+                               [attachment-preview active-id att idx])
+                             attachments))])
+            (when uploading?
+              ^{:key "upload-indicator"}
+              [:div.upload-indicator
+               [:span.upload-text (tr [:composer/uploading])]
+               [:div.upload-progress-bar [:div.upload-progress-fill]]])
+            ^{:key "composer-input-row"}
+            (if recording?
+              [voice-recorder-bar
+               {:room-id  active-id
+                :on-close #(reset! !recording-voice? false)}]
+              [:div.timeline-input-row
+               [:label.timeline-upload-btn
+                {:title (tr [:composer/upload-tooltip])}
+                [:input {:type      "file"
+                         :multiple  true
+                         :style     {:display "none"}
+                         :on-change on-pick-files!}]
+                [icons/plus]]
+               [:button.timeline-poll-btn
+                {:type     "button"
+                 :title    (tr [:composer/create-poll-tooltip])
+                 :on-click #(re-frame/dispatch [:ui/open-modal :create-poll {:room-id active-id}])}
+                [icons/poll {:width "20px" :height "20px"}]]
+               [:div.timeline-editor-container
+                editor-node]
+               [plugins/plugin-slot :composer-actions {:room-id active-id}]
+               [:button.timeline-mic-btn
+                {:type     "button"
+                 :title    (tr [:composer/record-voice-tooltip])
+                 :on-click (fn []
+                             (reset! !voice-hold-gesture nil)
+                             (reset! !recording-voice? true))}
+                [icons/mic {:width "20px" :height "20px"}]]
+               [timeline-sticker-button {:on-click #(toggle-picker! :sticker)
+                                         :active?  (and picker-open? (= picker-mode :sticker))
+                                         :title    (tr [:composer/sticker-tooltip])}]
+               [timeline-emoji-button {:on-click #(toggle-picker! :emoji)
+                                       :active?  (and picker-open? (= picker-mode :emoji))
+                                       :title    (tr [:composer/emoji-tooltip])
+                                       :room-id  active-id}]
+               [timeline-send-button {:submit-message! submit-message!
+                                      :active-id       active-id}]])])]))))
