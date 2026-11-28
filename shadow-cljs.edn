@@ -56,7 +56,7 @@
         :output-dir "build"
         :asset-path "/"
         :modules {:base {:entries [virtualizer.registry
-                                   virtualizer.protocol]}
+                                   virtualizer.spec]}
                   :main {:entries [paradise.shared.client.core]
                          :depends-on #{:base}
                          :exports {init paradise.shared.client.core/init}}
