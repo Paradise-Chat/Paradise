@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import type { DynamicTrayItem } from "./setup";
 import {
+    assertTrustedIpcSender,
     ElectronCapacitorApp,
     setupContentSecurityPolicy,
     setupReloadWatcher,
@@ -58,6 +59,7 @@ if (process.platform === "linux") {
 
 app.setName("Paradise");
 
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 app.commandLine.appendSwitch("ozone-platform-hint", "auto");
 app.commandLine.appendSwitch(
     "enable-features",
@@ -279,14 +281,16 @@ app.on("before-quit", () => {
     ipcMain.removeHandler("paradise:set-tray-menu");
     ipcMain.handle(
         "paradise:set-tray-menu",
-        (_event, items: DynamicTrayItem[]) => {
+        (event, items: DynamicTrayItem[]) => {
+            assertTrustedIpcSender(event);
             rebuildCustomTrayMenu(Array.isArray(items) ? items : []);
             return true;
         }
     );
 
     ipcMain.removeHandler("paradise:set-tray-tooltip");
-    ipcMain.handle("paradise:set-tray-tooltip", (_event, tooltip: string) => {
+    ipcMain.handle("paradise:set-tray-tooltip", (event, tooltip: string) => {
+        assertTrustedIpcSender(event);
         if (customTray) {
             customTray.setToolTip(tooltip || "Paradise");
         }
@@ -297,7 +301,8 @@ app.on("before-quit", () => {
     ipcMain.removeHandler("paradise:set-global-shortcuts");
     ipcMain.handle(
         "paradise:set-global-shortcuts",
-        (_event, bindings: ShortcutBinding[]) => {
+        (event, bindings: ShortcutBinding[]) => {
+            assertTrustedIpcSender(event);
             return syncGlobalShortcuts(Array.isArray(bindings) ? bindings : []);
         }
     );

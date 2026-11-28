@@ -16,7 +16,7 @@ import {
     Menu,
     MenuItem,
     nativeImage,
-    net,
+    Notification,
     session,
     shell,
     Tray,
@@ -31,7 +31,9 @@ import { promisify } from "util";
 const execFileAsync = promisify(execFile);
 const SINK_NAME = "paradise_share";
 const EXEC_OPTS = { maxBuffer: 10 * 1024 * 1024 };
-const HTTP_URL_FILTER = { urls: ["http://*/*", "https://*/*"] };
+const HTTP_AND_WS_URL_FILTER = {
+    urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"],
+};
 
 interface AudioAppCandidate {
     label: string;
@@ -65,6 +67,14 @@ export interface PrepareStreamOptions {
     requestHeaders?: Record<string, string>;
 }
 
+export interface PrepareWebSocketOptions {
+    url?: string;
+    urlOrHost?: string;
+    origin?: string;
+    headers?: Record<string, string>;
+    requestHeaders?: Record<string, string>;
+}
+
 let pipewireInterval: NodeJS.Timeout | null = null;
 let baselineSourceOutputIds = new Set<number>();
 let selectedAudioTarget: AudioAppCandidate | "ALL" | "NONE" = "NONE";
@@ -72,40 +82,203 @@ let isScreenShareActive = false;
 
 const streamHeaderRules = new Map<string, Record<string, string>>();
 const frameHeaderRules = new Map<string, Record<string, string>>();
+const wsHeaderRules = new Map<string, Record<string, string>>();
+const trustedFrameHostIds = new Set<number>();
 let proxyIpcInitialized = false;
-let activeCustomScheme: string | undefined;
+let activeCustomScheme = "capacitor-electron";
 let webRequestInstalled = false;
 let activeAuthWindow: BrowserWindow | null = null;
 let lastMainWebContentsId: number | null = null;
+let mainWebContentsId: number | null = null;
 
-function extractHostname(urlOrHost: string): string | null {
-    const trimmed = String(urlOrHost || "").trim();
-    if (!trimmed) return null;
-    if (trimmed === "*") return "*";
+const AUTH_PARTITION = "paradise-auth";
+const PROXY_FETCH_PARTITION = "paradise-proxy-fetch";
+const MAX_PROXY_REDIRECTS = 6;
+
+const SAFE_REDIRECT_HEADERS = new Set([
+    "accept",
+    "accept-language",
+    "accept-encoding",
+    "user-agent",
+    "range",
+    "if-range",
+]);
+
+const STREAM_ALLOWED_RESOURCE_TYPES = new Set([
+    "media",
+    "image",
+    "xhr",
+    "fetch",
+    "other",
+]);
+
+const FORBIDDEN_FRAMING_HEADERS = new Set([
+    "content-length",
+    "transfer-encoding",
+    "host",
+]);
+
+export function isTrustedAppUrl(
+    rawUrl: string | undefined | null,
+    scheme: string = activeCustomScheme
+): boolean {
+    if (!rawUrl) return false;
     try {
-        if (trimmed.includes("://")) {
-            return new URL(trimmed).hostname.toLowerCase();
+        const parsed = new URL(rawUrl);
+        return parsed.protocol === `${scheme}:`;
+    } catch {
+        return false;
+    }
+}
+
+export function assertTrustedIpcSender(
+    event: Electron.IpcMainInvokeEvent
+): void {
+    const senderFrame = event.senderFrame;
+    if (!senderFrame || senderFrame.parent !== null) {
+        throw new Error("Unauthorized IPC sender frame");
+    }
+    if (!isTrustedAppUrl(senderFrame.url, activeCustomScheme)) {
+        throw new Error("Unauthorized IPC sender origin");
+    }
+    if (mainWebContentsId !== null && event.sender.id !== mainWebContentsId) {
+        throw new Error("Unauthorized IPC sender window");
+    }
+}
+
+function extractExactOrigin(urlStr: string): string | null {
+    const trimmed = String(urlStr || "").trim();
+    if (!trimmed || trimmed === "*") return null;
+    try {
+        const parsed = new URL(trimmed);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            return null;
         }
-        return trimmed.split("/")[0].split(":")[0].toLowerCase();
+        return parsed.origin.toLowerCase();
     } catch {
         return null;
     }
 }
 
-function lookupHostRule(
-    map: Map<string, Record<string, string>>,
-    host: string | null
-): Record<string, string> | undefined {
-    if (!host) return map.get("*");
-    const direct = map.get(host);
-    if (direct) return direct;
-    const parts = host.split(".");
-    for (let i = 1; i < parts.length - 1; i++) {
-        const parentDomain = parts.slice(i).join(".");
-        const found = map.get(parentDomain);
-        if (found) return found;
+function extractWsOrigin(urlStr: string): string | null {
+    const trimmed = String(urlStr || "").trim();
+    if (!trimmed || trimmed === "*") return null;
+    try {
+        const parsed = new URL(trimmed);
+        if (
+            parsed.protocol !== "ws:" &&
+            parsed.protocol !== "wss:" &&
+            parsed.protocol !== "http:" &&
+            parsed.protocol !== "https:"
+        ) {
+            return null;
+        }
+        const httpProto =
+            parsed.protocol === "ws:" || parsed.protocol === "http:"
+                ? "http:"
+                : "https:";
+        return `${httpProto}//${parsed.host}`.toLowerCase();
+    } catch {
+        return null;
     }
-    return map.get("*");
+}
+
+function deleteOriginRulesForTarget(
+    map: Map<string, Record<string, string>>,
+    target: string
+): void {
+    const trimmed = String(target || "").trim();
+    if (!trimmed) {
+        map.clear();
+        return;
+    }
+    const exactOrigin = extractExactOrigin(trimmed) || extractWsOrigin(trimmed);
+    if (exactOrigin) {
+        map.delete(exactOrigin);
+        return;
+    }
+    const hostLower = trimmed.split("/")[0].split(":")[0].toLowerCase();
+    if (!hostLower || hostLower === "*") return;
+    for (const origin of Array.from(map.keys())) {
+        try {
+            if (new URL(origin).hostname.toLowerCase() === hostLower) {
+                map.delete(origin);
+            }
+        } catch {}
+    }
+}
+
+function sanitizeHeaderRecord(
+    rawHeaders: Record<string, string> | undefined,
+    targetProtocol?: string
+): Record<string, string> {
+    const clean: Record<string, string> = {};
+    for (const [rawKey, rawVal] of Object.entries(rawHeaders ?? {})) {
+        if (rawVal === undefined || rawVal === null) continue;
+        const key = String(rawKey).trim();
+        const val = String(rawVal);
+        if (!key || /[\r\n]/.test(key) || /[\r\n]/.test(val)) continue;
+        const lower = key.toLowerCase();
+        if (FORBIDDEN_FRAMING_HEADERS.has(lower)) continue;
+        if (
+            lower === "referer" &&
+            targetProtocol === "http:" &&
+            /^https:/i.test(val.trim())
+        ) {
+            continue;
+        }
+        for (const existing of Object.keys(clean)) {
+            if (existing.toLowerCase() === lower) {
+                delete clean[existing];
+            }
+        }
+        clean[key] = val;
+    }
+    return clean;
+}
+
+function hasCredentialOrCustomHeaders(
+    headers: Record<string, string>
+): boolean {
+    for (const key of Object.keys(headers)) {
+        const lower = key.toLowerCase();
+        if (
+            !SAFE_REDIRECT_HEADERS.has(lower) &&
+            lower !== "content-type" &&
+            lower !== "referer" &&
+            lower !== "origin"
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function stripCrossOriginHeaders(
+    headers: Record<string, string>
+): Record<string, string> {
+    const kept: Record<string, string> = {};
+    for (const [key, val] of Object.entries(headers)) {
+        if (SAFE_REDIRECT_HEADERS.has(key.toLowerCase())) {
+            kept[key] = val;
+        }
+    }
+    return kept;
+}
+
+function getProxyFetchSession(): Electron.Session {
+    return session.fromPartition(PROXY_FETCH_PARTITION, { cache: false });
+}
+
+async function clearAuthPartitionData(): Promise<void> {
+    try {
+        const authSession = session.fromPartition(AUTH_PARTITION, {
+            cache: false,
+        });
+        await authSession.clearStorageData();
+        await authSession.clearCache();
+    } catch {
+    }
 }
 
 function stripHeaderCaseInsensitive(
@@ -150,27 +323,65 @@ function stripFrameAncestorsFromCsp(
     }
 }
 
+function rewriteSetCookieSameSiteNone(
+    headers: Record<string, string | string[]>,
+    isHttps: boolean
+): boolean {
+    let modified = false;
+    for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() !== "set-cookie") continue;
+        const raw = headers[key];
+        const values = Array.isArray(raw) ? raw : [String(raw ?? "")];
+        headers[key] = values.map((cookie) => {
+            let next = cookie;
+            if (/;\s*SameSite\s*=\s*(?:Strict|Lax)\b/i.test(next)) {
+                next = next.replace(
+                    /;\s*SameSite\s*=\s*(?:Strict|Lax)\b/gi,
+                    "; SameSite=None"
+                );
+            } else if (!/;\s*SameSite\s*=/i.test(next)) {
+                next = `${next}; SameSite=None`;
+            }
+            if (isHttps && !/;\s*Secure\b/i.test(next)) {
+                next = `${next}; Secure`;
+            }
+            if (!/;\s*(?:Max-Age|Expires)\s*=/i.test(next)) {
+                next = `${next}; Max-Age=604800`;
+            }
+            if (next !== cookie) modified = true;
+            return next;
+        });
+    }
+    return modified;
+}
+
 export function setupParadiseProxyIpc(): void {
     if (proxyIpcInitialized) return;
     proxyIpcInitialized = true;
 
     ipcMain.handle(
         "paradise-proxy:prepare-stream",
-        (_event, opts: PrepareStreamOptions) => {
+        (event, opts: PrepareStreamOptions) => {
+            assertTrustedIpcSender(event);
             const rawTarget = String(opts?.url || opts?.urlOrHost || "").trim();
-            const host = extractHostname(rawTarget);
-            if (!host) {
+            const origin = extractExactOrigin(rawTarget);
+            if (!origin) {
                 return { ok: false, url: rawTarget };
             }
-            const hdrs = opts?.headers ?? opts?.requestHeaders ?? {};
-            streamHeaderRules.set(host, hdrs);
+            const parsed = new URL(rawTarget);
+            const hdrs = sanitizeHeaderRecord(
+                opts?.headers ?? opts?.requestHeaders,
+                parsed.protocol
+            );
+            streamHeaderRules.set(origin, hdrs);
             return { ok: true, url: opts?.url || rawTarget };
         }
     );
 
     ipcMain.handle(
         "paradise-proxy:clear-stream",
-        (_event, urlOrHost?: string | { urlOrHost?: string }) => {
+        (event, urlOrHost?: string | { urlOrHost?: string }) => {
+            assertTrustedIpcSender(event);
             const target =
                 typeof urlOrHost === "string"
                     ? urlOrHost
@@ -179,29 +390,34 @@ export function setupParadiseProxyIpc(): void {
                 streamHeaderRules.clear();
                 return { ok: true };
             }
-            const host = extractHostname(target);
-            if (host) streamHeaderRules.delete(host);
+            deleteOriginRulesForTarget(streamHeaderRules, target);
             return { ok: true };
         }
     );
 
     ipcMain.handle(
         "paradise-proxy:prepare-frame",
-        (_event, opts: PrepareStreamOptions) => {
+        (event, opts: PrepareStreamOptions) => {
+            assertTrustedIpcSender(event);
             const rawTarget = String(opts?.url || opts?.urlOrHost || "").trim();
-            const host = extractHostname(rawTarget);
-            if (!host) {
+            const origin = extractExactOrigin(rawTarget);
+            if (!origin) {
                 return { ok: false, url: rawTarget };
             }
-            const hdrs = opts?.headers ?? opts?.requestHeaders ?? {};
-            frameHeaderRules.set(host, hdrs);
+            const parsed = new URL(rawTarget);
+            const hdrs = sanitizeHeaderRecord(
+                opts?.headers ?? opts?.requestHeaders,
+                parsed.protocol
+            );
+            frameHeaderRules.set(origin, hdrs);
             return { ok: true, url: opts?.url || rawTarget, mode: "headers" };
         }
     );
 
     ipcMain.handle(
         "paradise-proxy:clear-frame",
-        (_event, urlOrHost?: string | { urlOrHost?: string }) => {
+        (event, urlOrHost?: string | { urlOrHost?: string }) => {
+            assertTrustedIpcSender(event);
             const target =
                 typeof urlOrHost === "string"
                     ? urlOrHost
@@ -210,80 +426,184 @@ export function setupParadiseProxyIpc(): void {
                 frameHeaderRules.clear();
                 return { ok: true };
             }
-            const host = extractHostname(target);
-            if (host) frameHeaderRules.delete(host);
+            deleteOriginRulesForTarget(frameHeaderRules, target);
+            return { ok: true };
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:prepare-websocket",
+        (event, opts: PrepareWebSocketOptions) => {
+            assertTrustedIpcSender(event);
+            const rawTarget = String(opts?.url || opts?.urlOrHost || "").trim();
+            const originKey = extractWsOrigin(rawTarget);
+            if (!originKey) {
+                return { ok: false, url: rawTarget };
+            }
+            const parsed = new URL(rawTarget);
+            const rawHdrs: Record<string, string> = {
+                ...(opts?.headers ?? opts?.requestHeaders ?? {}),
+            };
+            if (opts?.origin && !/[\r\n]/.test(String(opts.origin))) {
+                rawHdrs["Origin"] = String(opts.origin).trim();
+            }
+            const hdrs = sanitizeHeaderRecord(rawHdrs, parsed.protocol);
+            wsHeaderRules.set(originKey, hdrs);
+            return { ok: true, url: opts?.url || rawTarget };
+        }
+    );
+
+    ipcMain.handle(
+        "paradise-proxy:clear-websocket",
+        (event, urlOrHost?: string | { urlOrHost?: string }) => {
+            assertTrustedIpcSender(event);
+            const target =
+                typeof urlOrHost === "string"
+                    ? urlOrHost
+                    : urlOrHost?.urlOrHost;
+            if (!target) {
+                wsHeaderRules.clear();
+                return { ok: true };
+            }
+            deleteOriginRulesForTarget(wsHeaderRules, target);
             return { ok: true };
         }
     );
 
     ipcMain.handle(
         "paradise-proxy:request",
-        async (_event, opts: ProxyRequestOptions) => {
-            const parsed = new URL(opts.url);
-            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-                throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+        async (event, opts: ProxyRequestOptions) => {
+            assertTrustedIpcSender(event);
+            let currentUrl = new URL(opts.url);
+            if (
+                currentUrl.protocol !== "http:" &&
+                currentUrl.protocol !== "https:"
+            ) {
+                throw new Error(`Unsupported protocol: ${currentUrl.protocol}`);
             }
 
-            const method = (opts.method ?? "GET").toUpperCase();
-            const canHaveBody = method !== "GET" && method !== "HEAD";
+            let currentMethod = (opts.method ?? "GET").toUpperCase();
+            const canHaveBody =
+                currentMethod !== "GET" && currentMethod !== "HEAD";
 
-            const forbiddenFramingHeaders = new Set([
-                "content-length",
-                "transfer-encoding",
-                "host",
-            ]);
-            const reqHeaders: Record<string, string> = {};
-            for (const [rawKey, rawVal] of Object.entries(opts.headers ?? {})) {
-                if (rawVal === undefined || rawVal === null) continue;
-                const key = rawKey.trim();
-                if (!key) continue;
-                const lower = key.toLowerCase();
-                if (forbiddenFramingHeaders.has(lower)) continue;
-                if (
-                    lower === "referer" &&
-                    parsed.protocol === "http:" &&
-                    /^https:/i.test(String(rawVal).trim())
-                ) {
-                    continue;
-                }
-                for (const existing of Object.keys(reqHeaders)) {
-                    if (existing.toLowerCase() === lower) {
-                        delete reqHeaders[existing];
-                    }
-                }
-                reqHeaders[key] = String(rawVal);
-            }
+            let currentHeaders = sanitizeHeaderRecord(
+                opts.headers,
+                currentUrl.protocol
+            );
 
-            let requestBody: BodyInit | undefined;
+            let currentBody: BodyInit | undefined;
             if (canHaveBody && opts.body !== undefined && opts.body !== null) {
                 if (
                     opts.bodyEncoding === "base64" &&
                     typeof opts.body === "string"
                 ) {
-                    requestBody = Buffer.from(
+                    currentBody = Buffer.from(
                         opts.body,
                         "base64"
                     ) as unknown as BodyInit;
                 } else if (ArrayBuffer.isView(opts.body)) {
-                    requestBody = Buffer.from(
+                    currentBody = Buffer.from(
                         opts.body.buffer,
                         opts.body.byteOffset,
                         opts.body.byteLength
                     ) as unknown as BodyInit;
                 } else if (opts.body instanceof ArrayBuffer) {
-                    requestBody = Buffer.from(opts.body) as unknown as BodyInit;
+                    currentBody = Buffer.from(opts.body) as unknown as BodyInit;
                 } else {
-                    requestBody = String(opts.body);
+                    currentBody = String(opts.body);
                 }
             }
 
-            const res = await net.fetch(opts.url, {
-                method,
-                headers: reqHeaders,
-                body: requestBody,
-                redirect: "follow",
-                credentials: "omit",
-            });
+            const proxySession = getProxyFetchSession();
+            let res: Response | null = null;
+            for (let hop = 0; hop <= MAX_PROXY_REDIRECTS; hop++) {
+                res = await proxySession.fetch(currentUrl.toString(), {
+                    method: currentMethod,
+                    headers: currentHeaders,
+                    body: currentBody,
+                    redirect: "manual",
+                    credentials: "omit",
+                });
+
+                const isRedirect =
+                    res.status === 301 ||
+                    res.status === 302 ||
+                    res.status === 303 ||
+                    res.status === 307 ||
+                    res.status === 308;
+                const location = isRedirect ? res.headers.get("location") : null;
+                if (!isRedirect || !location) {
+                    break;
+                }
+                if (hop === MAX_PROXY_REDIRECTS) {
+                    res.body?.cancel().catch(() => {});
+                    throw new Error("Too many redirects");
+                }
+
+                const nextUrl = new URL(location, currentUrl);
+                if (
+                    nextUrl.protocol !== "http:" &&
+                    nextUrl.protocol !== "https:"
+                ) {
+                    res.body?.cancel().catch(() => {});
+                    throw new Error(
+                        `Unsupported redirect protocol: ${nextUrl.protocol}`
+                    );
+                }
+
+                const sameOrigin =
+                    nextUrl.origin.toLowerCase() ===
+                    currentUrl.origin.toLowerCase();
+
+                if (
+                    currentUrl.protocol === "https:" &&
+                    nextUrl.protocol === "http:" &&
+                    hasCredentialOrCustomHeaders(currentHeaders)
+                ) {
+                    res.body?.cancel().catch(() => {});
+                    throw new Error(
+                        "Blocked insecure HTTPS to HTTP credentialed redirect"
+                    );
+                }
+
+                if (
+                    res.status === 303 ||
+                    ((res.status === 301 || res.status === 302) &&
+                        currentMethod === "POST")
+                ) {
+                    currentMethod = "GET";
+                    currentBody = undefined;
+                    for (const key of Object.keys(currentHeaders)) {
+                        const lower = key.toLowerCase();
+                        if (
+                            lower === "content-type" ||
+                            lower === "content-length"
+                        ) {
+                            delete currentHeaders[key];
+                        }
+                    }
+                }
+
+                if (!sameOrigin) {
+                    if (
+                        (res.status === 307 || res.status === 308) &&
+                        currentBody !== undefined
+                    ) {
+                        res.body?.cancel().catch(() => {});
+                        throw new Error(
+                            "Blocked cross-origin 307/308 redirect with request body"
+                        );
+                    }
+                    currentHeaders = stripCrossOriginHeaders(currentHeaders);
+                }
+
+                res.body?.cancel().catch(() => {});
+                currentUrl = nextUrl;
+            }
+
+            if (!res) {
+                throw new Error("Proxy request produced no response");
+            }
 
             const responseHeaders: Record<string, string> = {};
             res.headers.forEach((value, key) => {
@@ -304,7 +624,7 @@ export function setupParadiseProxyIpc(): void {
             return {
                 ok: res.ok,
                 status: res.status,
-                url: res.url,
+                url: res.url || currentUrl.toString(),
                 headers: responseHeaders,
                 data,
             };
@@ -315,8 +635,19 @@ export function setupParadiseProxyIpc(): void {
         "paradise-proxy:open-auth-window",
         async (
             event,
-            opts: { url: string; title?: string; external?: boolean }
+            opts: {
+                url: string;
+                title?: string;
+                external?: boolean;
+                callbackPrefix?: string;
+                closeOnPrefix?: string;
+                redirectOnPrefix?: {
+                    matchPrefix?: string;
+                    targetUrl?: string;
+                };
+            }
         ) => {
+            assertTrustedIpcSender(event);
             const parsed = new URL(String(opts?.url || ""));
             if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
                 throw new Error(`Unsupported protocol: ${parsed.protocol}`);
@@ -327,6 +658,37 @@ export function setupParadiseProxyIpc(): void {
                 return { ok: true, mode: "external" };
             }
 
+            const parseHttpPrefix = (raw: unknown): string | null => {
+                if (typeof raw !== "string") return null;
+                const trimmed = raw.trim();
+                if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+                    return null;
+                }
+                try {
+                    new URL(trimmed);
+                    return trimmed;
+                } catch {
+                    return null;
+                }
+            };
+
+            const callbackPrefix = parseHttpPrefix(opts?.callbackPrefix);
+            const closeOnPrefix = parseHttpPrefix(opts?.closeOnPrefix);
+            const redirectMatchPrefix = parseHttpPrefix(
+                opts?.redirectOnPrefix?.matchPrefix
+            );
+            const redirectTargetUrl = parseHttpPrefix(
+                opts?.redirectOnPrefix?.targetUrl
+            );
+            const redirectRule =
+                redirectMatchPrefix && redirectTargetUrl
+                    ? {
+                          matchPrefix: redirectMatchPrefix,
+                          targetUrl: redirectTargetUrl,
+                      }
+                    : null;
+            const awaitingNav = Boolean(callbackPrefix || closeOnPrefix);
+
             const parentWin =
                 BrowserWindow.fromWebContents(event.sender) ?? undefined;
             if (parentWin && !parentWin.isDestroyed()) {
@@ -334,18 +696,27 @@ export function setupParadiseProxyIpc(): void {
             }
 
             if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
-                activeAuthWindow.setTitle(opts?.title || "Sign In");
-                activeAuthWindow
-                    .loadURL(parsed.toString())
-                    .catch((err) =>
-                        console.warn("[paradise-auth] loadURL warning:", err)
-                    );
-                activeAuthWindow.show();
-                activeAuthWindow.focus();
-                return { ok: true, mode: "window" };
+                if (!awaitingNav && !redirectRule) {
+                    activeAuthWindow.setTitle(opts?.title || "Sign In");
+                    activeAuthWindow
+                        .loadURL(parsed.toString())
+                        .catch((err) =>
+                            console.warn(
+                                "[paradise-auth] loadURL warning:",
+                                err?.code ?? err?.message ?? "load failed"
+                            )
+                        );
+                    activeAuthWindow.show();
+                    activeAuthWindow.focus();
+                    return { ok: true, mode: "window" };
+                }
+                activeAuthWindow.close();
+                activeAuthWindow = null;
             }
 
-            activeAuthWindow = new BrowserWindow({
+            await clearAuthPartitionData();
+
+            const authWin = new BrowserWindow({
                 width: 520,
                 height: 760,
                 parent:
@@ -361,37 +732,185 @@ export function setupParadiseProxyIpc(): void {
                     nodeIntegration: false,
                     contextIsolation: true,
                     sandbox: true,
-                    partition: "persist:paradise-auth",
+                    partition: AUTH_PARTITION,
                 },
             });
+            activeAuthWindow = authWin;
 
-            activeAuthWindow.webContents.setWindowOpenHandler(({ url }) => {
-                if (/^https?:\/\//i.test(url)) {
-                    shell.openExternal(url).catch(() => {});
-                }
+            authWin.webContents.setWindowOpenHandler(({ url }) => {
+                try {
+                    const extUrl = new URL(url);
+                    if (
+                        extUrl.protocol === "http:" ||
+                        extUrl.protocol === "https:"
+                    ) {
+                        shell.openExternal(extUrl.toString()).catch(() => {});
+                    }
+                } catch {}
                 return { action: "deny" };
             });
 
-            activeAuthWindow.on("closed", () => {
-                activeAuthWindow = null;
+            if (redirectRule) {
+                let redirected = false;
+                const maybeRedirect = (
+                    navEvent: Electron.Event | null,
+                    targetUrl: string
+                ) => {
+                    if (
+                        !redirected &&
+                        !authWin.isDestroyed() &&
+                        typeof targetUrl === "string" &&
+                        targetUrl.startsWith(redirectRule.matchPrefix)
+                    ) {
+                        redirected = true;
+                        if (navEvent && typeof navEvent.preventDefault === "function") {
+                            navEvent.preventDefault();
+                        }
+                        authWin
+                            .loadURL(redirectRule.targetUrl)
+                            .catch((err) =>
+                                console.warn(
+                                    "[paradise-auth] redirect loadURL warning:",
+                                    err?.code ?? err?.message ?? "load failed"
+                                )
+                            );
+                    }
+                };
+                authWin.webContents.on("will-redirect", (e, u) =>
+                    maybeRedirect(e, u)
+                );
+                authWin.webContents.on("will-navigate", (e, u) =>
+                    maybeRedirect(e, u)
+                );
+                authWin.webContents.on("did-navigate", (_e, u) =>
+                    maybeRedirect(null, u)
+                );
+                authWin.webContents.on("did-navigate-in-page", (_e, u) =>
+                    maybeRedirect(null, u)
+                );
+            }
+
+            if (awaitingNav) {
+                return await new Promise((resolve) => {
+                    let settled = false;
+                    const finish = (result: {
+                        ok: boolean;
+                        mode: string;
+                        callbackUrl?: string;
+                        cancelled?: boolean;
+                    }) => {
+                        if (settled) return;
+                        settled = true;
+                        if (activeAuthWindow === authWin) {
+                            activeAuthWindow = null;
+                        }
+                        if (!authWin.isDestroyed()) {
+                            authWin.close();
+                        }
+                        void clearAuthPartitionData();
+                        if (parentWin && !parentWin.isDestroyed()) {
+                            parentWin.show();
+                            parentWin.focus();
+                        }
+                        resolve(result);
+                    };
+
+                    const maybeCapture = (
+                        navEvent: Electron.Event | null,
+                        targetUrl: string
+                    ) => {
+                        if (settled || typeof targetUrl !== "string") return;
+                        if (callbackPrefix && targetUrl.startsWith(callbackPrefix)) {
+                            if (navEvent && typeof navEvent.preventDefault === "function") {
+                                navEvent.preventDefault();
+                            }
+                            finish({
+                                ok: true,
+                                mode: "callback",
+                                callbackUrl: targetUrl,
+                            });
+                            return;
+                        }
+                        if (closeOnPrefix && targetUrl.startsWith(closeOnPrefix)) {
+                            if (navEvent && typeof navEvent.preventDefault === "function") {
+                                navEvent.preventDefault();
+                            }
+                            finish({
+                                ok: true,
+                                mode: "completed",
+                                callbackUrl: targetUrl,
+                            });
+                        }
+                    };
+
+                    authWin.webContents.on("will-redirect", (e, u) =>
+                        maybeCapture(e, u)
+                    );
+                    authWin.webContents.on("will-navigate", (e, u) =>
+                        maybeCapture(e, u)
+                    );
+                    authWin.webContents.on("did-navigate", (_e, u) =>
+                        maybeCapture(null, u)
+                    );
+                    authWin.webContents.on("did-navigate-in-page", (_e, u) =>
+                        maybeCapture(null, u)
+                    );
+                    authWin.on("closed", () => {
+                        if (activeAuthWindow === authWin) {
+                            activeAuthWindow = null;
+                        }
+                        void clearAuthPartitionData();
+                        if (!settled) {
+                            settled = true;
+                            resolve({
+                                ok: false,
+                                mode: callbackPrefix ? "callback" : "completed",
+                                cancelled: true,
+                            });
+                        }
+                    });
+
+                    authWin
+                        .loadURL(parsed.toString())
+                        .catch((err) =>
+                            console.warn(
+                                "[paradise-auth] loadURL warning:",
+                                err?.code ?? err?.message ?? "load failed"
+                            )
+                        );
+                    authWin.show();
+                    authWin.focus();
+                });
+            }
+
+            authWin.on("closed", () => {
+                if (activeAuthWindow === authWin) {
+                    activeAuthWindow = null;
+                }
+                void clearAuthPartitionData();
             });
 
-            activeAuthWindow
+            authWin
                 .loadURL(parsed.toString())
                 .catch((err) =>
-                    console.warn("[paradise-auth] loadURL warning:", err)
+                    console.warn(
+                        "[paradise-auth] loadURL warning:",
+                        err?.code ?? err?.message ?? "load failed"
+                    )
                 );
-            activeAuthWindow.show();
-            activeAuthWindow.focus();
+            authWin.show();
+            authWin.focus();
             return { ok: true, mode: "window" };
         }
     );
 
     ipcMain.handle("paradise-proxy:close-auth-window", async (event) => {
+        assertTrustedIpcSender(event);
         if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
             activeAuthWindow.close();
             activeAuthWindow = null;
         }
+        await clearAuthPartitionData();
         const callerWin =
             BrowserWindow.fromWebContents(event.sender) ??
             (lastMainWebContentsId !== null
@@ -410,7 +929,8 @@ export function setupParadiseProxyIpc(): void {
 
     ipcMain.handle(
         "paradise-proxy:open-external",
-        async (_event, rawUrl: string) => {
+        async (event, rawUrl: string) => {
+            assertTrustedIpcSender(event);
             const parsed = new URL(String(rawUrl || ""));
             if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
                 throw new Error(`Unsupported protocol: ${parsed.protocol}`);
@@ -427,35 +947,137 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
     }
     webRequestInstalled = true;
 
+    const appOrigin = `${activeCustomScheme}://-`;
+
     session.defaultSession.webRequest.onBeforeSendHeaders(
-        HTTP_URL_FILTER,
+        HTTP_AND_WS_URL_FILTER,
         (details, callback) => {
-            const host = extractHostname(details.url);
-            const streamHdrs = lookupHostRule(streamHeaderRules, host);
-            const isSubFrame =
-                details.resourceType === "subFrame" && frameHeaderRules.size > 0;
-            const frameHdrs =
-                details.resourceType === "subFrame"
-                    ? lookupHostRule(frameHeaderRules, host)
+            const isPopoutHost =
+                details.webContentsId !== undefined &&
+                trustedFrameHostIds.has(details.webContentsId);
+            if (
+                mainWebContentsId !== null &&
+                details.webContentsId !== undefined &&
+                details.webContentsId > 0 &&
+                details.webContentsId !== mainWebContentsId &&
+                !isPopoutHost
+            ) {
+                callback({ requestHeaders: details.requestHeaders });
+                return;
+            }
+
+            if (details.resourceType === "webSocket") {
+                let wsReqFrame: Electron.WebFrameMain | undefined;
+                try {
+                    wsReqFrame = details.frame;
+                } catch {
+                    wsReqFrame = undefined;
+                }
+                const wsFromTrustedTopFrame =
+                    !wsReqFrame ||
+                    (wsReqFrame.parent === null &&
+                        isTrustedAppUrl(wsReqFrame.url, activeCustomScheme));
+                const wsOrigin = wsFromTrustedTopFrame
+                    ? extractWsOrigin(details.url)
+                    : null;
+                const wsHdrs = wsOrigin
+                    ? wsHeaderRules.get(wsOrigin)
+                    : undefined;
+                if (!wsHdrs || Object.keys(wsHdrs).length === 0) {
+                    callback({ requestHeaders: details.requestHeaders });
+                    return;
+                }
+                const nextWsHeaders: Record<string, string> = {
+                    ...details.requestHeaders,
+                };
+                for (const [key, value] of Object.entries(wsHdrs)) {
+                    for (const existing of Object.keys(nextWsHeaders)) {
+                        if (existing.toLowerCase() === key.toLowerCase()) {
+                            delete nextWsHeaders[existing];
+                        }
+                    }
+                    nextWsHeaders[key] = value;
+                }
+                callback({ requestHeaders: nextWsHeaders });
+                return;
+            }
+
+            const origin = extractExactOrigin(details.url);
+            if (!origin) {
+                callback({ requestHeaders: details.requestHeaders });
+                return;
+            }
+
+            let reqFrame: Electron.WebFrameMain | undefined;
+            try {
+                reqFrame = details.frame;
+            } catch {
+                reqFrame = undefined;
+            }
+            const isTrustedHostUrl = (u: string | undefined): boolean =>
+                isTrustedAppUrl(u, activeCustomScheme) ||
+                (isPopoutHost && (!u || u === "about:blank"));
+            const fromTrustedTopFrame =
+                !reqFrame ||
+                (reqFrame.parent === null && isTrustedHostUrl(reqFrame.url));
+            const fromTrustedSubFrameHost =
+                fromTrustedTopFrame ||
+                Boolean(
+                    reqFrame?.parent &&
+                        reqFrame.parent.parent === null &&
+                        isTrustedHostUrl(reqFrame.parent.url)
+                );
+
+            const streamHdrs =
+                fromTrustedTopFrame &&
+                STREAM_ALLOWED_RESOURCE_TYPES.has(details.resourceType)
+                    ? streamHeaderRules.get(origin)
                     : undefined;
 
-            const hasExistingReferer = Object.keys(
+            const isPreparedFrameReq = Boolean(
+                fromTrustedSubFrameHost &&
+                    !isTrustedAppUrl(details.url, activeCustomScheme) &&
+                    frameHeaderRules.has(origin)
+            );
+
+            const frameHdrs =
+                isPreparedFrameReq && details.resourceType === "subFrame"
+                    ? frameHeaderRules.get(origin)
+                    : undefined;
+
+            const existingRefererKey = Object.keys(
                 details.requestHeaders
-            ).some((k) => k.toLowerCase() === "referer");
+            ).find((k) => k.toLowerCase() === "referer");
+            const existingReferer = existingRefererKey
+                ? details.requestHeaders[existingRefererKey]
+                : undefined;
+            const isAppReferer = Boolean(
+                existingReferer &&
+                    (existingReferer.startsWith(`${activeCustomScheme}:`) ||
+                        existingReferer.startsWith("capacitor:"))
+            );
             const fallbackSubFrameReferer =
-                isSubFrame && !hasExistingReferer
-                    ? (() => {
-                          try {
-                              return `${new URL(details.url).origin}/`;
-                          } catch {
-                              return undefined;
-                          }
-                      })()
+                isPreparedFrameReq && (!existingReferer || isAppReferer)
+                    ? `${origin}/`
+                    : undefined;
+
+            const embedFetchMetadataHeaders: Record<string, string> | undefined =
+                isPreparedFrameReq
+                    ? {
+                          "Sec-Fetch-Site": "same-origin",
+                          ...(details.resourceType === "subFrame"
+                              ? { "Sec-Fetch-Dest": "document" }
+                              : {}),
+                      }
                     : undefined;
 
             const customHeaders =
-                streamHdrs || frameHdrs || fallbackSubFrameReferer
+                streamHdrs ||
+                frameHdrs ||
+                fallbackSubFrameReferer ||
+                embedFetchMetadataHeaders
                     ? {
+                          ...(embedFetchMetadataHeaders ?? {}),
                           ...(fallbackSubFrameReferer
                               ? { Referer: fallbackSubFrameReferer }
                               : {}),
@@ -489,19 +1111,30 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
             ...(details.responseHeaders ?? {}),
         };
 
-        const isHttp =
-            details.url.startsWith("http://") ||
-            details.url.startsWith("https://");
-        const host = isHttp ? extractHostname(details.url) : null;
-        const isPreparedHost = Boolean(lookupHostRule(streamHeaderRules, host));
-        const isSubFrame =
-            isHttp &&
-            details.resourceType === "subFrame" &&
-            frameHeaderRules.size > 0;
-        const isMediaStream =
-            isHttp && (details.resourceType === "media" || isPreparedHost);
+        const origin = extractExactOrigin(details.url);
+        const streamRule = origin ? streamHeaderRules.get(origin) : undefined;
+        const isPreparedStream = Boolean(streamRule);
+        const isMainWindowRequest =
+            mainWebContentsId === null ||
+            details.webContentsId === undefined ||
+            details.webContentsId <= 0 ||
+            details.webContentsId === mainWebContentsId ||
+            trustedFrameHostIds.has(details.webContentsId);
+        const isTrustedAppResponse = isTrustedAppUrl(
+            details.url,
+            activeCustomScheme
+        );
+        const isPreparedFrameOrigin = Boolean(
+            origin &&
+                isMainWindowRequest &&
+                !isTrustedAppResponse &&
+                frameHeaderRules.has(origin)
+        );
+        const isMediaStream = Boolean(
+            origin && (details.resourceType === "media" || isPreparedStream)
+        );
 
-        if (isSubFrame) {
+        if (isPreparedFrameOrigin && details.resourceType === "subFrame") {
             stripHeaderCaseInsensitive(headers, "x-frame-options");
             stripFrameAncestorsFromCsp(headers, "content-security-policy");
             stripFrameAncestorsFromCsp(
@@ -514,6 +1147,13 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
             headers["Cross-Origin-Resource-Policy"] = ["cross-origin"];
         }
 
+        if (isPreparedFrameOrigin) {
+            rewriteSetCookieSameSiteNone(
+                headers,
+                details.url.startsWith("https://")
+            );
+        }
+
         if (isMediaStream) {
             stripHeaderCaseInsensitive(headers, "access-control-allow-origin");
             stripHeaderCaseInsensitive(headers, "access-control-allow-headers");
@@ -521,16 +1161,30 @@ export function installStreamCorsWebRequest(customScheme?: string): void {
             stripHeaderCaseInsensitive(headers, "access-control-expose-headers");
             stripHeaderCaseInsensitive(headers, "cross-origin-resource-policy");
 
-            headers["Access-Control-Allow-Origin"] = ["*"];
+            const allowedHeaderNames = new Set<string>([
+                "Authorization",
+                "Content-Type",
+                "Range",
+                "If-Range",
+                "Accept",
+            ]);
+            for (const key of Object.keys(streamRule ?? {})) {
+                allowedHeaderNames.add(key);
+            }
+
+            headers["Access-Control-Allow-Origin"] = [appOrigin];
+            headers["Vary"] = ["Origin"];
             headers["Access-Control-Allow-Methods"] = [
                 "GET, HEAD, POST, OPTIONS",
             ];
-            headers["Access-Control-Allow-Headers"] = ["*"];
+            headers["Access-Control-Allow-Headers"] = [
+                Array.from(allowedHeaderNames).join(", "),
+            ];
             headers["Access-Control-Expose-Headers"] = [
                 "Content-Length, Content-Range, Accept-Ranges, Content-Type, Location",
             ];
             headers["Cross-Origin-Resource-Policy"] = ["cross-origin"];
-        } else if (activeCustomScheme) {
+        } else if (isTrustedAppResponse) {
             headers["Content-Security-Policy"] = [
                 `default-src ${activeCustomScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
                     `script-src ${activeCustomScheme}://* 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' devtools://* http: https: data: blob:; ` +
@@ -909,22 +1563,26 @@ export function setupAudioIsolationIpc(): void {
     if (ipcInitialized) return;
     ipcInitialized = true;
 
-    ipcMain.handle("paradise:audio-isolation-supported", () => {
+    ipcMain.handle("paradise:audio-isolation-supported", (event) => {
+        assertTrustedIpcSender(event);
         return process.platform === "linux";
     });
 
-    ipcMain.handle("paradise:list-audio-apps", async () => {
+    ipcMain.handle("paradise:list-audio-apps", async (event) => {
+        assertTrustedIpcSender(event);
         if (process.platform !== "linux") return [];
         return await listActiveAudioApps().catch(() => []);
     });
 
-    ipcMain.handle("paradise:get-audio-target", () => {
+    ipcMain.handle("paradise:get-audio-target", (event) => {
+        assertTrustedIpcSender(event);
         return selectedAudioTarget;
     });
 
     ipcMain.handle(
         "paradise:set-audio-target",
-        async (_event, target: AudioAppCandidate | "ALL" | "NONE") => {
+        async (event, target: AudioAppCandidate | "ALL" | "NONE") => {
+            assertTrustedIpcSender(event);
             if (process.platform !== "linux") return false;
             selectedAudioTarget = target;
             console.log("[PipeWire] Switched audio target via UI:", target);
@@ -1217,9 +1875,23 @@ export class ElectronCapacitorApp {
                 nodeIntegration: true,
                 contextIsolation: true,
                 sandbox: false,
+                backgroundThrottling: false,
                 preload: preloadPath,
             },
         });
+
+        mainWebContentsId = this.MainWindow.webContents.id;
+
+        this.MainWindow.webContents.on(
+            "did-start-navigation",
+            (_event, _url, _isInPlace, isMainFrame) => {
+                if (isMainFrame) {
+                    streamHeaderRules.clear();
+                    frameHeaderRules.clear();
+                    trustedFrameHostIds.clear();
+                }
+            }
+        );
 
         this.MainWindow.on("maximize", () => {
             if (this.MainWindow && !this.MainWindow.isDestroyed()) {
@@ -1234,14 +1906,16 @@ export class ElectronCapacitorApp {
         });
 
         ipcMain.removeHandler("paradise:window-minimize");
-        ipcMain.handle("paradise:window-minimize", () => {
+        ipcMain.handle("paradise:window-minimize", (event) => {
+            assertTrustedIpcSender(event);
             if (this.MainWindow && !this.MainWindow.isDestroyed()) {
                 this.MainWindow.minimize();
             }
         });
 
         ipcMain.removeHandler("paradise:window-toggle-maximize");
-        ipcMain.handle("paradise:window-toggle-maximize", () => {
+        ipcMain.handle("paradise:window-toggle-maximize", (event) => {
+            assertTrustedIpcSender(event);
             if (!this.MainWindow || this.MainWindow.isDestroyed()) return false;
             if (this.MainWindow.isMaximized()) {
                 this.MainWindow.unmaximize();
@@ -1253,23 +1927,74 @@ export class ElectronCapacitorApp {
         });
 
         ipcMain.removeHandler("paradise:window-close");
-        ipcMain.handle("paradise:window-close", () => {
+        ipcMain.handle("paradise:window-close", (event) => {
+            assertTrustedIpcSender(event);
             if (this.MainWindow && !this.MainWindow.isDestroyed()) {
                 this.MainWindow.close();
             }
         });
 
         ipcMain.removeHandler("paradise:window-is-maximized");
-        ipcMain.handle("paradise:window-is-maximized", () => {
+        ipcMain.handle("paradise:window-is-maximized", (event) => {
+            assertTrustedIpcSender(event);
             if (!this.MainWindow || this.MainWindow.isDestroyed()) return false;
             return this.MainWindow.isMaximized();
         });
 
         ipcMain.removeHandler("paradise:window-toggle-devtools");
-        ipcMain.handle("paradise:window-toggle-devtools", () => {
+        ipcMain.handle("paradise:window-toggle-devtools", (event) => {
+            assertTrustedIpcSender(event);
             if (this.MainWindow && !this.MainWindow.isDestroyed()) {
                 this.MainWindow.webContents.toggleDevTools();
             }
+        });
+
+        const activeOsNotifications = new Set<Notification>();
+
+        ipcMain.removeHandler("paradise:notifications-supported");
+        ipcMain.handle("paradise:notifications-supported", (event) => {
+            assertTrustedIpcSender(event);
+            return Notification.isSupported();
+        });
+
+        ipcMain.removeHandler("paradise:show-notification");
+        ipcMain.handle("paradise:show-notification", (event, opts: any) => {
+            assertTrustedIpcSender(event);
+            if (!Notification.isSupported()) return false;
+            const title =
+                typeof opts?.title === "string" && opts.title.trim()
+                    ? opts.title.trim()
+                    : "Paradise";
+            const body = typeof opts?.body === "string" ? opts.body : "";
+            const roomId =
+                typeof opts?.roomId === "string" ? opts.roomId : undefined;
+            const eventId =
+                typeof opts?.eventId === "string" ? opts.eventId : undefined;
+            const silent = opts?.silent !== false;
+
+            const notif = new Notification({ title, body, silent });
+            activeOsNotifications.add(notif);
+            const cleanup = () => activeOsNotifications.delete(notif);
+            notif.on("close", cleanup);
+            notif.on("failed", cleanup);
+            notif.on("click", () => {
+                cleanup();
+                if (this.MainWindow && !this.MainWindow.isDestroyed()) {
+                    if (this.MainWindow.isMinimized()) {
+                        this.MainWindow.restore();
+                    }
+                    this.MainWindow.show();
+                    this.MainWindow.focus();
+                    if (roomId) {
+                        this.MainWindow.webContents.send(
+                            "paradise:notification-clicked",
+                            { roomId, eventId }
+                        );
+                    }
+                }
+            });
+            notif.show();
+            return true;
         });
 
         this.mainWindowState.manage(this.MainWindow);
@@ -1289,6 +2014,10 @@ export class ElectronCapacitorApp {
         });
 
         this.MainWindow.on("closed", () => {
+            mainWebContentsId = null;
+            streamHeaderRules.clear();
+            frameHeaderRules.clear();
+            trustedFrameHostIds.clear();
             stopPipewireRouting();
             if (
                 this.SplashScreen?.getSplashWindow() &&
@@ -1327,7 +2056,8 @@ export class ElectronCapacitorApp {
         ipcMain.removeHandler("paradise:set-tray-menu");
         ipcMain.handle(
             "paradise:set-tray-menu",
-            (_event, items: DynamicTrayItem[]) => {
+            (event, items: DynamicTrayItem[]) => {
+                assertTrustedIpcSender(event);
                 this.updateTrayMenu(Array.isArray(items) ? items : []);
                 return true;
             }
@@ -1336,7 +2066,8 @@ export class ElectronCapacitorApp {
         ipcMain.removeHandler("paradise:set-tray-tooltip");
         ipcMain.handle(
             "paradise:set-tray-tooltip",
-            (_event, tooltip: string) => {
+            (event, tooltip: string) => {
+                assertTrustedIpcSender(event);
                 if (this.TrayIcon) {
                     this.TrayIcon.setToolTip(tooltip || app.getName());
                 }
@@ -1347,7 +2078,8 @@ export class ElectronCapacitorApp {
         ipcMain.removeHandler("paradise:set-close-to-tray");
         ipcMain.handle(
             "paradise:set-close-to-tray",
-            (_event, enabled: boolean) => {
+            (event, enabled: boolean) => {
+                assertTrustedIpcSender(event);
                 this.setCloseToTrayEnabled(Boolean(enabled));
                 return this.getCloseToTrayEnabled();
             }
@@ -1362,7 +2094,12 @@ export class ElectronCapacitorApp {
         }
 
         this.MainWindow.webContents.setWindowOpenHandler((details) => {
-            if (details.frameName === "paradise-cast-stage") {
+            const isBlankPopout =
+                !details.url || details.url === "about:blank";
+            if (!isBlankPopout && !isTrustedAppUrl(details.url, this.customScheme)) {
+                return { action: "deny" };
+            }
+            if (isBlankPopout || details.frameName === "paradise-cast-stage") {
                 return {
                     action: "allow",
                     overrideBrowserWindowOptions: {
@@ -1372,23 +2109,54 @@ export class ElectronCapacitorApp {
                         titleBarStyle: "default",
                         autoHideMenuBar: true,
                         backgroundColor: "#000000",
-                        title: "Paradise Cast",
+                        title:
+                            details.frameName === "paradise-cast-stage"
+                                ? "Paradise Cast"
+                                : "Paradise",
+                        webPreferences: {
+                            nodeIntegration: false,
+                            contextIsolation: true,
+                            preload: undefined,
+                        },
                     },
                 };
             }
-            if (!details.url.includes(this.customScheme)) {
-                return { action: "deny" };
-            } else {
-                return { action: "allow" };
-            }
+            return {
+                action: "allow",
+                overrideBrowserWindowOptions: {
+                    webPreferences: {
+                        nodeIntegration: false,
+                        contextIsolation: true,
+                        sandbox: true,
+                        preload: undefined,
+                    },
+                },
+            };
         });
 
-        this.MainWindow.webContents.on("will-navigate", (event, _newURL) => {
-            if (
-                !this.MainWindow.webContents
-                    .getURL()
-                    .includes(this.customScheme)
-            ) {
+        this.MainWindow.webContents.on(
+            "did-create-window",
+            (childWindow, details) => {
+                const isBlankPopout =
+                    !details.url || details.url === "about:blank";
+                if (isBlankPopout || details.frameName === "paradise-cast-stage") {
+                    const popoutWcId = childWindow.webContents.id;
+                    trustedFrameHostIds.add(popoutWcId);
+                    childWindow.on("closed", () => {
+                        trustedFrameHostIds.delete(popoutWcId);
+                    });
+                    childWindow.webContents.on("will-navigate", (ev) => {
+                        ev.preventDefault();
+                    });
+                    childWindow.webContents.setWindowOpenHandler(() => ({
+                        action: "deny",
+                    }));
+                }
+            }
+        );
+
+        this.MainWindow.webContents.on("will-navigate", (event, newURL) => {
+            if (!isTrustedAppUrl(newURL, this.customScheme)) {
                 event.preventDefault();
             }
         });
