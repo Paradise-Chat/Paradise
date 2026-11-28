@@ -1,0 +1,510 @@
+
+** Cross-Platform Persistent Cache
+
+**** Preface
+
+Provides a unified IndexedDB-backed persistent cache (~paradise_cache_v1~)
+shared across Web, Electron, Android Capacitor WebView, iOS WKWebView, and
+all Web Workers (~engine~, ~media~, ~virtualizer~).
+
+Stores:
+- ~assets~: versioned / ETag-validated text and binary runtime assets
+  (core and extension ~i18n.edn~, registry indices, engine/plugin manifests,
+  engine JS bundles, and WASM binaries).
+- ~media~: LRU-pruned binary cache for avatars, custom emotes, stickers, and
+  fetched media payloads (scoped per account).
+- ~meta~: lightweight EDN metadata snapshots (last known ~config.edn~ version,
+  emote pack snapshots).
+
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(ns ^:virtualizer/skip paradise.shared.client.cache
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.client.idb :as idb]
+            [promesa.core :as p]))
+#+end_src
+
+
+**** Database Initialization
+
+Delegates IndexedDB opening, handle caching, ~onversionchange~ auto-closing,
+and primitive CRUD operations to ~paradise.shared.client.idb~.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(def cache-db-name "paradise_cache_v1")
+(def ^:private cache-db-version 1)
+
+(def ^:private store-assets "assets")
+(def ^:private store-media "media")
+(def ^:private store-meta "meta")
+
+(def ^:private max-media-bytes (* 120 1024 1024))
+(def ^:private max-media-entries 2000)
+(def ^:private max-single-media-bytes (* 8 1024 1024))
+
+(defonce ^:private !prune-scheduled? (atom false))
+(defonce ^:private !inflight-assets (atom {}))
+
+(defn- upgrade-cache-db! [db _]
+  (when-not (.contains (.-objectStoreNames db) store-assets)
+    (.createObjectStore db store-assets #js {:keyPath "key"}))
+  (when-not (.contains (.-objectStoreNames db) store-media)
+    (let [ms (.createObjectStore db store-media #js {:keyPath "key"})]
+      (.createIndex ms "by_access" "lastAccess" #js {:unique false})
+      (.createIndex ms "by_user" "userId" #js {:unique false})))
+  (when-not (.contains (.-objectStoreNames db) store-meta)
+    (.createObjectStore db store-meta #js {:keyPath "key"})))
+
+(defn- open-cache-db []
+  (idb/open-db cache-db-name cache-db-version upgrade-cache-db!))
+
+(defn- idb-get [store-name k]
+  (when (some? k)
+    (idb/get-record (open-cache-db) store-name (str k))))
+
+(defn- idb-put! [store-name js-record]
+  (idb/put-record! (open-cache-db) store-name js-record))
+
+(defn- idb-delete! [store-name k]
+  (if (nil? k)
+    (p/resolved false)
+    (idb/delete-record! (open-cache-db) store-name (str k))))
+
+(defn- idb-clear-store! [store-name]
+  (idb/clear-store! (open-cache-db) store-name))
+#+end_src
+
+
+**** Asset Store Helpers
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(defn- resolve-url-obj [url]
+  (when (and (string? url) (not (str/blank? url)))
+    (try
+      (let [base (when (and (exists? js/globalThis)
+                            (.-location js/globalThis)
+                            (.. js/globalThis -location -href))
+                   (.. js/globalThis -location -href))]
+        (if base
+          (js/URL. url base)
+          (js/URL. url)))
+      (catch :default _ nil))))
+
+(defn local-dev-url? [url]
+  (boolean
+   (and (string? url)
+        (or (str/includes? url "/local/")
+            (when-let [u (resolve-url-obj url)]
+              (let [host (.-hostname u)]
+                (or (= host "localhost")
+                    (= host "127.0.0.1")
+                    (= host "::1")
+                    (= host "[::1]"))))))))
+
+(defn local-dev-origin? []
+  (boolean
+   (when (and (exists? js/globalThis)
+              (.-location js/globalThis)
+              (.. js/globalThis -location -href))
+     (local-dev-url? (.. js/globalThis -location -href)))))
+
+(defn- same-origin-url? [url]
+  (boolean
+   (when-let [u (resolve-url-obj url)]
+     (when-let [loc-origin (and (exists? js/globalThis)
+                                (.-location js/globalThis)
+                                (.. js/globalThis -location -origin))]
+       (= (.-origin u) loc-origin)))))
+
+(defn- js-asset->clj [^js rec]
+  (when rec
+    {:key           (gobj/get rec "key")
+     :version       (gobj/get rec "version")
+     :etag          (gobj/get rec "etag")
+     :last-modified (gobj/get rec "lastModified")
+     :content-type  (gobj/get rec "contentType")
+     :data          (gobj/get rec "data")
+     :size          (gobj/get rec "size")
+     :updated-at    (gobj/get rec "updatedAt")
+     :last-access   (gobj/get rec "lastAccess")}))
+
+(defn get-asset [k]
+  (p/let [rec (idb-get store-assets k)]
+    (js-asset->clj rec)))
+
+(defn put-asset!
+  [k {:keys [version etag last-modified content-type data size]}]
+  (let [now  (js/Date.now)
+        sz   (or size
+                 (cond
+                   (string? data)              (.-length data)
+                   (instance? js/ArrayBuffer data) (.-byteLength data)
+                   (some? (.-byteLength data)) (.-byteLength data)
+                   :else                       0))
+        rec  #js {:key          (str k)
+                  :version      version
+                  :etag         etag
+                  :lastModified last-modified
+                  :contentType  content-type
+                  :data         data
+                  :size         sz
+                  :updatedAt    now
+                  :lastAccess   now}]
+    (idb-put! store-assets rec)))
+
+(defn delete-asset! [k]
+  (idb-delete! store-assets k))
+
+(defn delete-assets-by-prefix!
+  "Deletes all asset store entries whose key starts with `prefix`.
+   When optional `:keep-version` is provided, skips records whose stored
+   `version` already matches `keep-version` (preventing concurrent workers
+   from deleting freshly downloaded assets during a version bump)."
+  ([prefix]
+   (delete-assets-by-prefix! prefix nil))
+  ([prefix {:keys [keep-version]}]
+   (let [pfx      (str prefix)
+         keep-str (when (some? keep-version) (str keep-version))]
+     (if (str/blank? pfx)
+       (p/resolved 0)
+       (idb/delete-where!
+        (open-cache-db)
+        store-assets
+        (fn [k rec]
+          (let [ver (when rec (gobj/get rec "version"))]
+            (and (str/starts-with? (str k) pfx)
+                 (or (nil? keep-str)
+                     (not= (str ver) keep-str))))))))))
+#+end_src
+
+***** Conditional Revalidation Headers
+
+Manual ~If-None-Match~ / ~If-Modified-Since~ headers are attached only on
+same-origin requests when the version tag has not changed. Sending conditional
+headers on cross-origin URLs triggers CORS preflight ~OPTIONS~ requests that
+many static CDN hosts reject, which would otherwise trap clients on stale
+cached data.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(defn- build-conditional-headers [cached url version]
+  (let [hdrs         #js {}
+        ver-changed? (and (some? version)
+                          (some? (:version cached))
+                          (not= (str (:version cached)) (str version)))]
+    (when (and cached (not ver-changed?) (same-origin-url? url))
+      (when-let [etag (:etag cached)]
+        (gobj/set hdrs "If-None-Match" etag))
+      (when-let [lm (:last-modified cached)]
+        (gobj/set hdrs "If-Modified-Since" lm)))
+    hdrs))
+
+(defn- fetch-with-safe-revalidation [do-fetch url cached version]
+  (let [hdrs         (build-conditional-headers cached url version)
+        has-cond?    (pos? (.-length (js/Object.keys hdrs)))
+        ver-changed? (and (some? version)
+                          (some? (:version cached))
+                          (not= (str (:version cached)) (str version)))
+        cache-mode   (if ver-changed? "reload" "no-cache")
+        init         (if has-cond?
+                       #js {:cache cache-mode :headers hdrs}
+                       #js {:cache cache-mode})]
+    (if has-cond?
+      (-> (do-fetch url init)
+          (p/catch
+           (fn [_]
+             (do-fetch url #js {:cache cache-mode}))))
+      (do-fetch url init))))
+
+(defn- asset-fresh? [cached {:keys [version ttl-ms force? local-revalidate?]} url]
+  (when (and cached (some? (:data cached)) (not force?))
+    (let [now        (js/Date.now)
+          updated-at (or (:updated-at cached) 0)
+          age-ms     (- now updated-at)
+          local?     (and local-revalidate? (local-dev-url? url))]
+      (cond
+        (and (some? version) (not local?))
+        (= (str (:version cached)) (str version))
+
+        (and (number? ttl-ms) (pos? ttl-ms) (not local?))
+        (< age-ms ttl-ms)
+
+        :else false))))
+
+(defn- fetch-asset-cached!
+  [{:keys [url key-prefix data-key valid-data? decode-resp! default-ctype]}
+   {:keys [key version force? content-type fetch-fn] :as opts}]
+  (let [cache-key (or key (str key-prefix url))
+        inflight  (get @!inflight-assets cache-key)
+        make-hit  (fn [data ctype ver etag from-cache? stale?]
+                    (cond-> {data-key     data
+                             :from-cache? from-cache?
+                             :version     ver}
+                      ctype  (assoc :content-type ctype)
+                      etag   (assoc :etag etag)
+                      stale? (assoc :stale? true)))]
+    (if (and inflight (not force?))
+      inflight
+      (let [do-fetch (or fetch-fn js/fetch)
+            fallback (fn [cached]
+                       (when (valid-data? (:data cached))
+                         (make-hit (:data cached)
+                                   (or (:content-type cached) content-type default-ctype)
+                                   (:version cached)
+                                   (:etag cached)
+                                   true
+                                   true)))
+            prom
+            (-> (p/let [cached (get-asset cache-key)]
+                  (if (and (asset-fresh? cached opts url)
+                           (valid-data? (:data cached)))
+                    (make-hit (:data cached)
+                              (or (:content-type cached) content-type default-ctype)
+                              (:version cached)
+                              (:etag cached)
+                              true
+                              false)
+                    (-> (fetch-with-safe-revalidation do-fetch url cached version)
+                        (p/then
+                         (fn [resp]
+                           (cond
+                             (and resp (= (.-status resp) 304) (valid-data? (:data cached)))
+                             (let [eff-ver (or version (:version cached))]
+                               (p/do!
+                                 (put-asset! cache-key (assoc cached :version eff-ver))
+                                 (make-hit (:data cached)
+                                           (or (:content-type cached) content-type default-ctype)
+                                           eff-ver
+                                           (:etag cached)
+                                           true
+                                           false)))
+
+                             (and resp (.-ok resp))
+                             (p/let [payload (decode-resp! resp)]
+                               (let [etag  (some-> (.-headers resp) (.get "etag"))
+                                     lm    (some-> (.-headers resp) (.get "last-modified"))
+                                     ctype (or (some-> (.-headers resp) (.get "content-type"))
+                                               content-type
+                                               default-ctype)]
+                                 (put-asset! cache-key
+                                             {:version       version
+                                              :etag          etag
+                                              :last-modified lm
+                                              :content-type  ctype
+                                              :data          payload})
+                                 (make-hit payload ctype version etag false false)))
+
+                             :else
+                             (fallback cached))))
+                        (p/catch (fn [_] (fallback cached))))))
+                (p/finally
+                  (fn []
+                    (swap! !inflight-assets dissoc cache-key))))]
+        (swap! !inflight-assets assoc cache-key prom)
+        prom))))
+
+(defn fetch-text-cached!
+  "Fetches UTF-8 text from `url` backed by persistent IDB cache.
+   Options:
+   - `:key`               explicit cache key (defaults to `text:<url>`)
+   - `:version`           immutable version/hash tag; matching cached entry returns with 0 network calls
+   - `:ttl-ms`            freshness window in ms when `:version` is omitted
+   - `:force?`            bypass freshness check and revalidate via network
+   - `:local-revalidate?` for localhost/local dev URLs, still send conditional If-None-Match/304 check
+   - `:fetch-fn`          optional custom fetch function (defaults to `js/fetch`)"
+  [url & [opts]]
+  (fetch-asset-cached!
+   {:url          url
+    :key-prefix   "text:"
+    :data-key     :text
+    :valid-data?  string?
+    :decode-resp! #(.text %)}
+   opts))
+
+(defn fetch-bytes-cached!
+  "Fetches binary ArrayBuffer from `url` backed by persistent IDB cache."
+  [url & [opts]]
+  (fetch-asset-cached!
+   {:url           url
+    :key-prefix    "bin:"
+    :data-key      :bytes
+    :valid-data?   #(instance? js/ArrayBuffer %)
+    :decode-resp!  #(.arrayBuffer %)
+    :default-ctype "application/octet-stream"}
+   opts))
+#+end_src
+
+
+**** Persistent Media LRU Cache
+
+Stores fetched media payloads in IndexedDB bounded by byte and entry caps. On
+reads, the LRU ~lastAccess~ timestamp is touched at most once every 5 minutes
+to avoid unnecessary write amplification.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(defn- prune-media-store! []
+  (when (and (idb/available?) (compare-and-set! !prune-scheduled? false true))
+    (js/setTimeout
+     (fn []
+       (-> (p/let [db (open-cache-db)]
+             (when db
+               (js/Promise.
+                (fn [resolve _]
+                  (try
+                    (let [tx      (.transaction db #js [store-media] "readwrite")
+                          st      (.objectStore tx store-media)
+                          idx     (.index st "by_access")
+                          entries #js []
+                          req     (.openCursor idx nil "next")]
+                      (set! (.-onsuccess req)
+                            (fn [e]
+                              (if-let [cursor (.. e -target -result)]
+                                (let [val (.-value cursor)]
+                                  (.push entries #js {:key  (gobj/get val "key")
+                                                      :size (or (gobj/get val "size") 0)})
+                                  (.continue cursor))
+                                (let [total-count (.-length entries)
+                                      total-bytes (loop [i 0 acc 0]
+                                                    (if (< i total-count)
+                                                      (recur (inc i) (+ acc (.-size (aget entries i))))
+                                                      acc))]
+                                  (when (or (> total-count max-media-entries)
+                                            (> total-bytes max-media-bytes))
+                                    (let [target-bytes (* 0.8 max-media-bytes)
+                                          target-count (* 0.8 max-media-entries)]
+                                      (loop [i 0 rem-b total-bytes rem-c total-count]
+                                        (when (and (< i total-count)
+                                                   (or (> rem-b target-bytes)
+                                                       (> rem-c target-count)))
+                                          (let [ent (aget entries i)]
+                                            (.delete st (.-key ent))
+                                            (recur (inc i) (- rem-b (.-size ent)) (dec rem-c)))))))))))
+                      (set! (.-oncomplete tx) #(resolve true))
+                      (set! (.-onerror tx) #(resolve false)))
+                    (catch :default _
+                      (resolve false)))))))
+           (p/finally #(reset! !prune-scheduled? false))))
+     4000)))
+
+(defn get-media [cache-key]
+  (if (or (str/blank? (str cache-key)) (not (idb/available?)))
+    (p/resolved nil)
+    (p/let [rec (idb-get store-media cache-key)]
+      (when (and rec (gobj/get rec "bytes"))
+        (let [now        (js/Date.now)
+              prev-touch (or (gobj/get rec "lastAccess") 0)]
+          (when (> (- now prev-touch) 300000)
+            (gobj/set rec "lastAccess" now)
+            (idb-put! store-media rec))
+          {:key       (gobj/get rec "key")
+           :user-id   (gobj/get rec "userId")
+           :mime-type (or (gobj/get rec "mimeType") "application/octet-stream")
+           :bytes     (gobj/get rec "bytes")
+           :size      (gobj/get rec "size")})))))
+
+(defn put-media! [cache-key {:keys [user-id mime-type bytes]}]
+  (let [uid (some-> user-id str str/trim not-empty)
+        ab  (cond
+              (instance? js/ArrayBuffer bytes) bytes
+              (and bytes (instance? js/ArrayBuffer (.-buffer bytes)))
+              (if (and (zero? (.-byteOffset bytes))
+                       (= (.-byteLength bytes) (.. bytes -buffer -byteLength)))
+                (.-buffer bytes)
+                (.slice (.-buffer bytes)
+                        (.-byteOffset bytes)
+                        (+ (.-byteOffset bytes) (.-byteLength bytes))))
+              :else nil)
+        sz  (if ab (.-byteLength ab) 0)]
+    (if (or (str/blank? (str cache-key))
+            (nil? uid)
+            (= uid "anon")
+            (not ab)
+            (zero? sz)
+            (> sz max-single-media-bytes))
+      (p/resolved false)
+      (let [now (js/Date.now)
+            rec #js {:key        (str cache-key)
+                     :userId     uid
+                     :mimeType   (or (not-empty (str mime-type)) "application/octet-stream")
+                     :bytes      ab
+                     :size       sz
+                     :updatedAt  now
+                     :lastAccess now}]
+        (p/let [ok? (idb-put! store-media rec)]
+          (when ok?
+            (prune-media-store!))
+          ok?)))))
+
+(defn clear-user-media! [user-id]
+  (if (or (str/blank? (str user-id)) (not (idb/available?)))
+    (p/resolved false)
+    (p/let [_ (idb/delete-where!
+               (open-cache-db)
+               store-media
+               (constantly true)
+               {:index-name "by_user"
+                :key-range  (.only js/IDBKeyRange (str user-id))})]
+      true)))
+
+(defn clear-all-media! []
+  (idb-clear-store! store-media))
+#+end_src
+
+
+**** Metadata Snapshots Store
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/cache.cljs
+(defn get-meta [k]
+  (p/let [rec (idb-get store-meta k)]
+    (when rec
+      (try
+        {:data       (when-let [raw (gobj/get rec "edn")]
+                       (reader/read-string raw))
+         :version    (gobj/get rec "version")
+         :updated-at (gobj/get rec "updatedAt")}
+        (catch :default _ nil)))))
+
+(defn put-meta!
+  ([k data]
+   (put-meta! k data nil))
+  ([k data version]
+   (idb-put! store-meta
+             #js {:key       (str k)
+                  :version   version
+                  :edn       (pr-str data)
+                  :updatedAt (js/Date.now)})))
+
+(defn delete-meta! [k]
+  (idb-delete! store-meta k))
+
+(defn clear-user-meta!
+  "Deletes all metadata entries scoped to `user-id` (e.g. `emotes:<engine>:<user-id>:*`)."
+  [user-id]
+  (let [uid (some-> user-id str str/trim not-empty)]
+    (if (nil? uid)
+      (p/resolved 0)
+      (let [needle (str ":" uid ":")
+            suffix (str ":" uid)]
+        (idb/delete-where!
+         (open-cache-db)
+         store-meta
+         (fn [k _]
+           (let [ks (str k)]
+             (or (str/includes? ks needle)
+                 (str/ends-with? ks suffix)))))))))
+
+(defn clear-runtime-assets!
+  "Clears cached runtime assets (JS, WASM, EDN, i18n) and metadata snapshots
+   while preserving user media (avatars, custom emotes, stickers)."
+  []
+  (p/all [(idb-clear-store! store-assets)
+          (idb-clear-store! store-meta)]))
+
+(defn clear-all-caches! []
+  (p/all [(idb-clear-store! store-assets)
+          (idb-clear-store! store-media)
+          (idb-clear-store! store-meta)]))
+#+end_src
