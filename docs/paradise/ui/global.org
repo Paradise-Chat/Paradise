@@ -1840,6 +1840,76 @@ also likely not be selectable (as the fallback will be literal text).
       (when (= (:owner @!swipe-drag-data) :bottom-sheet)
         (swap! !swipe-drag-data assoc :owner nil)))))
 
+(defmethod handle-swipe! :voice-hold
+  [_ phase {:keys [e pointer-id start-x start-y lock-threshold cancel-threshold
+                   on-move on-lock on-cancel on-release]}]
+  (let [match-ptr? (fn [ev]
+                     (or (nil? pointer-id)
+                         (nil? ev)
+                         (= (.-pointerId ev) pointer-id)))]
+    (case phase
+      :start
+      (swap! !swipe-drag-data assoc
+             :owner           :voice-hold
+             :sidebar-start-x nil
+             :sidebar-start-y nil
+             :sidebar-dx      0)
+
+      :move
+      (when (and (= (:owner @!swipe-drag-data) :voice-hold)
+                 (match-ptr? e))
+        (let [dx (max 0 (- start-x (.-clientX e)))
+              dy (max 0 (- start-y (.-clientY e)))]
+          (when (fn? on-move) (on-move dx dy))
+          (cond
+            (and lock-threshold (>= dy lock-threshold) (>= dy dx))
+            (do
+              (swap! !swipe-drag-data assoc :owner nil)
+              (when (fn? on-lock) (on-lock)))
+
+            (and cancel-threshold (>= dx cancel-threshold) (> dx dy))
+            (do
+              (swap! !swipe-drag-data assoc :owner nil)
+              (when (fn? on-cancel) (on-cancel))))))
+
+      :up
+      (when (and (= (:owner @!swipe-drag-data) :voice-hold)
+                 (match-ptr? e))
+        (let [cancelled? (= (.-type e) "pointercancel")]
+          (swap! !swipe-drag-data assoc :owner nil)
+          (if cancelled?
+            (when (fn? on-cancel) (on-cancel))
+            (when (fn? on-release) (on-release)))))
+
+      :cleanup
+      (when (= (:owner @!swipe-drag-data) :voice-hold)
+        (swap! !swipe-drag-data assoc :owner nil)))))
+
+(defn attach-window-swipe!
+  "Registers window-level pointer listeners for a swipe gesture kind (such as
+   `:voice-hold`) that claims `:owner` in `!swipe-drag-data` immediately so
+   sidebar/message gestures cannot collide. Returns an idempotent cleanup fn."
+  [kind ctx]
+  (let [!active? (atom true)
+        on-move  (fn [ev]
+                   (when @!active?
+                     (handle-swipe! kind :move (assoc ctx :e ev))))
+        on-up    (fn [ev]
+                   (when @!active?
+                     (handle-swipe! kind :up (assoc ctx :e ev))))]
+    (handle-swipe! kind :start ctx)
+    (when (exists? js/window)
+      (.addEventListener js/window "pointermove" on-move #js {:passive true})
+      (.addEventListener js/window "pointerup" on-up)
+      (.addEventListener js/window "pointercancel" on-up))
+    (fn []
+      (when (compare-and-set! !active? true false)
+        (when (exists? js/window)
+          (.removeEventListener js/window "pointermove" on-move)
+          (.removeEventListener js/window "pointerup" on-up)
+          (.removeEventListener js/window "pointercancel" on-up))
+        (handle-swipe! kind :cleanup ctx)))))
+
 (defmethod handle-swipe! :default
   [kind phase {:keys [e !drag-state on-start on-move on-end can-claim?]}]
   (case phase
