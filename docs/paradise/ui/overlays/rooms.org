@@ -47,10 +47,16 @@ given room, space, server, channel, community, or direct message.
    (boolean is-forum?)])
 
 (defn fallback-room-actions [{:keys [room-id is-space? membership]}]
-  (let [joined? (= (str/lower-case (str (or membership "joined"))) "joined")]
+  (let [joined? (= (safe-lower (or membership "joined")) "joined")]
     (vec
      (remove nil?
              [(when joined?
+                {:id        "notifications"
+                 :label-key :navigation.actions/notification-settings
+                 :icon      :bell
+                 :command   {:type  :dispatch
+                             :event [:rooms/open-settings room-id :notifications]}})
+              (when joined?
                 {:id        "settings"
                  :label-key :navigation.actions/settings
                  :icon      :settings
@@ -110,6 +116,84 @@ given room, space, server, channel, community, or direct message.
 **** Context Menu
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/rooms.cljs
+(defn ^:ui room-notifications-submenu-content
+  [{:keys [room-id close-fn on-item-click]}]
+  (r/with-let [!fetched-rid (atom nil)]
+    (let [_           (when (and room-id (not= @!fetched-rid room-id))
+                        (reset! !fetched-rid room-id)
+                        (re-frame/dispatch [:room-settings/fetch-notifications room-id]))
+          tr          @(re-frame/subscribe [:i18n/tr])
+          notif-state @(re-frame/subscribe [:room-settings/notifications-state room-id])
+          {:keys [loading? saving? data supported? can-edit? cur-mode def-mode
+                  modes toggles toggle-vals]}
+          (room-notifs/derive-room-notif-view-model notif-state tr)
+          finish!     (fn [f]
+                        (if on-item-click
+                          (on-item-click f)
+                          (do
+                            (when f (f))
+                            (if close-fn
+                              (close-fn)
+                              (re-frame/dispatch [:ui/close-context-menu])))))]
+      [:<>
+       (cond
+         (and loading? (nil? data))
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:common/loading])]]
+
+         (and data (not supported?))
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:room-settings.notifications/unsupported])]]
+
+         data
+         [:<>
+          (for [m modes]
+            (let [selected? (= m cur-mode)
+                  title     (room-notifs/effective-mode-title tr m def-mode)]
+              ^{:key (name m)}
+              [:div.context-menu-item
+               {:class    (when selected? "is-selected")
+                :on-click (fn [e]
+                            (.stopPropagation e)
+                            (when (and can-edit? (not saving?))
+                              (finish!
+                               #(when-not selected?
+                                  (room-notifs/set-room-notif-mode! room-id m toggle-vals)))))}
+               [:span.item-icon
+                (when selected? [icons/check {:size "15px"}])]
+               [:span.item-label title]]))
+          (when (seq toggles)
+            [:<>
+             [:div.context-menu-divider]
+             (for [{:keys [id value disabled?] :as toggle} toggles]
+               (let [tid   (keyword id)
+                     on?   (boolean value)
+                     title (or (not-empty (resolve-item-label tr toggle)) (name tid))]
+                 ^{:key (name tid)}
+                 [:div.context-menu-item
+                  {:class    (when on? "is-selected")
+                   :on-click (fn [e]
+                               (.stopPropagation e)
+                               (when (and can-edit? (not saving?) (not disabled?))
+                                 (room-notifs/toggle-room-notif-option!
+                                  room-id cur-mode toggle-vals tid (not on?))))}
+                  [:span.item-icon
+                   (when on? [icons/check {:size "15px"}])]
+                  [:span.item-label title]]))])]
+
+         :else
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:room-settings.notifications/unsupported])]])
+
+       [:div.context-menu-divider]
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(re-frame/dispatch
+                                [:rooms/open-settings room-id :notifications])))}
+        [:span.item-icon [icons/settings {:size "15px"}]]
+        [:span.item-label (tr [:room-settings.notifications/more-settings])]]])))
+
 (defn ^:ui engine-room-option-items
   "Fetches and renders engine-supplied room option items for a context menu."
   [{:keys [room-id parent-id room-name is-space? is-dm? context membership close-fn on-item-click]}]
@@ -118,7 +202,9 @@ given room, space, server, channel, community, or direct message.
           active-engine @(re-frame/subscribe [:auth/active-engine])
           preview       @(re-frame/subscribe [:rooms/preview room-id])
           is-forum?     @(re-frame/subscribe [:room/is-forum? room-id])
+          notif-state   @(re-frame/subscribe [:room-settings/notifications-state room-id])
           native-forum? (boolean (:native-forum? preview))
+          joined?       (= (safe-lower (or membership "joined")) "joined")
           req           {:room-id       room-id
                          :parent-id     parent-id
                          :room-name     room-name
@@ -131,12 +217,23 @@ given room, space, server, channel, community, or direct message.
           cache-key     (options-cache-key active-engine req)
           _             (when (and room-id (not= @!last-req cache-key))
                           (reset! !last-req cache-key)
-                          (re-frame/dispatch [:room-options/fetch req]))
-          items         @(re-frame/subscribe [:room-options/items cache-key])]
-      [engine-option-items {:tr            tr
-                            :items         items
-                            :close-fn      close-fn
-                            :on-item-click on-item-click}])))
+                          (re-frame/dispatch [:room-options/fetch req])
+                          (when joined?
+                            (re-frame/dispatch [:room-settings/fetch-notifications room-id])))
+          items         @(re-frame/subscribe [:room-options/items cache-key])
+          notif-sub     (room-notifs/format-notif-mode-subtitle tr (:data notif-state))]
+      [engine-option-items
+       {:tr                   tr
+        :items                items
+        :close-fn             close-fn
+        :on-item-click        on-item-click
+        :subtitle-by-id       (when notif-sub {"notifications" notif-sub})
+        :render-submenu-by-id {"notifications"
+                               (fn [_ cfn]
+                                 [room-notifications-submenu-content
+                                  {:room-id       room-id
+                                   :close-fn      cfn
+                                   :on-item-click on-item-click}])}}])))
 
 (defn ^:ui room-context-menu-content [props]
   [engine-room-option-items props])
