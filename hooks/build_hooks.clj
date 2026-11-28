@@ -84,6 +84,37 @@
       (println "--- All themes recursively copied to resources/public/themes ---"))
     build-state))
 
+(defn- sha256-files [paths]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (doseq [p paths
+            :let [f (io/file p)]
+            :when (.exists f)]
+      (.update md (.getBytes (str p "\n") "UTF-8"))
+      (.update md (java.nio.file.Files/readAllBytes (.toPath f))))
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
+
+(defn- stamp-src-gen-digest! [src-path gen-path dep-paths]
+  (let [src-file (io/file src-path)
+        gen-file (io/file gen-path)]
+    (when (or (.exists gen-file) (.exists src-file))
+      (let [digest  (sha256-files dep-paths)
+            marker  (str ";; root-assets-digest: " digest)
+            cur-gen (when (.exists gen-file) (slurp gen-file))]
+        (when-not (and cur-gen (str/includes? cur-gen marker))
+          (let [base-content (or cur-gen (slurp src-file))
+                cleaned      (str/replace base-content #"\n?;; root-assets-digest: [0-9a-f]+\n?" "")]
+            (io/make-parents gen-file)
+            (spit gen-file (str cleaned "\n" marker "\n"))
+            (println (str "--- Refreshed " gen-path " for updated root EDN assets"))))))))
+
+(defn- sync-static-config-sources! []
+  (stamp-src-gen-digest! "src/paradise/shared/utils/macros.cljs"
+                         "src-gen/paradise/shared/utils/macros.cljs"
+                         ["config.edn" "i18n.edn"])
+  (stamp-src-gen-digest! "src/service_worker.cljs"
+                         "src-gen/service_worker.cljs"
+                         ["config.edn"]))
+
 (defn include-root-files
   {:shadow.build/stage :compile-prepare}
   [build-state & args]
@@ -94,7 +125,8 @@
                   target (io/file resource-dir f)]]
       (when (.exists source)
         (io/make-parents target)
-        (io/copy source target))))
+        (io/copy source target)))
+    (sync-static-config-sources!))
   build-state)
 
 (defn fetch-community-registry
@@ -147,6 +179,8 @@
         config      (try (edn/read-string (slurp config-path))
                          (catch Exception _ {}))
         updated     (assoc config :version version)]
-    (spit config-path (pr-str updated))
-    (println (str "Stamped config.edn with version " version))
+    (when (not= config updated)
+      (spit config-path (pr-str updated))
+      (println (str "Stamped config.edn with version " version)))
+    (sync-static-config-sources!)
     build-state))
