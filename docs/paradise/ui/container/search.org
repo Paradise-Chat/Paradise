@@ -18,7 +18,7 @@ cross-room (~:all~) scopes.
    [paradise.shared.client.state :as state]
    [paradise.shared.utils.helpers :refer [ok-status?]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.container.reusable :refer [message-preview-item]]
+   [paradise.ui.container.reusable :refer [message-preview-list]]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
@@ -230,15 +230,11 @@ cross-room (~:all~) scopes.
            (tr [:container.search/loading])]
 
           (and (not loading?) (seq results))
-          [:div.search-list
-           (for [res results
-                 :let [hit-room (or (:room-id res) (:room_id res) active-room)
-                       row-key  (str hit-room "::" (:id res))]]
-             ^{:key row-key}
-             [message-preview-item
-              active-room
-              res
-              {:show-room-badge? (= scope :all)}])]
+          [message-preview-list
+           active-room
+           results
+           {:class            "search-list"
+            :show-room-badge? (= scope :all)}]
 
           (and (not loading?) (not (str/blank? (:query search-state))) (empty? results))
           [:div.search-status
