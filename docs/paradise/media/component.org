@@ -40,13 +40,17 @@ manner.
 (defn- resolve-active-user-id [props]
   (or (:user-id props)
       (:userId props)
-      (:active-user-id @rf-db/app-db)))
+      (binding [ratom/*ratom-context* nil]
+        (:active-user-id @rf-db/app-db))))
 
 (defn- extract-cache-key [user-id uri source-map width height]
   (let [base-key (or (:uri source-map)
+                     (:url source-map)
                      (get-in source-map [:file :url])
+                     (get-in source-map [:plain :url])
                      (when (and source-map (not (map? source-map)))
                        (or (.-uri source-map)
+                           (.-url source-map)
                            (some-> (.-file source-map) .-url)
                            (some-> (.-plain source-map) .-url)))
                      uri)
@@ -55,6 +59,15 @@ manner.
                    base-key)]
     (when sized
       (str (or user-id "anon") "::" sized))))
+
+(defn- assign-node-src! [node url]
+  (when (and node url)
+    (let [attr-src (.getAttribute node "src")
+          prev-src (.-__paradiseMediaSrc node)]
+      (when (and (not= prev-src url)
+                 (not= attr-src url))
+        (set! (.-__paradiseMediaSrc node) url)
+        (set! (.-src node) url)))))
 
 (defn- hide-spinner! [node]
   (when node
@@ -96,6 +109,10 @@ as a raw React component.
 
 **** Media Fetch
 
+Media lookups check the L2 persistent cross-platform IndexedDB media cache
+(=paradise.shared.client.cache=) for avatars, emotes, stickers, and images
+before asking the media worker pool to fetch or decrypt over the network.
+
 #+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
 (defonce !native-media-cache (js/Map.))
 
@@ -107,6 +124,12 @@ as a raw React component.
                   (js/URL.revokeObjectURL url)))))
   (.clear !native-media-cache))
 
+(defn purge-user-media-cache! [user-id]
+  (clear-media-cache!)
+  (if user-id
+    (cache/clear-user-media! user-id)
+    (cache/clear-all-media!)))
+
 (defn- resolve-pending-entry! [cache-key status url fallback-url]
   (when-let [entry (.get !native-media-cache cache-key)]
     (let [nodes (.-nodes entry)]
@@ -116,7 +139,7 @@ as a raw React component.
         (.forEach nodes
                   (fn [node]
                     (if url
-                      (set! (.-src node) url)
+                      (assign-node-src! node url)
                       (when (= status "error")
                         (notify-error! node)))
                     (when (= status "ready")
@@ -139,44 +162,99 @@ as a raw React component.
            (when (str/starts-with? (str url) "blob:")
              (js/URL.revokeObjectURL url)))
          (.delete !native-media-cache cache-key))))
-   100))
+   15000))
+
+(defn- should-bg-cache-direct-url? [url width height]
+  (when (and (string? url)
+             (or (str/starts-with? url "https://")
+                 (str/starts-with? url "http://")))
+    (boolean
+     (or (and (number? width) (<= width 256))
+         (and (number? height) (<= height 256))
+         (re-find #"/(?:avatars|icons|emojis|stickers|banners|channel-icons)/" url)))))
+
+(defonce ^:private !bg-caching-keys (atom #{}))
+
+(defn- background-cache-direct-url! [cache-key user-id url fallback-mime]
+  (when (and (some-> user-id str str/trim not-empty)
+             (not (contains? @!bg-caching-keys cache-key)))
+    (swap! !bg-caching-keys conj cache-key)
+    (-> (js/fetch url #js {:mode "cors" :credentials "omit" :referrerPolicy "no-referrer"})
+        (p/then (fn [resp]
+                  (when (and resp (.-ok resp) (not= (.-type resp) "opaque"))
+                    (let [ctype (or (some-> (.-headers resp) (.get "content-type"))
+                                    fallback-mime
+                                    "image/png")]
+                      (p/let [ab (.arrayBuffer resp)]
+                        (when (pos? (.-byteLength ab))
+                          (cache/put-media! cache-key
+                                            {:user-id   user-id
+                                             :mime-type ctype
+                                             :bytes     ab})))))))
+        (p/catch (fn [_] nil))
+        (p/finally #(swap! !bg-caching-keys disj cache-key)))))
 
 (defn execute-media-fetch! [cache-key user-id uri source-map mime-type fallback-url room-id event-id width height method]
   (go
     (try
-      (let [res (<! (mesh/do-with-thread! :media-pool
-                                          {:handler   :get-media
-                                           :arguments {:user-id    user-id
-                                                       :room-id    room-id
-                                                       :event-id   event-id
-                                                       :uri        uri
-                                                       :source     uri
-                                                       :source-map source-map
-                                                       :width      width
-                                                       :height     height
-                                                       :method     method}}))]
-        (case (:status res)
-          ("unencrypted" "direct")
-          (resolve-pending-entry! cache-key "ready" (:url res) fallback-url)
-
-          "success"
+      (let [persist-uid  (some-> user-id str str/trim not-empty)
+            cached-media (when persist-uid
+                           (try (<p! (cache/get-media cache-key))
+                                (catch :default _ nil)))]
+        (if (and cached-media (:bytes cached-media))
           (if-let [entry (.get !native-media-cache cache-key)]
             (if (<= (.-refs entry) 0)
               (.delete !native-media-cache cache-key)
-              (let [buffer (:bytes res)
-                    blob   (js/Blob. #js [buffer] #js {:type mime-type})
-                    url    (js/URL.createObjectURL blob)]
+              (let [blob (js/Blob. #js [(:bytes cached-media)]
+                                   #js {:type (or (:mime-type cached-media) mime-type "image/png")})
+                    url  (js/URL.createObjectURL blob)]
                 (resolve-pending-entry! cache-key "ready" url fallback-url)))
             nil)
+          (let [res (<! (mesh/do-with-thread! :media-pool
+                                              {:handler   :get-media
+                                               :arguments {:user-id    user-id
+                                                           :room-id    room-id
+                                                           :event-id   event-id
+                                                           :uri        uri
+                                                           :source     uri
+                                                           :source-map source-map
+                                                           :mime-type  mime-type
+                                                           :width      width
+                                                           :height     height
+                                                           :method     method}}))]
+            (case (:status res)
+              ("unencrypted" "direct")
+              (let [direct-url (:url res)]
+                (resolve-pending-entry! cache-key "ready" direct-url fallback-url)
+                (when (and persist-uid (should-bg-cache-direct-url? direct-url width height))
+                  (background-cache-direct-url! cache-key persist-uid direct-url mime-type)))
 
-          "error"
-          (do
-            (js/console.error "Media load failed:" (:msg res))
-            (resolve-pending-entry! cache-key "error" fallback-url fallback-url))
+              "success"
+              (if-let [entry (.get !native-media-cache cache-key)]
+                (if (<= (.-refs entry) 0)
+                  (.delete !native-media-cache cache-key)
+                  (let [buffer (:bytes res)
+                        blob   (js/Blob. #js [buffer] #js {:type mime-type})
+                        url    (js/URL.createObjectURL blob)]
+                    (when persist-uid
+                      (cache/put-media! cache-key
+                                        {:user-id   persist-uid
+                                         :mime-type mime-type
+                                         :bytes     buffer}))
+                    (resolve-pending-entry! cache-key "ready" url fallback-url)))
+                nil)
 
-          (do
-            (js/console.error "Unknown status from media worker:" res)
-            (resolve-pending-entry! cache-key "error" fallback-url fallback-url))))
+              ("ignored" "empty")
+              (.delete !native-media-cache cache-key)
+
+              "error"
+              (do
+                (js/console.error "Media load failed:" (:msg res))
+                (resolve-pending-entry! cache-key "error" fallback-url fallback-url))
+
+              (do
+                (js/console.error "Unknown status from media worker:" res)
+                (resolve-pending-entry! cache-key "error" fallback-url fallback-url))))))
       (catch :default e
         (js/console.error "Media fetch go-block error:" e)
         (resolve-pending-entry! cache-key "error" fallback-url fallback-url)))))
@@ -187,7 +265,7 @@ as a raw React component.
       (case (.-status entry)
         "ready"
         (do
-          (set! (.-src node) (.-url entry))
+          (assign-node-src! node (.-url entry))
           (hide-spinner! node))
 
         "pending"
@@ -195,7 +273,7 @@ as a raw React component.
 
         "error"
         (if fallback-url
-          (set! (.-src node) fallback-url)
+          (assign-node-src! node fallback-url)
           (notify-error! node))
 
         nil))
@@ -220,40 +298,22 @@ as a raw React component.
 
 
 **** Media Native Component
-This is the component generated under the hood for deferred rendering.
-We make sure we don't burden the main thread with evaluating components
-as much as possible. Instead we just want to 'pop' the image in.
+
+This is the component generated under the hood for deferred rendering. We avoid
+burdening the main thread with eager image evaluation and instead attach
+resolved URLs directly to the DOM node via a stable ref callback.
+
+~media-native~ relies on Reagent's ~r/with-let~ for ref lifecycle cleanup and
+MUST always be mounted through Reagent hiccup (such as via ~[media props]~),
+never via raw ~react/createElement~. Callers that need direct access to the
+underlying ~<img>~, ~<video>~, or ~<audio>~ DOM node (for example, to control
+playback or inspect dimensions) can pass an ~:on-node~ (or ~:onNode~) callback.
+
+When a mounted node transitions to a new ~cache-key~, any stale ~src~ attribute
+is cleared before retaining the new media entry so recycled elements never
+flash the previous image while loading.
 
 #+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
-(defn create-media-ref [props]
-  (let [user-id       (resolve-active-user-id props)
-        uri           (:uri props)
-        source-map    (or (:source-map props) (:sourceMap props))
-        mime-type     (or (:mime-type props) (:mimeType props) "image/png")
-        fallback-url  (or (:fallback-url props) (:fallbackUrl props))
-        on-error      (or (:on-error props) (:onError props))
-        room-id       (or (:room-id props) (:roomId props))
-        event-id      (or (:event-id props) (:eventId props))
-        width         (:width props)
-        height        (:height props)
-        method        (:method props)
-        cache-key     (extract-cache-key user-id uri source-map width height)
-        !mounted-node (atom nil)]
-    (fn [node]
-      (if node
-        (do
-          (set! (.-__paradiseOnError node) on-error)
-          (when (and cache-key (not= @!mounted-node node))
-            (when-let [prev @!mounted-node]
-              (release-media! prev cache-key))
-            (reset! !mounted-node node)
-            (retain-media! node cache-key user-id uri source-map mime-type fallback-url room-id event-id width height method)))
-        (when-let [prev @!mounted-node]
-          (set! (.-__paradiseOnError prev) nil)
-          (reset! !mounted-node nil)
-          (when cache-key
-            (release-media! prev cache-key)))))))
-
 (re-frame/reg-event-fx
  :media/download
  (fn [{:keys [db]} [_ {:keys [user-id uri source-map filename mime-type room-id event-id]}]]
@@ -299,43 +359,131 @@ as much as possible. Instead we just want to 'pop' the image in.
            (js/console.error "File download error:" e)))))
    {}))
 
+(defn- clear-node-src! [node]
+  (when node
+    (set! (.-__paradiseMediaSrc node) nil)
+    (try
+      (.removeAttribute node "src")
+      (catch :default _ nil))))
+
+(defn- sync-node-media! [!state]
+  (let [{:keys [node active-key on-error want]} @!state
+        want-key (:cache-key want)]
+    (when node
+      (set! (.-__paradiseOnError node) on-error)
+      (when (not= active-key want-key)
+        (when active-key
+          (release-media! node active-key)
+          (clear-node-src! node))
+        (swap! !state assoc :active-key want-key)
+        (when want-key
+          (retain-media! node
+                         want-key
+                         (:user-id want)
+                         (:uri want)
+                         (:source-map want)
+                         (:mime-type want)
+                         (:fallback-url want)
+                         (:room-id want)
+                         (:event-id want)
+                         (:width want)
+                         (:height want)
+                         (:method want)))))))
+
 (defn ^:react media-native [props]
-  (let [tag-type     (or (:tag-type props) (:tagType props) "img")
-        class        (or (:class props) (:className props) (:class-name props))
-        style        (:style props)
-        alt          (:alt props)
-        fallback-url (or (:fallback-url props) (:fallbackUrl props))
-        on-error     (or (:on-error props) (:onError props))
-        on-click     (or (:on-click props) (:onClick props))
-        controls     (:controls props)
-        handle-err   (fn [e]
-                       (let [el (.-currentTarget e)]
-                         (if (and fallback-url el (not= (.-src el) fallback-url))
-                           (set! (.-src el) fallback-url)
-                           (when on-error
-                             (on-error e)))))]
-    (react/createElement tag-type
-                         #js {:className      class
-                              :style          (clj->js style)
-                              :alt            alt
-                              :controls       controls
-                              :onClick        on-click
-                              :referrerPolicy (when (= tag-type "img") "no-referrer")
-                              :loading        (when (= tag-type "img") "lazy")
-                              :decoding       (when (= tag-type "img") "async")
-                              :onError        handle-err
-                              :ref            (create-media-ref props)})))
-#+end_src
-
-
-**** Registering
-
-#+begin_src clojurescript :tangle ../../../src/paradise/media/component.cljs
-#_(swap! paradise.shared.client.registry/!components assoc
-       "comp:paradise.media.component/media-native" media-native)
-
-#_(goog.object/set media-native "$native_comp" "comp:paradise.media.component/media-native")
-
+  (r/with-let [!state (atom {:node       nil
+                             :active-key nil
+                             :on-node    nil
+                             :on-error   nil
+                             :want       nil})
+               cb-ref (fn [node]
+                        (let [{prev-node :node prev-key :active-key on-node :on-node} @!state]
+                          (when on-node
+                            (on-node node))
+                          (if node
+                            (do
+                              (when (and prev-node (not= prev-node node))
+                                (set! (.-__paradiseOnError prev-node) nil)
+                                (when prev-key
+                                  (release-media! prev-node prev-key))
+                                (swap! !state assoc :active-key nil))
+                              (swap! !state assoc :node node)
+                              (sync-node-media! !state))
+                            (do
+                              (when prev-node
+                                (set! (.-__paradiseOnError prev-node) nil)
+                                (when prev-key
+                                  (release-media! prev-node prev-key)))
+                              (swap! !state assoc :node nil :active-key nil)))))]
+    (let [tag-type     (or (:tag-type props) (:tagType props) "img")
+          class        (or (:class props) (:className props) (:class-name props))
+          style        (:style props)
+          alt          (:alt props)
+          user-id      (resolve-active-user-id props)
+          uri          (:uri props)
+          source-map   (or (:source-map props) (:sourceMap props))
+          mime-type    (or (:mime-type props) (:mimeType props) "image/png")
+          fallback-url (or (:fallback-url props) (:fallbackUrl props))
+          on-error     (or (:on-error props) (:onError props))
+          on-node      (or (:on-node props) (:onNode props))
+          room-id      (or (:room-id props) (:roomId props))
+          event-id     (or (:event-id props) (:eventId props))
+          width        (:width props)
+          height       (:height props)
+          method       (:method props)
+          cache-key    (extract-cache-key user-id uri source-map width height)
+          on-click     (or (:on-click props) (:onClick props))
+          on-loaded-md (or (:on-loaded-metadata props) (:onLoadedMetadata props))
+          on-time-upd  (or (:on-time-update props) (:onTimeUpdate props))
+          on-ended     (or (:on-ended props) (:onEnded props))
+          on-play      (or (:on-play props) (:onPlay props))
+          on-pause     (or (:on-pause props) (:onPause props))
+          controls     (:controls props)
+          handle-err   (fn [e]
+                         (let [el (.-currentTarget e)]
+                           (if (and fallback-url el (not= (.-src el) fallback-url))
+                             (assign-node-src! el fallback-url)
+                             (when on-error
+                               (on-error e)))))]
+      (swap! !state assoc
+             :on-node  on-node
+             :on-error on-error
+             :want     {:cache-key    cache-key
+                        :user-id      user-id
+                        :uri          uri
+                        :source-map   source-map
+                        :mime-type    mime-type
+                        :fallback-url fallback-url
+                        :room-id      room-id
+                        :event-id     event-id
+                        :width        width
+                        :height       height
+                        :method       method})
+      (sync-node-media! !state)
+      (react/createElement tag-type
+                           #js {:className        class
+                                :style            (clj->js style)
+                                :alt              alt
+                                :controls         controls
+                                :preload          (when (#{"video" "audio"} tag-type) "metadata")
+                                :onClick          on-click
+                                :onLoadedMetadata on-loaded-md
+                                :onTimeUpdate     on-time-upd
+                                :onEnded          on-ended
+                                :onPlay           on-play
+                                :onPause          on-pause
+                                :referrerPolicy   (when (= tag-type "img") "no-referrer")
+                                :loading          (when (= tag-type "img") "lazy")
+                                :decoding         (when (= tag-type "img") "async")
+                                :onError          handle-err
+                                :ref              cb-ref}))
+    (finally
+      (let [{:keys [node active-key]} @!state]
+        (when node
+          (set! (.-__paradiseOnError node) nil)
+          (when active-key
+            (release-media! node active-key))
+          (swap! !state assoc :node nil :active-key nil))))))
 #+end_src
 
 
