@@ -1,0 +1,83 @@
+
+** Media & URL Utilities
+
+**** Preface
+
+Pure, zero-dependency media and URL helpers shared across protocol engines
+(=Matrix=, =Discord=, =Fluxer=, =Nostr=), media workers, and
+=paradise.shared.utils.helpers=. Kept free of DOM, Hickory, and logging
+dependencies so worker bundles stay lightweight.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/media.cljs
+(ns ^:virtualizer/skip paradise.shared.utils.media
+  (:require [clojure.string :as str]))
+#+end_src
+
+**** URL & Media Predicates
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/media.cljs
+(defn http-url?
+  "Returns true when `uri` starts with `http://` or `https://`."
+  [uri]
+  (let [s (str (or uri ""))]
+    (or (str/starts-with? s "http://")
+        (str/starts-with? s "https://"))))
+
+(defn local-media-url?
+  "Returns true when `uri` is a local browser `blob:` or inline `data:` URL."
+  [uri]
+  (let [s (str (or uri ""))]
+    (or (str/starts-with? s "blob:")
+        (str/starts-with? s "data:"))))
+
+(defn audio-media?
+  "Returns true when `mime-type` or `uri` indicates an audio asset."
+  [mime-type uri]
+  (or (str/starts-with? (str (or mime-type "")) "audio/")
+      (boolean (re-find #"\.(?:ogg|oga|opus|mp3|m4a|wav|flac)(?:$|\?)"
+                        (str/lower-case (str (or uri "")))))))
+
+(defn normalize-base-url
+  "Ensures an HTTP(S) protocol prefix (defaulting to `https://`) and strips
+   trailing slashes. Returns nil on blank input."
+  [url]
+  (when (and (some? url) (not (str/blank? (str url))))
+    (let [s (str/trim (str url))
+          u (if (http-url? s) s (str "https://" s))]
+      (str/replace u #"/+$" ""))))
+
+(defn same-origin-prefix?
+  "Returns true when `raw-url` is an HTTP(S) URL matching the exact origin of
+   `base-url` and whose pathname equals or falls under the non-empty path
+   prefix of `base-url`."
+  [base-url raw-url]
+  (when (and (not (str/blank? (str base-url))) (http-url? raw-url))
+    (try
+      (let [u  (js/URL. (str raw-url))
+            b  (js/URL. (str base-url))
+            bp (str/replace (.-pathname b) #"/+$" "")
+            up (.-pathname u)]
+        (and (= (.-origin u) (.-origin b))
+             (not (str/blank? bp))
+             (or (= up bp)
+                 (str/starts-with? up (str bp "/")))))
+      (catch :default _ false))))
+
+(defn extract-media-source
+  "Normalizes an incoming `:get-media` request's `source-map`, `uri`, and
+   `source` fields into `{:source-map :file-info :target-uri}`."
+  [{:keys [source-map uri source]}]
+  (let [sm-clj (when source-map
+                 (if (map? source-map)
+                   source-map
+                   (js->clj source-map :keywordize-keys true)))]
+    {:source-map sm-clj
+     :file-info  (:file sm-clj)
+     :target-uri (or uri
+                     source
+                     (:url sm-clj)
+                     (:uri sm-clj)
+                     (get-in sm-clj [:plain :url]))}))
+#+end_src
