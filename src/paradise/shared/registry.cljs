@@ -3,6 +3,8 @@
    [cljs.core.async :refer [go <!]]
    [cljs.reader :as reader]
    [clojure.string :as str]
+   [paradise.shared.client.cache :as cache]
+   [paradise.shared.client.session-store :as store]
    [cljs.core.async.interop :refer-macros [<p!]]))
 
 (defonce !config (atom nil))
@@ -11,92 +13,185 @@
 (defonce !available-plugins (atom {}))
 (defonce !user-registries (atom []))
 
-(defn fetch-edn [url]
-  (go
-    (try
-      (let [res (<p! (js/fetch url))]
-        (if (.-ok res)
-          (reader/read-string (<p! (.text res)))
-          nil))
-      (catch js/Error _ nil))))
+(def ^:private registry-ttl-ms (* 5 60 1000))
+
+(defn fetch-edn
+  "Fetches and parses EDN from `url`. Uses persistent cross-platform IDB cache
+   with ETag/TTL validation by default; pass `{:force? true}` or `:no-cache? true`
+   to always check network (still falling back to cached EDN when offline)."
+  ([url]
+   (fetch-edn url nil))
+  ([url {:keys [force? no-cache? ttl-ms version local-revalidate?]}]
+   (go
+     (try
+       (let [res (<p! (cache/fetch-text-cached!
+                       url
+                       {:key               (str "edn:" url)
+                        :version           version
+                        :ttl-ms            (when-not no-cache? (or ttl-ms registry-ttl-ms))
+                        :force?            (boolean (or force? no-cache?))
+                        :local-revalidate? (if (some? local-revalidate?) local-revalidate? true)}))]
+         (when-let [txt (:text res)]
+           (reader/read-string txt)))
+       (catch :default _ nil)))))
 
 (defn resolve-relative-url [base-url target-path]
-  (if (str/starts-with? target-path "http")
+  (if (or (not (string? target-path))
+          (str/starts-with? target-path "http://")
+          (str/starts-with? target-path "https://"))
     target-path
-    (let [base-dir (subs base-url 0 (inc (str/last-index-of base-url "/")))]
-      (str base-dir (if (str/starts-with? target-path "/")
-                      (subs target-path 1)
-                      target-path)))))
+    (or (try
+          (let [loc-href (when (and (exists? js/globalThis)
+                                    (.-location js/globalThis)
+                                    (.. js/globalThis -location -href))
+                           (.. js/globalThis -location -href))
+                abs-base (if (and (string? base-url)
+                                  (or (str/starts-with? base-url "http://")
+                                      (str/starts-with? base-url "https://")))
+                           base-url
+                           (when (and (string? base-url) loc-href)
+                             (.-href (js/URL. base-url loc-href))))]
+            (when abs-base
+              (.-href (js/URL. target-path abs-base))))
+          (catch :default _ nil))
+        (let [base-dir (subs base-url 0 (inc (str/last-index-of base-url "/")))]
+          (str base-dir (if (str/starts-with? target-path "/")
+                          (subs target-path 1)
+                          target-path))))))
 
-(defn load-manifests! [index-map !target-atom]
+(defn- normalize-registry-urls [raw]
+  (let [coll (cond
+               (coll? raw)  raw
+               (array? raw) (js->clj raw)
+               :else        nil)]
+    (->> coll
+         (keep (fn [u]
+                 (when (string? u)
+                   (let [trimmed (str/trim u)]
+                     (when-not (str/blank? trimmed)
+                       trimmed)))))
+         distinct
+         vec)))
+
+(defn- resolve-registry-manifest-urls [reg-url data]
+  (if-not (and (map? data) (string? reg-url))
+    data
+    (let [fix-section (fn [section]
+                        (when (map? section)
+                          (into {}
+                                (map (fn [[k ptr]]
+                                       [k (if (and (map? ptr) (string? (:manifest-url ptr)))
+                                            (update ptr :manifest-url #(resolve-relative-url reg-url %))
+                                            ptr)]))
+                                section)))]
+      (cond-> data
+        (map? (:engines data)) (assoc :engines (fix-section (:engines data)))
+        (map? (:plugins data)) (assoc :plugins (fix-section (:plugins data)))))))
+
+(defn load-manifests! [index-map !target-atom & [opts]]
   (go
+    (swap! !target-atom select-keys (keys index-map))
     (let [promises
           (for [[item-kw pointer] index-map]
             (js/Promise.
              (fn [resolve]
                (go
                  (if (:engine-config pointer)
-                   (do (swap! !target-atom assoc item-kw pointer)
-                       (resolve true))
-                   (let [url (:manifest-url pointer)]
+                   (let [i18n-path (:i18n pointer)
+                         enriched  (cond-> pointer
+                                     (and (string? i18n-path) (nil? (:i18n-url pointer)))
+                                     (assoc :i18n-url i18n-path))]
+                     (swap! !target-atom assoc item-kw enriched)
+                     (resolve true))
+                   (let [url             (:manifest-url pointer)
+                         existing        (get @!target-atom item-kw)
+                         already-loaded? (and (not (:force? opts))
+                                              existing
+                                              (= (:manifest-url existing) url))]
                      (if url
-                       (if-let [manifest (<! (fetch-edn url))]
-                         (let [asset-path (:path manifest)]
-                           (if (string? asset-path)
-                             (let [abs-path (resolve-relative-url url asset-path)
-                                   merged   (-> (merge pointer manifest)
-                                                (assoc :id (or (:id manifest) item-kw)
-                                                       :path abs-path
-                                                       :manifest-url url))]
-                               (swap! !target-atom assoc item-kw merged))
-                             (js/console.error "Manifest fetched, but it is invalid or missing a :path string. URL:" url "Data:" (clj->js manifest))))
-                         (js/console.error "Failed to fetch or parse manifest.edn:" url))
+                       (when-not already-loaded?
+                         (if-let [manifest (<! (fetch-edn url opts))]
+                           (let [asset-path (:path manifest)]
+                             (if (string? asset-path)
+                               (let [abs-path  (resolve-relative-url url asset-path)
+                                     i18n-path (:i18n manifest)
+                                     i18n-url  (when (string? i18n-path)
+                                                 (resolve-relative-url url i18n-path))
+                                     merged    (cond-> (-> (merge pointer manifest)
+                                                           (assoc :id (or (:id manifest) item-kw)
+                                                                  :path abs-path
+                                                                  :manifest-url url))
+                                                 i18n-url (assoc :i18n-url i18n-url))]
+                                 (swap! !target-atom assoc item-kw merged))
+                               (js/console.error "Manifest fetched, but it is invalid or missing a :path string. URL:" url "Data:" (clj->js manifest))))
+                           (js/console.error "Failed to fetch or parse manifest.edn:" url)))
                        (js/console.warn "Registry index missing :manifest-url for:" (name item-kw) (clj->js pointer)))
                      (resolve true)))))))]
       (<p! (js/Promise.all (clj->js promises)))
       @!target-atom)))
 
-(defn fetch-registry! [url & [id-override]]
+(defn fetch-registry! [url & [id-override opts]]
   (go
-    (if-let [data (<! (fetch-edn url))]
-      (do
-        (swap! !registry-indices assoc (or id-override url) data)
+    (if-let [data (<! (fetch-edn url opts))]
+      (let [normalized (resolve-registry-manifest-urls url data)]
+        (swap! !registry-indices assoc (or id-override url) normalized)
         true)
       false)))
 
-(defn ensure-environment! []
-  (go
-    (when-not @!config
-      (when-let [cfg (<! (fetch-edn "/config.edn"))]
-        (reset! !config cfg)))
+(defn ensure-environment!
+  ([]
+   (ensure-environment! nil))
+  ([{:keys [force? user-registries]}]
+   (go
+     ;; Always check /config.edn for version bumps (with IDB offline fallback)
+     (when (or force? (not @!config))
+       (when-let [cfg (<! (fetch-edn "/config.edn" {:no-cache? true}))]
+         (reset! !config cfg)))
 
-    (when-not (get @!registry-indices "core-baked")
-      (<! (fetch-registry! "/registry.edn" "core-baked")))
+     ;; Hydrate user-added custom registries directly from IndexedDB so main thread,
+     ;; engine worker, and media workers all honor custom registries from cold boot.
+     (if (some? user-registries)
+       (reset! !user-registries (normalize-registry-urls user-registries))
+       (try
+         (let [saved (<p! (store/get-setting "custom_registries"))]
+           (when (some? saved)
+             (reset! !user-registries (normalize-registry-urls saved))))
+         (catch :default _ nil)))
 
-    (when-let [core-url (:registry-url @!config)]
-      (<! (fetch-registry! core-url)))
+     ;; Always check registries and manifests network-first (with IDB offline fallback)
+     ;; so version/hash bumps are picked up immediately without pinning stale manifests.
+     (let [net-first-opts {:no-cache?         true
+                           :force?            (boolean force?)
+                           :local-revalidate? true}]
+       (when (or force? (not (get @!registry-indices "core-baked")))
+         (<! (fetch-registry! "/registry.edn" "core-baked" net-first-opts)))
 
-    (let [all-customs (distinct (concat (:custom-registries @!config) @!user-registries))]
-      (doseq [custom-url all-customs]
-        (<! (fetch-registry! custom-url))))
+       (when-let [core-url (:registry-url @!config)]
+         (when (or force? (not (get @!registry-indices core-url)))
+           (<! (fetch-registry! core-url nil net-first-opts))))
 
-    (let [config-data @!config
-          core-url    (:registry-url config-data)
-          baked       (get @!registry-indices "core-baked")
-          live-core   (get @!registry-indices core-url)
-          custom-maps (->> (dissoc @!registry-indices "core-baked" core-url)
-                           vals)
-          resolved-engines (merge (:engines baked)
-                                  (:engines live-core)
-                                  (apply merge (map :engines custom-maps))
-                                  (:engines config-data))
-          resolved-plugins (merge (:plugins baked)
-                                  (:plugins live-core)
-                                  (apply merge (map :plugins custom-maps))
-                                  (:plugins config-data))]
-      (<! (load-manifests! resolved-engines !available-engines))
-      (<! (load-manifests! resolved-plugins !available-plugins))
-      true)))
+       (let [all-customs (normalize-registry-urls
+                          (concat (:custom-registries @!config) @!user-registries))]
+         (doseq [custom-url all-customs]
+           (when (or force? (not (get @!registry-indices custom-url)))
+             (<! (fetch-registry! custom-url nil net-first-opts))))
+
+         (let [config-data      @!config
+               core-url         (:registry-url config-data)
+               baked            (get @!registry-indices "core-baked")
+               live-core        (get @!registry-indices core-url)
+               custom-maps      (keep #(get @!registry-indices %) all-customs)
+               resolved-engines (merge (:engines baked)
+                                       (:engines live-core)
+                                       (apply merge (map :engines custom-maps))
+                                       (:engines config-data))
+               resolved-plugins (merge (:plugins baked)
+                                       (:plugins live-core)
+                                       (apply merge (map :plugins custom-maps))
+                                       (:plugins config-data))]
+           (<! (load-manifests! resolved-engines !available-engines net-first-opts))
+           (<! (load-manifests! resolved-plugins !available-plugins net-first-opts))
+           true))))))
 
 (defn resolve-engines []
   @!available-engines)
@@ -109,3 +204,30 @@
 
 (defn get-engine-manifest [protocol]
   (get @!available-engines (keyword protocol)))
+
+(defn manifest-version-tag
+  "Returns a canonical version tag for a manifest map, preferring a truncated
+   `:hash` over `:version`."
+  [manifest]
+  (let [hash-str (some-> (:hash manifest) str not-empty)
+        ver-str  (some-> (:version manifest) str not-empty)]
+    (or (when hash-str (subs hash-str 0 (min 16 (count hash-str))))
+        ver-str)))
+
+(defn resolve-manifest-i18n-url
+  "Resolves the i18n EDN URL from a manifest map (and optional base URL)."
+  ([m]
+   (resolve-manifest-i18n-url m nil))
+  ([m base-url]
+   (let [raw  (or (:i18n-url m) (when (string? (:i18n m)) (:i18n m)))
+         burl (or base-url (:manifest-url m))]
+     (when (and (string? raw) (not (str/blank? raw)))
+       (if (and burl (not (str/starts-with? raw "http")))
+         (resolve-relative-url burl raw)
+         raw)))))
+
+(defn get-engine-i18n-url [protocol]
+  (resolve-manifest-i18n-url (get @!available-engines (keyword protocol))))
+
+(defn get-plugin-i18n-url [plugin-id]
+  (resolve-manifest-i18n-url (get @!available-plugins (keyword plugin-id))))
