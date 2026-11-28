@@ -1,8 +1,8 @@
-** Polls Modal & Inline Voice Recorder
+** Polls Modal
 
 **** Preface
 
-Provides protocol-agnostic Poll creation (~:create-poll~ modal)
+Provides protocol-agnostic Poll creation (~:create-poll~ modal).
 
 **** Imports
 
@@ -25,7 +25,7 @@ Provides protocol-agnostic Poll creation (~:create-poll~ modal)
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/polls.cljs
 (re-frame/reg-event-fx
  :polls/create
- (fn [_ [_ {:keys [room-id question answers max-selections undisclosed? on-done on-error]}]]
+ (fn [{:keys [db]} [_ {:keys [room-id question answers max-selections undisclosed? on-done on-error]}]]
    (when (and room-id @state/!engine-pool)
      (let [pool @state/!engine-pool]
        (go
@@ -48,7 +48,9 @@ Provides protocol-agnostic Poll creation (~:create-poll~ modal)
            (catch :default e
              (log/error "Exception creating poll:" e)
              (when on-error (on-error)))))))
-   {}))
+   (if (= (get-in db [:input-context room-id :mode]) :reply)
+     {:db (update db :input-context dissoc room-id)}
+     {})))
 
 #+end_src
 
