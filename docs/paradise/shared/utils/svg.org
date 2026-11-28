@@ -1042,6 +1042,20 @@ Some more room icons
 
 (defn clock [props]
   (build-icon-hiccup props clock-shapes))
+
+(def qr-code-shapes
+  [:g
+   [:rect {:x "3" :y "3" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "15" :y "3" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "3" :y "15" :width "6" :height "6" :rx "1"}]
+   [:rect {:x "15" :y "15" :width "2" :height "2"}]
+   [:rect {:x "19" :y "15" :width "2" :height "2"}]
+   [:rect {:x "15" :y "19" :width "2" :height "2"}]
+   [:rect {:x "19" :y "19" :width "2" :height "2"}]
+   [:rect {:x "11" :y "11" :width "2" :height "2"}]])
+
+(defn qr-code [props]
+  (build-icon-hiccup props qr-code-shapes))
 #+end_src
 
 
