@@ -1,26 +1,35 @@
 (ns paradise.shared.client.session-store
-  (:require [promesa.core :as p]
-            [cljs.reader :as reader]
-            [taoensso.timbre :as log]))
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.client.idb :as idb]
+            [promesa.core :as p]))
 
 (defn- engine-file-name [engine-id]
   (str "sessions_" (name (or engine-id :default)) ".json"))
 
-(defn- load-raw-sessions-opfs [engine-id]
-  (p/let [dir (.. js/navigator -storage getDirectory)
-          file-handle (.getFileHandle dir (engine-file-name engine-id) #js {:create true})
-          sync-handle (.createSyncAccessHandle file-handle)]
-    (try
-      (let [size (.getSize sync-handle)]
-        (if (zero? size)
-          #js {}
-          (let [buffer (js/Uint8Array. size)]
-            (.read sync-handle buffer #js {:at 0})
-            (let [decoder (js/TextDecoder.)
-                  text (.decode decoder buffer)]
-              (.parse js/JSON text)))))
-      (finally
-        (.close sync-handle)))))
+(defn- load-raw-sessions-opfs
+  ([engine-id]
+   (p/let [dir (.. js/navigator -storage getDirectory)]
+     (load-raw-sessions-opfs dir engine-id true)))
+  ([dir engine-id create?]
+   (-> (p/let [file-handle (.getFileHandle dir
+                                           (engine-file-name engine-id)
+                                           #js {:create (boolean create?)})
+               sync-handle (.createSyncAccessHandle file-handle)]
+         (try
+           (let [size (.getSize sync-handle)]
+             (if (zero? size)
+               #js {}
+               (let [buffer (js/Uint8Array. size)
+                     _      (.read sync-handle buffer #js {:at 0})
+                     text   (.decode (js/TextDecoder.) buffer)]
+                 (if (str/blank? text)
+                   #js {}
+                   (js/JSON.parse text)))))
+           (finally
+             (.close sync-handle))))
+       (p/catch (fn [_] #js {})))))
 
 (defn- save-raw-sessions-opfs! [engine-id sessions-obj]
   (p/let [dir (.. js/navigator -storage getDirectory)
@@ -35,6 +44,89 @@
         (.flush sync-handle))
       (finally
         (.close sync-handle)))))
+
+(defn- format-stored-account-label [uid username display-name]
+  (let [u (some-> username str str/trim not-empty)
+        d (some-> display-name str str/trim not-empty)]
+    (cond
+      (and d u (not= (str/lower-case d) (str/lower-case u)))
+      (str d " (@" u ")")
+
+      u
+      (str "@" u)
+
+      d
+      d
+
+      :else
+      (str uid))))
+
+(defn- discover-opfs-session-engines [dir seed-engines]
+  (let [seed (->> seed-engines
+                  (map name)
+                  (remove #(or (str/blank? %) (= % "default")))
+                  vec)]
+    (if (and dir (fn? (.-entries dir)))
+      (let [iter (.entries dir)]
+        (p/loop [acc seed]
+          (p/let [step (-> (.next iter) (p/catch (fn [_] #js {:done true})))]
+            (if (.-done step)
+              (vec (distinct acc))
+              (let [val   (.-value step)
+                    fname (when val (aget val 0))
+                    m     (when (string? fname)
+                            (re-matches #"^sessions_(.+)\.json$" fname))
+                    eng   (second m)]
+                (p/recur (if (and eng (not= eng "default"))
+                           (conj acc eng)
+                           acc)))))))
+      (p/resolved (vec (distinct seed))))))
+
+(defn- read-opfs-engine-accounts [dir eng-str]
+  (p/let [parsed (load-raw-sessions-opfs dir eng-str false)
+          uids   (if (and parsed (object? parsed))
+                   (js/Object.keys parsed)
+                   #js [])]
+    (vec
+     (keep (fn [uid]
+             (when-let [entry (gobj/get parsed uid)]
+               (let [raw (or (gobj/get entry "session") entry)]
+                 (when (and raw (object? raw))
+                   (let [tok   (or (gobj/get raw "accessToken")
+                                   (gobj/get raw "token"))
+                         url   (or (gobj/get entry "serverUrl")
+                                   (gobj/get raw "serverUrl")
+                                   (gobj/get raw "apiBase")
+                                   "")
+                         uname (gobj/get raw "username")
+                         dname (or (gobj/get raw "displayName")
+                                   (gobj/get raw "display_name"))
+                         av    (or (gobj/get raw "avatarUrl")
+                                   (gobj/get raw "avatar_url"))]
+                     (when (or tok (not (str/blank? (str url))) (gobj/get raw "userId"))
+                       {:userId       (str uid)
+                        :user-id      (str uid)
+                        :engine       eng-str
+                        :label        (format-stored-account-label uid uname dname)
+                        :username     uname
+                        :display-name dname
+                        :avatar       av
+                        :avatar-url   av
+                        :server-url   url
+                        :base-url     url
+                        :server       url}))))))
+           uids))))
+
+(defn list-all-stored-accounts [seed-engines]
+  (p/let [dir     (.. js/navigator -storage getDirectory)
+          eng-ids (discover-opfs-session-engines dir seed-engines)]
+    (p/loop [remaining eng-ids
+             out       []]
+      (if (empty? remaining)
+        out
+        (p/let [batch (read-opfs-engine-accounts dir (first remaining))]
+          (p/recur (rest remaining) (into out batch)))))))
+  
 
 (defn generate-passphrase []
   (let [array (js/Uint8Array. 32)]
@@ -52,74 +144,108 @@
                         v (if (= c "x") r (bit-or (bit-and r 0x3) 0x8))]
                     (.toString v 16)))))))
 
+(def ^:private settings-db-name "paradise-settings")
+(def ^:private settings-store-name "settings")
+
 (defn- open-settings-db []
-  (p/create
-   (fn [resolve-fn _]
-     (let [req (.open js/indexedDB "paradise-settings" 1)]
-       (set! (.-onupgradeneeded req)
-             #(let [db (.. % -target -result)]
-                (when-not (.contains (.-objectStoreNames db) "settings")
-                  (.createObjectStore db "settings"))))
-       (set! (.-onsuccess req) #(resolve-fn (.. % -target -result)))
-       (set! (.-onerror req) #(resolve-fn nil))))))
+  (idb/open-db
+   settings-db-name
+   1
+   (fn [db _]
+     (when-not (.contains (.-objectStoreNames db) settings-store-name)
+       (.createObjectStore db settings-store-name)))))
+
+(defn- parse-stored-setting [key raw-val]
+  (cond
+    (nil? raw-val) nil
+    (string? raw-val)
+    (let [trimmed    (str/trim raw-val)
+          first-char (when (pos? (count trimmed)) (subs trimmed 0 1))]
+      (cond
+        (= trimmed "true")  true
+        (= trimmed "false") false
+        (= trimmed "nil")   nil
+
+        (re-matches #"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$" trimmed)
+        (try
+          (reader/read-string trimmed)
+          (catch :default _ raw-val))
+
+        (#{"{" "[" "(" "#" ":" "\""} first-char)
+        (try
+          (if (str/starts-with? trimmed "#js ")
+            (reader/read-string (str/replace trimmed #"#js\s+(?=[\[\{])" ""))
+            (reader/read-string raw-val))
+          (catch :default e
+            (try
+              (if (str/includes? raw-val "#js ")
+                (reader/read-string (str/replace raw-val #"#js\s+(?=[\[\{])" ""))
+                (do
+                  (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
+                  raw-val))
+              (catch :default _
+                (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
+                raw-val))))
+
+        :else raw-val))
+    :else
+    (js->clj raw-val :keywordize-keys true)))
+
+(defn- normalize-setting-for-storage [value]
+  (cond
+    (array? value)
+    (js->clj value :keywordize-keys true)
+
+    (and (object? value) (= (type value) js/Object))
+    (js->clj value :keywordize-keys true)
+
+    :else
+    value))
 
 (defn get-setting [key]
-  (p/let [db (open-settings-db)]
-    (if-not db
-      (p/resolved nil)
-      (p/create
-       (fn [resolve-fn _]
-         (let [tx    (.transaction db #js ["settings"] "readonly")
-               store (.objectStore tx "settings")
-               req   (.get store key)]
-           (set! (.-onsuccess req)
-                 #(let [raw-val (.-result req)]
-                    (resolve-fn
-                     (cond
-                       (nil? raw-val) nil
-                       (string? raw-val)
-                       (let [first-char (subs raw-val 0 1)]
-                         (if (#{"{" "[" "#" ":" "\""} first-char)
-                           (try
-                             (reader/read-string raw-val)
-                             (catch :default e
-                               (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
-                               raw-val))
-                           raw-val))
-                       :else
-                       (js->clj raw-val :keywordize-keys true)))))
-           (set! (.-onerror req) #(resolve-fn nil))))))))
+  (p/let [raw (idb/get-record (open-settings-db) settings-store-name key)]
+    (parse-stored-setting key raw)))
 
 (defn set-setting! [key value]
-  (p/let [db (open-settings-db)]
-    (if-not db
-      false
-      (p/create
-       (fn [resolve-fn _]
-         (let [tx      (.transaction db #js ["settings"] "readwrite")
-               store   (.objectStore tx "settings")
-               put-req (if (some? value)
-                         (.put store (pr-str value) key)
-                         (.delete store key))]
-           (set! (.-onsuccess put-req) #(resolve-fn true))
-           (set! (.-onerror put-req) #(resolve-fn false))))))))
+  (if (some? value)
+    (idb/put-record! (open-settings-db)
+                     settings-store-name
+                     (pr-str (normalize-setting-for-storage value))
+                     key)
+    (idb/delete-record! (open-settings-db) settings-store-name key)))
 
-(defn- delete-db! [db-name]
-  (js/Promise.
-   (fn [resolve-fn _]
-     (try
-       (let [request (.deleteDatabase js/indexedDB db-name)]
-         (set! (.-onsuccess request) #(do (log/info "Destroyed IDB:" db-name) (resolve-fn true)))
-         (set! (.-onerror request) #(do (log/error "Error deleting IDB:" db-name) (resolve-fn false)))
-         (set! (.-onblocked request) #(do (log/warn "BLOCKED deleting IDB:" db-name) (resolve-fn false))))
-       (catch :default e
-         (log/error "Fatal crash attempting to delete IDB:" db-name "Error:" e)
-         (resolve-fn false))))))
+(defn nav-state-key [engine-id user-id]
+  (let [eng (when engine-id (name engine-id))
+        uid (some-> user-id str not-empty)]
+    (when (and eng uid)
+      (str "last_nav_" eng "_" uid))))
+
+(defn save-nav-state! [engine-id user-id {:keys [space-id room-id filter-id]}]
+  (when-let [k (nav-state-key engine-id user-id)]
+    (let [payload {:space-id  (some-> space-id str not-empty)
+                   :room-id   (some-> room-id str not-empty)
+                   :filter-id (or (some-> filter-id str not-empty) "people")}]
+      (set-setting! k payload))))
+
+(defn load-nav-state [engine-id user-id]
+  (let [k   (nav-state-key engine-id user-id)
+        uid (some-> user-id str not-empty)]
+    (p/let [atomic-val (when k (get-setting k))]
+      (if (map? atomic-val)
+        {:space-id  (some-> (:space-id atomic-val) str not-empty)
+         :room-id   (some-> (:room-id atomic-val) str not-empty)
+         :filter-id (or (some-> (:filter-id atomic-val) str not-empty) "people")}
+        (if uid
+          (p/let [[legacy-room legacy-space]
+                  (p/all [(get-setting (str "last_room_" uid))
+                          (get-setting (str "last_space_" uid))])]
+            {:space-id  (some-> legacy-space str not-empty)
+             :room-id   (some-> legacy-room str not-empty)
+             :filter-id "people"})
+          {:space-id nil :room-id nil :filter-id "people"})))))
 
 (defn- delete-dbs! [db-names]
-  (if (seq db-names)
-    (.allSettled js/Promise (into-array (map delete-db! db-names)))
-    (p/resolved true)))
+  (idb/delete-dbs! db-names))
 
 (defn- save-session-impl! [engine-id account-id payload owned-dbs]
   (p/let [sessions (load-raw-sessions-opfs engine-id)
