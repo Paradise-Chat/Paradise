@@ -2,8 +2,12 @@
   (:require
    [clojure.string :as str]
    [paradise.shared.utils.helpers :refer [clean-shortcode format-shortcode]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.media.component :refer [media]]
-   [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
+   [paradise.ui.input.autocomplete :refer [user-mention-options
+                                           emoji-suggestion-options
+                                           slash-command-options
+                                           suggestion-claims-enter?]]
    ["react" :as react]
    [taoensso.timbre :as log]
    [reagent.core :as r]
@@ -20,10 +24,10 @@
       (.extend #js {:name "emojiTrigger"})
       (.configure #js {:suggestion (emoji-suggestion-options)})))
 
-(def emoji-trigger
+(def slash-trigger
   (-> Mention
-      (.extend #js {:name "emojiTrigger"})
-      (.configure #js {:suggestion (emoji-suggestion-options)})))
+      (.extend #js {:name "slashCommand"})
+      (.configure #js {:suggestion (slash-command-options)})))
 
 (def user-trigger
   (-> Mention
@@ -199,12 +203,13 @@
              #js [(new Plugin
                        #js {:key (new PluginKey "fileDropHandler")
                             :props #js {:handleDOMEvents
-                                        #js {:drop (fn [_view event]
+                                        #js {:drop (fn [view event]
                                                      (try
                                                        (let [files (safe-extract-files event)]
                                                          (if (pos? (.-length files))
                                                            (do
                                                              (.preventDefault event)
+                                                             (.focus view)
                                                              (when-let [on-files (.. this -options -onFiles)]
                                                                (on-files files))
                                                              true)
@@ -227,78 +232,109 @@
                                                           (log/error "Error processing paste event:" e)
                                                           false)))}}})]))}))
 
+(defn- mobile-touch-composer? []
+  (or (platform/capacitor-mobile?)
+      (and (platform/mobile-viewport?)
+           (platform/coarse-pointer?))))
+
 (def submit-extension
   (.create Extension
            #js {:name "submitExtension"
-                :addOptions (fn [] #js {:onSend nil})
+                :addOptions (fn [] #js {:onSend nil :shouldSubmitOnEnter nil})
                 :addKeyboardShortcuts
                 (fn []
                   (this-as this
                     #js {"Enter" (fn [context]
-                                   (let [editor  (.-editor context)
-                                         text    (.getText editor)
-                                         html    (get-formatted-body editor)
-                                         on-send (.. this -options -onSend)]
-                                     (when (and on-send (on-send text html))
-                                       (.commands.clearContent editor true))
-                                     true))
+                                   (if (suggestion-claims-enter?)
+                                     false
+                                     (let [should-fn (.. this -options -shouldSubmitOnEnter)
+                                           submit?   (if should-fn
+                                                       (boolean (should-fn))
+                                                       (not (mobile-touch-composer?)))]
+                                       (if-not submit?
+                                         false
+                                         (let [editor  (.-editor context)
+                                               text    (.getText editor)
+                                               html    (get-formatted-body editor)
+                                               on-send (.. this -options -onSend)]
+                                           (when (and on-send (on-send text html))
+                                             (.commands.clearContent editor true))
+                                           true)))))
                          "Shift-Enter" (fn [] false)}))}))
 
 (defn tiptap-component [^js props]
-  (let [active-id   (.. props -children -activeId)
-        on-send     (.. props -children -onSend)
-        on-files    (.. props -children -onFiles)
-        on-change   (.. props -children -onChange)
-        loaded-text (.. props -children -loadedText)
-        cached-html (.. props -children -cachedHtml)
-        placeholder (.. props -children -placeholder)
-        on-ready    (.. props -children -onEditorReady)
-        latest-cbs  (react/useRef #js {:onSend on-send :onFiles on-files})
-        _           (set! (.-current latest-cbs) #js {:onSend on-send :onFiles on-files})
-        editor      (useEditor
-                     #js {:extensions #js [(.configure StarterKit #js {})
-                                           (.configure Placeholder #js {:placeholder placeholder})
-                                           (.configure submit-extension
-                                                       #js {:onSend (fn [text html]
-                                                                      (let [cb (.-onSend (.-current latest-cbs))]
-                                                                        (when cb (cb text html))))})
-                                           (.configure file-drop-extension
-                                                       #js {:onFiles (fn [files]
-                                                                       (let [cb (.-onFiles (.-current latest-cbs))]
-                                                                         (when cb (cb files))))})
-                                           (.configure custom-emote #js {})
-                                           emoji-trigger
-                                           user-trigger
-                                           (.configure Link #js {:openOnClick false
-                                                                 :autolink    true
-                                                                 :linkOnPaste true})]
-                          :content     (or cached-html loaded-text "")
-                          :editable    (boolean active-id)
-                          :onUpdate    (fn [ctx]
-                                         (when on-change
-                                           (let [ed (.-editor ctx)]
-                                             (on-change (.getText ed)
-                                                        (get-formatted-body ed)))))
-                          :onCreate    (fn [ctx]
-                                         (when on-ready
-                                           (on-ready (.-editor ctx))))
-                          :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
-                     #js [active-id])]
+  (let [active-id     (.. props -children -activeId)
+        on-send       (.. props -children -onSend)
+        on-files      (.. props -children -onFiles)
+        on-change     (.. props -children -onChange)
+        loaded-text   (.. props -children -loadedText)
+        cached-html   (.. props -children -cachedHtml)
+        placeholder   (.. props -children -placeholder)
+        on-ready      (.. props -children -onEditorReady)
+        enter-submits (.. props -children -enterSubmits)
+        latest-cbs    (react/useRef #js {:onSend       on-send
+                                         :onFiles      on-files
+                                         :enterSubmits enter-submits})
+        _             (set! (.-current latest-cbs)
+                            #js {:onSend       on-send
+                                 :onFiles      on-files
+                                 :enterSubmits enter-submits})
+        editor        (useEditor
+                       #js {:extensions #js [(.configure StarterKit #js {})
+                                             (.configure Placeholder #js {:placeholder placeholder})
+                                             (.configure submit-extension
+                                                         #js {:shouldSubmitOnEnter
+                                                              (fn []
+                                                                (let [v (.-enterSubmits
+                                                                         (.-current latest-cbs))]
+                                                                  (if (some? v)
+                                                                    (boolean v)
+                                                                    (not (mobile-touch-composer?)))))
+                                                              :onSend
+                                                              (fn [text html]
+                                                                (let [cb (.-onSend (.-current latest-cbs))]
+                                                                  (when cb (cb text html))))})
+                                             (.configure file-drop-extension
+                                                         #js {:onFiles
+                                                              (fn [files]
+                                                                (let [cb (.-onFiles (.-current latest-cbs))]
+                                                                  (when cb (cb files))))})
+                                             (.configure custom-emote #js {})
+                                             emoji-trigger
+                                             slash-trigger
+                                             user-trigger
+                                             (.configure Link #js {:openOnClick false
+                                                                   :autolink    true
+                                                                   :linkOnPaste true})]
+                            :content     (or cached-html loaded-text "")
+                            :editable    (boolean active-id)
+                            :onUpdate    (fn [ctx]
+                                           (when on-change
+                                             (let [ed (.-editor ctx)]
+                                               (on-change (.getText ed)
+                                                          (get-formatted-body ed)))))
+                            :onCreate    (fn [ctx]
+                                           (when on-ready
+                                             (on-ready (.-editor ctx))))
+                            :editorProps #js {:attributes #js {:class "tiptap-editor-surface"}}}
+                       #js [active-id])]
 
     (react/useEffect
      (fn []
-       (when (and editor loaded-text (.-schema editor))
-         (let [current-html (.getHTML editor)]
-           (when (not= current-html loaded-text)
+       (when (and editor (string? loaded-text) (seq loaded-text) (.-schema editor))
+         (let [current-html (.getHTML editor)
+               actively-typing? (and (.-isFocused editor) (not (.-isEmpty editor)))]
+           (when (and (not actively-typing?)
+                      (not= current-html loaded-text))
              (.commands.setContent editor loaded-text))))
        js/undefined)
      #js [editor loaded-text])
 
     (if-not editor
-      (react/createElement "div" #js {:className "timeline-input-wrapper"}
+      (react/createElement "div" #js {:className "tiptap-editor-container"}
                            (react/createElement "div" #js {:className "tiptap-editor-surface"}))
       (react/createElement "div"
                            #js {:key       (str "editor-surface-" active-id)
-                                :className "timeline-input-wrapper"
+                                :className "tiptap-editor-container"
                                 :onClick   (fn [] (.commands.focus editor))}
                            (react/createElement EditorContent #js {:editor editor})))))
