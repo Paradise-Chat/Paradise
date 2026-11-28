@@ -1118,7 +1118,6 @@ provide an avatar color.
 ****** Avatar function
 
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
-;; Hacky fix, but I need to clean the 'shape' up anyway haha
 (defn kname [arg]
   (name arg))
 
