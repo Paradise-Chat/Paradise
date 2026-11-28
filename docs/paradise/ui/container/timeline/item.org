@@ -208,60 +208,202 @@ that is currently on screen.
 
 (re-frame/reg-event-fx
  :room/mark-read
+ (fn [{:keys [db]} [_ room-id event-id]]
+   (when room-id
+     (go
+       (let [res (<! (mesh/do-with-thread!
+                      :engine-pool
+                      {:handler   :mark-read
+                       :arguments (cond-> {:room-id room-id}
+                                    event-id (assoc :event-id event-id))}))]
+         (when (not= (:status res) "success")
+           (log/warn "mark-read failed for" room-id ":" (:msg res))))))
+   {:db (if room-id
+          (-> db
+              (update-in [:read-receipts :pending] dissoc room-id)
+              (update-in [:read-receipts :sent] dissoc room-id))
+          db)}))
+
+(re-frame/reg-event-fx
+ :rooms/mark-read
  (fn [_ [_ room-id event-id]]
-   (mesh/do-with-thread! :engine-pool {:handler :mark-read
-                                            :arguments {:room-id room-id :event-id event-id}})
+   {:dispatch [:room/mark-read room-id event-id]}))
+
+(re-frame/reg-event-fx
+ :msg/cancel-pending
+ (fn [_ [_ room-id item]]
+   (when (and room-id item)
+     (let [target-id (or (:event-or-transaction-id item) (:id item))]
+       (mesh/do-with-thread! :engine-pool
+                             {:handler   :redact-event
+                              :arguments {:room-id  room-id
+                                          :msg-id   target-id
+                                          :event-id (:id item)}})))
+   {}))
+
+(re-frame/reg-event-fx
+ :msg/retry-send
+ (fn [_ [_ room-id item]]
+   (when (and room-id item)
+     (let [target-id (or (:event-or-transaction-id item) (:id item))
+           retry     (:retry-payload item)
+           m-content (get-in item [:content :inner :content])
+           reply-to  (get-in item [:content :in-reply-to :event-id])
+           text      (or (:text retry) (:body m-content) "")
+           html      (or (:html retry) (:html m-content))
+           ctx       (or (:context retry)
+                         (when reply-to {:mode :reply :target reply-to}))]
+       (go
+         (try
+           (<! (mesh/do-with-thread! :engine-pool
+                                     {:handler   :redact-event
+                                      :arguments {:room-id  room-id
+                                                  :msg-id   target-id
+                                                  :event-id (:id item)}}))
+           (when (or (not (str/blank? (str text))) (not (str/blank? (str html))))
+             (<! (mesh/do-with-thread! :engine-pool
+                                       {:handler   :send-message
+                                        :arguments (cond-> {:room-id room-id
+                                                            :text    text
+                                                            :html    html}
+                                                     ctx (assoc :context ctx))})))
+           (catch :default e
+             (log/error "Retry send failed:" e))))))
    {}))
 
 (re-frame/reg-event-fx
  :msg/flush-receipts
- (fn [{:keys [db]} _]
-   (let [pending (get-in db [:read-receipts :pending])]
-     (when (seq pending)
-       (doseq [[room-id event-id] pending]
-         (when (not= (get-in db [:read-receipts :sent room-id]) event-id)
+ (fn [{:keys [db]} [_ force?]]
+   (if (and (not force?) (not (page-visible?)))
+     {}
+     (let [pending   (get-in db [:read-receipts :pending])
+           to-send   (reduce-kv
+                      (fn [acc room-id raw-entry]
+                        (let [entry     (normalize-receipt-entry raw-entry)
+                              event-id  (:event-id entry)
+                              sent      (normalize-receipt-entry (get-in db [:read-receipts :sent room-id]))
+                              in-flight (get-in db [:read-receipts :in-flight room-id])]
+                          (if (and (trackable-event-id? event-id)
+                                   (not= (:event-id sent) event-id)
+                                   (not= in-flight event-id))
+                            (assoc acc room-id entry)
+                            acc)))
+                      {}
+                      pending)]
+       (doseq [[room-id entry] to-send]
+         (let [event-id (:event-id entry)]
            (go
              (try
-               (let [res (<! (mesh/do-with-thread! :engine-pool
-                                                 {:handler :send-receipt
-                                                  :arguments {:room-id room-id :event-id event-id}}))]
+               (let [res (<! (mesh/do-with-thread!
+                              :engine-pool
+                              {:handler   :send-receipt
+                               :arguments {:room-id room-id :event-id event-id}}))]
                  (if (= (:status res) "success")
-                   (re-frame/dispatch [:msg/receipt-sent room-id event-id])
+                   (re-frame/dispatch [:msg/receipt-sent room-id entry])
                    (do
                      (log/error "Receipt flush failed for" room-id ":" (:msg res))
-                     (when-not (str/includes? (str (:msg res)) "Timeline not found")
-                       (re-frame/dispatch [:msg/requeue-receipt room-id event-id])))))
-                 (catch :default e
+                     (if (or (str/includes? (str (:msg res)) "Timeline not found")
+                             (str/includes? (str (:msg res)) "Room not found"))
+                       (re-frame/dispatch [:msg/clear-in-flight room-id])
+                       (re-frame/dispatch [:msg/requeue-receipt room-id entry])))))
+               (catch :default e
                  (log/error "Worker crashed sending receipt:" e)
-                 (re-frame/dispatch [:msg/requeue-receipt room-id event-id])))))))
-     {:db (assoc-in db [:read-receipts :pending] {})})))
+                 (re-frame/dispatch [:msg/requeue-receipt room-id entry]))))))
+       {:db (-> db
+                (assoc-in [:read-receipts :pending] {})
+                (update-in [:read-receipts :in-flight]
+                           (fn [m]
+                             (reduce-kv (fn [acc r entry]
+                                          (assoc acc r (:event-id entry)))
+                                        (or m {})
+                                        to-send))))}))))
+
+(re-frame/reg-event-db
+ :msg/clear-in-flight
+ (fn [db [_ room-id]]
+   (update-in db [:read-receipts :in-flight] dissoc room-id)))
 
 (re-frame/reg-event-db
  :msg/requeue-receipt
- (fn [db [_ room-id event-id]]
-   (assoc-in db [:read-receipts :pending room-id] event-id)))
+ (fn [db [_ room-id entry]]
+   (let [norm      (normalize-receipt-entry entry)
+         existing  (get-in db [:read-receipts :pending room-id])
+         idx-map   (build-live-index-map room-id)
+         cleaned   (update-in db [:read-receipts :in-flight] dissoc room-id)]
+     (if (and norm (candidate-newer? idx-map norm existing))
+       (assoc-in cleaned [:read-receipts :pending room-id] norm)
+       cleaned))))
 
 (re-frame/reg-event-db
  :msg/receipt-sent
- (fn [db [_ room-id event-id]]
-   (assoc-in db [:read-receipts :sent room-id] event-id)))
+ (fn [db [_ room-id entry]]
+   (let [norm     (normalize-receipt-entry entry)
+         prev     (get-in db [:read-receipts :sent room-id])
+         idx-map  (build-live-index-map room-id)
+         cleaned  (update-in db [:read-receipts :in-flight] dissoc room-id)]
+     (if (and norm (candidate-newer? idx-map norm prev))
+       (assoc-in cleaned [:read-receipts :sent room-id] norm)
+       cleaned))))
 
 (defonce receipt-flusher
-  (js/setInterval #(re-frame/dispatch [:msg/flush-receipts]) 2000))
+  (js/setInterval #(when (page-visible?)
+                     (re-frame/dispatch [:msg/flush-receipts]))
+                  2000))
 
 (re-frame/reg-event-db
  :msg/mark-visible
- (fn [db [_ event-id]]
-   (if-let [room-id (:active-room-id db)]
-     (assoc-in db [:read-receipts :pending room-id] event-id)
-     db)))
+ (fn [db [_ event-id room-id ts]]
+   (let [rid (or room-id (:active-room-id db))]
+     (if (and rid (trackable-event-id? event-id))
+       (let [in-focused? (seq (vhydrator/get-stream rid :focused))]
+         (if in-focused?
+           db
+           (let [idx-map (build-live-index-map rid)
+                 cand    {:event-id event-id :ts (or ts 0)}
+                 pending (get-in db [:read-receipts :pending rid])
+                 sent    (get-in db [:read-receipts :sent rid])]
+             (if (and (candidate-newer? idx-map cand pending)
+                      (candidate-newer? idx-map cand sent))
+               (do
+                 (schedule-receipt-flush!)
+                 (assoc-in db [:read-receipts :pending rid] cand))
+               db))))
+       db))))
 
 (re-frame/reg-event-db
  :msg/mark-visible-batch
- (fn [db [_ event-ids]]
-   (if-let [room-id (:active-room-id db)]
-     (reduce (fn [d id] (assoc-in d [:read-receipts :pending room-id] id)) db event-ids)
-     db)))
+ (fn [db [_ entries]]
+   (let [fallback-room (:active-room-id db)
+         grouped       (reduce
+                        (fn [acc item]
+                          (let [cand (cond
+                                       (map? item)    item
+                                       (string? item) {:room-id fallback-room :event-id item :ts 0}
+                                       :else          nil)
+                                rid  (or (:room-id cand) fallback-room)
+                                eid  (:event-id cand)]
+                            (if (and rid (trackable-event-id? eid))
+                              (update acc rid (fnil conj []) {:event-id eid :ts (or (:ts cand) 0)})
+                              acc)))
+                        {}
+                        entries)]
+     (reduce-kv
+      (fn [d rid cands]
+        (if (seq (vhydrator/get-stream rid :focused))
+          d
+          (let [idx-map (build-live-index-map rid)
+                newest  (pick-newest-candidate idx-map cands)
+                pending (get-in d [:read-receipts :pending rid])
+                sent    (get-in d [:read-receipts :sent rid])]
+            (if (and newest
+                     (candidate-newer? idx-map newest pending)
+                     (candidate-newer? idx-map newest sent))
+              (do
+                (schedule-receipt-flush!)
+                (assoc-in d [:read-receipts :pending rid] newest))
+              d))))
+      db
+      grouped))))
 #+end_src
 
 
