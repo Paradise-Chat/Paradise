@@ -1,6 +1,5 @@
 (ns paradise.ui.overlays.settings.registry
   (:require
-   [clojure.string :as str]
    [paradise.shared.utils.svg :as icons]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
@@ -11,44 +10,49 @@
           custom-registries @(re-frame/subscribe [:plugins/custom-registries])
           available-engines @(re-frame/subscribe [:plugins/registry-engines])]
       [:<>
-       [:div.settings-section
-        [:h3.settings-subheading
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
          (tr [:settings.registry/custom-registries])]
-        [:div.settings-row
-         [:input.form-input.plugin-input
-          {:type "text"
-           :placeholder (tr [:settings.registry/placeholder-registry-url])
-           :value @registry-url-input
-           :on-change #(reset! registry-url-input (.. % -target -value))}]
-         [:div.settings-actions
-          [:button.settings-button
-           {:disabled (empty? @registry-url-input)
-            :on-click #(do
-                         (re-frame/dispatch [:registry/add-custom-url @registry-url-input])
-                         (reset! registry-url-input ""))}
-           (tr [:settings.registry/add-registry])]]]
+        [:div.settings-hub-group-card
+         [:div.settings-card-stack
+          [:div.settings-input-row
+           [:input.settings-input
+            {:type        "text"
+             :placeholder (tr [:settings.registry/placeholder-registry-url])
+             :value       @registry-url-input
+             :on-change   #(reset! registry-url-input (.. % -target -value))}]
+           [:button.settings-button
+            {:disabled (empty? @registry-url-input)
+             :on-click #(do
+                          (re-frame/dispatch [:registry/add-custom-url @registry-url-input])
+                          (reset! registry-url-input ""))}
+            (tr [:settings.registry/add-registry])]]]
 
-        (for [reg-url custom-registries]
-          ^{:key reg-url}
-          [:div.settings-row
-           [:div.settings-row-text
-            [:div.settings-row-title reg-url]]
-           [:div.settings-actions
-            [:button.settings-button.destructive
-             {:title (tr [:settings.registry/remove-registry])
-              :on-click #(re-frame/dispatch [:registry/remove-custom-url reg-url])}
-             [icons/trash]]]])]
+         (for [reg-url custom-registries]
+           ^{:key reg-url}
+           [:div.settings-card-row
+            [:div.settings-row-text
+             [:div.settings-row-title reg-url]]
+            [:div.settings-actions
+             [:button.settings-button.destructive.icon-only
+              {:title    (tr [:settings.registry/remove-registry])
+               :on-click #(re-frame/dispatch [:registry/remove-custom-url reg-url])}
+              [icons/trash]]]])]]
 
-       [:div.settings-section
-        [:h3.settings-subheading
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
          (tr [:settings.registry/resolved-engines])]
-        (for [engine available-engines]
-          ^{:key (:id engine)}
-          [:div.settings-row
-           [:div.settings-row-text
-            [:div.settings-row-title
-             (or (:name engine) (some-> (:id engine) name))
-             (when-let [commit (:commit engine)]
-               (str " (" (subs commit 0 (min 7 (count commit))) ")"))]
-            [:div.settings-row-description
-             (:description engine (:path engine))]]])]])))
+        [:div.settings-hub-group-card
+         (if (empty? available-engines)
+           [:div.settings-empty "—"]
+           (for [engine available-engines]
+             ^{:key (:id engine)}
+             [:div.settings-card-row
+              [:div.settings-row-text
+               [:div.settings-row-title
+                [:span (or (:name engine) (some-> (:id engine) clojure.core/name))]
+                (when-let [commit (:commit engine)]
+                  [:span.settings-badge.neutral
+                   (subs commit 0 (min 7 (count commit)))])]
+               [:div.settings-row-description
+                (:description engine (:path engine))]]]))]]])))
