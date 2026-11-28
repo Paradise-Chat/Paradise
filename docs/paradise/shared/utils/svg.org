@@ -430,19 +430,27 @@ Now this will be our first truly animated SVG...
   (build-icon-hiccup props video-shapes))
 #+end_src
 
-Now for muting we just want the strike to animate its way in. Nothing too fancy.
+Now for muting we just want the strike to animate its way in reliably via CSS
+(avoiding SVG SMIL document-timeline quirks after React reconciliation).
+#+begin_src css :tangle ../../../../css/icons.css
+@keyframes icon-strike-draw {
+      from { stroke-dashoffset: 32; }
+      to { stroke-dashoffset: 0; }
+}
+
+.icon-strike-line {
+      stroke-dasharray: 32;
+      stroke-dashoffset: 0;
+      animation: icon-strike-draw 0.2s ease-out;
+}
+#+end_src
+
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def mic-off-shapes
   [:g
    [:path {:d "M9 9a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"}]
    [:path {:d "M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32"
-           :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset"
-               :from "32" :to "0"
-               :dur "0.2s"
-               :fill "freeze"}]]])
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn mic-off [props]
   (build-icon-hiccup props mic-off-shapes))
@@ -475,10 +483,9 @@ Now using that CSS is easy!
 Using the same technique from mic-off we can easily drive a stroke across the headphones icon too.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def headphones-off-shapes
-  [:g [:path {:d "M3 11a9 9 0 0 1 13.52-7.78M20.42 15h.58a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 .58-1.42M2 17v3a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32" :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset" :from "32" :to "0" :dur "0.2s" :fill "freeze"}]]])
+  [:g
+   [:path {:d "M3 11a9 9 0 0 1 13.52-7.78M20.42 15h.58a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-3a2 2 0 0 1 .58-1.42M2 17v3a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"}]
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn headphones-off [props]
   (build-icon-hiccup props headphones-off-shapes))
@@ -487,10 +494,9 @@ Using the same technique from mic-off we can easily drive a stroke across the he
 Same for video off as well.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def video-off-shapes
-  [:g [:path {:d "M16 16v3H1V5h2m4 0h9v9l7 5V7l-7 5V7.94"}]
-   [:line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"
-           :stroke-dasharray "32" :stroke-dashoffset "32"}
-    [:animate {:attributeName "stroke-dashoffset" :from "32" :to "0" :dur "0.2s" :fill "freeze"}]]])
+  [:g
+   [:path {:d "M16 16v3H1V5h2m4 0h9v9l7 5V7l-7 5V7.94"}]
+   [:line.icon-strike-line {:x1 "1" :y1 "1" :x2 "23" :y2 "23"}]])
 
 (defn video-off [props]
   (build-icon-hiccup props video-off-shapes))
@@ -499,8 +505,7 @@ Same for video off as well.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def screen-share-off-shapes
   [:g
-   [:rect {:x "2" :y "3" :width "20" :height "14" :rx "2" :ry "2"}
-    [:animate {:attributeName "opacity" :from "1" :to "0.3" :dur "0.4s" :fill "freeze"}]]
+   [:rect {:x "2" :y "3" :width "20" :height "14" :rx "2" :ry "2" :opacity "0.35"}]
    [:path {:d "M8 21h8M12 17v4"}]])
 
 (defn screen-share-off [props]
