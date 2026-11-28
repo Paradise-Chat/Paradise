@@ -390,9 +390,11 @@ so we stick with what the complex component expects.
 
     (react/useEffect
      (fn []
-       (when (and editor loaded-text (.-schema editor))
-         (let [current-html (.getHTML editor)]
-           (when (not= current-html loaded-text)
+       (when (and editor (string? loaded-text) (seq loaded-text) (.-schema editor))
+         (let [current-html (.getHTML editor)
+               actively-typing? (and (.-isFocused editor) (not (.-isEmpty editor)))]
+           (when (and (not actively-typing?)
+                      (not= current-html loaded-text))
              (.commands.setContent editor loaded-text))))
        js/undefined)
      #js [editor loaded-text])
