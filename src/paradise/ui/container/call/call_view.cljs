@@ -4,17 +4,12 @@
    [re-frame.core :as rf]
    ["react" :as react]
    [promesa.core :as p]
+   [paradise.shared.utils.helpers :refer [clean-user-id format-call-participants mobile-runtime?]]
    [paradise.shared.plugins :as plugins]
-   [paradise.shared.utils.helpers :refer [format-call-participants]]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.container.call.runtime :as rtc]
    [paradise.ui.container.call.call-container :as cc]
    [paradise.ui.container.reusable :refer [room-header]]))
-
-(defn- clean-user-id [raw-id]
-  (when (and raw-id (not (str/blank? (str raw-id))))
-    (or (re-find #"^@[^:]+:[^:|]+" (str raw-id))
-        (str raw-id))))
 
 (defn- toggle-fullscreen [el]
   (when el
@@ -280,11 +275,40 @@
                 :on-click #(choose! app-item)}
                [:span.call-share-audio-item-text label]])])]))))
 
+(defn- screen-share-supported? []
+  (try
+    (when (exists? js/navigator)
+      (let [devs (.-mediaDevices js/navigator)]
+        (and (some? devs)
+             (fn? (.-getDisplayMedia devs))
+             (not (mobile-runtime?)))))
+    (catch :default _
+      false)))
+
+(defn share-screen-button [{:keys [screen-sharing?]}]
+  (let [btn-ref (react/useRef nil)]
+    (react/useEffect
+     (fn []
+       (if-let [^js el (.-current btn-ref)]
+         (let [on-click (fn [_]
+                          (rf/dispatch-sync [:call/toggle-screen-share]))]
+           (.addEventListener el "click" on-click)
+           (fn []
+             (.removeEventListener el "click" on-click)))
+         js/undefined))
+     #js [])
+    [:button.call-control-btn
+     {:ref   btn-ref
+      :type  "button"
+      :class (when screen-sharing? "is-active")}
+     (if screen-sharing? "Stop Share" "Share Screen")]))
+
 (defn call-control-bar []
   (let [audio-enabled?  @(rf/subscribe [:call/audio-enabled?])
         video-enabled?  @(rf/subscribe [:call/video-enabled?])
         screen-sharing? @(rf/subscribe [:call/screen-sharing?])
-        deafened?       @(rf/subscribe [:call/deafened?])]
+        deafened?       @(rf/subscribe [:call/deafened?])
+        can-share?      (or screen-sharing? (screen-share-supported?))]
     [:div.call-control-bar-wrapper
      [:div.call-control-bar
       [:button.call-control-btn
@@ -295,13 +319,11 @@
        {:class    (when video-enabled? "is-active")
         :on-click #(rf/dispatch [:call/toggle-video])}
        (if video-enabled? "Stop Video" "Start Video")]
-      [:div.call-control-split-group
-       [:button.call-control-btn
-        {:class    (when screen-sharing? "is-active")
-         :on-click #(rf/dispatch [:call/toggle-screen-share])}
-        (if screen-sharing? "Stop Share" "Share Screen")]
-       (when screen-sharing?
-         [:f> screen-share-audio-picker])]
+      (when can-share?
+        [:div.call-control-split-group
+         [:f> share-screen-button {:screen-sharing? screen-sharing?}]
+         (when screen-sharing?
+           [:f> screen-share-audio-picker])])
       [plugins/plugin-slot
        :call/control-bar
        {:audio-enabled?  audio-enabled?
@@ -461,8 +483,7 @@
           {:disabled busy?
            :on-click (fn [_]
                        (set-starting! true)
-                       (rf/dispatch [:call/init-widget room-id])
-                       (js/setTimeout #(rf/dispatch [:call/start room-id]) 500))}
+                       (rf/dispatch [:call/init-widget room-id {:join-directly? true}]))}
           join-label]]]])))
 
 (defn active-call-grid [room-id]
