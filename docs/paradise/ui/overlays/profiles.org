@@ -20,10 +20,14 @@ aspect.
    [clojure.string :as str]
    [paradise.media.component :refer [media]]
    [paradise.shared.plugins :as plugins]
+   [paradise.shared.utils.cache :as mem-cache]
    [paradise.shared.utils.helpers :refer [decode-edn-field
                                           first-non-blank
                                           local-media-url?
-                                          ok-status?]]
+                                          ok-status?
+                                          safe-lower]]
+   [paradise.shared.utils.normalize :as norm]
+   [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [context-menu-component
                                       engine-option-items
