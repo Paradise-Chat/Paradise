@@ -15,9 +15,10 @@ given room, space, server, channel, community, or direct message.
    [cljs-workers.mesh :as mesh]
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
-   [paradise.shared.utils.helpers :refer [decode-edn-field ok-status? resolve-item-label]]
+   [paradise.shared.utils.helpers :refer [decode-edn-field ok-status? resolve-item-label safe-lower]]
    [paradise.shared.utils.svg :as icons :refer [resolve-icon]]
    [paradise.ui.overlays.base :as overlays-base :refer [context-menu-component engine-option-items]]
+   [paradise.ui.overlays.room-notifications :as room-notifs]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
