@@ -1277,41 +1277,47 @@ Ideally, we should break this apart more later.
                                   :onSuggestionStart (fn [cmd] (reset! !sug-command cmd))
                                   :onSuggestionExit  (fn [] (reset! !sug-command nil))}]]
         [:div.timeline-input-outer
-         {:class (when is-mobile? "is-mobile-composer")}
+         {:class       (cond-> []
+                         is-mobile?                    (conj "is-mobile-composer")
+                         (and is-mobile? picker-open?) (conj "is-emoji-docked"))
+          :on-key-down (fn [^js e]
+                         (when (and (= (.-key e) "Escape")
+                                    (= (:mode context) :reply)
+                                    (not (suggestion-active?)))
+                           (.preventDefault e)
+                           (.stopPropagation e)
+                           (re-frame/dispatch [:input/clear-context active-id])))}
          [suggestion-menu]
-         (when picker-open?
-           [emoji-sticker-board
-            {:inline?  true
-             :on-close #(re-frame/dispatch [:ui/close-popover])
-             :on-send-sticker
-             (fn [sticker-payload]
-               (re-frame/dispatch [:sdk/send-sticker active-id sticker-payload])
-               (re-frame/dispatch [:ui/close-popover]))
-             :on-insert-native
-             (fn [unicode-char]
-               (when-let [ed @!editor]
-                 (-> ed .chain .focus (.insertContent unicode-char) .run)))
-             :on-insert-emoji
-             (fn [emote-or-shortcode & [maybe-url]]
-               (when-let [ed @!editor]
-                 (let [{:keys [id shortcode uri]} (if (map? emote-or-shortcode)
-                                                    emote-or-shortcode
-                                                    {:shortcode emote-or-shortcode :uri maybe-url})
-                       clean-sc                   (clean-shortcode shortcode)]
-                   (-> ed .chain .focus
-                       (.insertContent #js {:type  "customEmote"
-                                            :attrs #js {:id        id
-                                                        :shortcode clean-sc
-                                                        :uri       uri
-                                                        :src       uri}})
-                       .run))))}])
+         (when cmd-notice
+           (let [notice-msg (if (:key cmd-notice)
+                              (if (seq (:args cmd-notice))
+                                (tr [(:key cmd-notice)] (:args cmd-notice))
+                                (tr [(:key cmd-notice)]))
+                              (:text cmd-notice))]
+             [:div.composer-command-notice
+              {:class (str "is-" (name (or (:level cmd-notice) :info)))}
+              [:span.composer-command-notice-text notice-msg]
+              [:button.composer-command-notice-close
+               {:type     "button"
+                :title    (tr [:composer.commands/help-close])
+                :on-click #(re-frame/dispatch [:composer/clear-notice active-id])}
+               [icons/exit {:width "14px" :height "14px"}]]]))
+         (when (and picker-open? (not is-mobile?))
+           emoji-board-el)
          (when (and context (= (:mode context) :reply))
-           (let [sender-name (truncate-name (-> context :target :sender-name) 32)]
+           (let [sender-name (truncate-name (-> context :target :sender-name) 32)
+                 reply-body  (or (get-in context [:target :content :inner :content :body])
+                                 (get-in context [:target :content :inner :content :caption]))]
              [:div.input-context-banner
               [:div.context-info
-               [:span (tr [:composer/replying-to] [sender-name])]]
+               [:span.context-reply-icon [icons/reply {:width "14px" :height "14px"}]]
+               [:span.context-reply-label (tr [:composer/replying-to] [sender-name])]
+               (when (not (str/blank? (str reply-body)))
+                 [:span.context-reply-snippet (truncate-name (str reply-body) 64)])]
               [:button.context-cancel-btn
-               {:on-click #(re-frame/dispatch [:input/clear-context active-id])} [icons/exit]]]))
+               {:type     "button"
+                :on-click #(re-frame/dispatch [:input/clear-context active-id])}
+               [icons/exit]]]))
          (if is-mobile?
            [:<>
             (when (or (seq attachments) uploading?)
