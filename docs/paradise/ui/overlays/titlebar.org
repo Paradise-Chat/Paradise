@@ -15,7 +15,7 @@ Oh, and show the title.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
 (ns paradise.ui.overlays.titlebar
   (:require
-   ["@capacitor/core" :refer [Capacitor]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.shared.utils.svg :as icons]
    [paradise.shared.client.key-handler :refer [keybind-spec]]
    [reagent.core :as r]))
@@ -32,7 +32,7 @@ Really only ever want this to exist on the electron build.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/titlebar.cljs
 (defn desktop-app? []
-  (= (.getPlatform Capacitor) "electron"))
+  (platform/electron-platform?))
 
 (defn- get-window-bridge ^js []
   (when (desktop-app?)
@@ -51,7 +51,7 @@ Really only ever want this to exist on the electron build.
                                  (.then #(reset! !maximized? (boolean %))))
                  unlisten    (.onMaximizedChange win-bridge
                                                  #(reset! !maximized? (boolean %)))]
-      (let [mac? (= (.-platform win-bridge) "darwin")]
+      (let [mac? (platform/mac-os?)]
         [:header.desktop-titlebar
          [:div.desktop-titlebar-brand
           {:style {:padding-left (if mac? "72px" "12px")}}
