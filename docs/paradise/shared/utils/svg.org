@@ -678,6 +678,31 @@ A simple smiley icon is nice to indicate emoji functionality
 #+end_src
 
 
+A peeled-corner sticker icon for the composer sticker picker button.
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
+(def sticker-shapes
+  [:g
+   [:path {:d "M15.5 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3Z"
+           :fill "none"
+           :stroke-linecap "round"
+           :stroke-linejoin "round"}]
+   [:path {:d "M14 3v4a2 2 0 0 0 2 2h4"
+           :fill "none"
+           :stroke-linecap "round"
+           :stroke-linejoin "round"}]
+   [:path {:d "M8 13h.01"
+           :stroke-linecap "round"}]
+   [:path {:d "M16 13h.01"
+           :stroke-linecap "round"}]
+   [:path {:d "M9.5 16.5s1 1 2.5 1 2.5-1 2.5-1"
+           :fill "none"
+           :stroke-linecap "round"}]])
+
+(defn sticker [props]
+  (build-icon-hiccup (merge {:width "20px" :height "20px"} props) sticker-shapes))
+#+end_src
+
+
 And maybe a send button for later use in the style of a paper plane.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/svg.cljs
 (def send-shapes

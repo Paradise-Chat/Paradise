@@ -30,7 +30,7 @@ It is convenient to define the actual items that make up a timeline.
             [paradise.media.component :refer [media media-native]]
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.ui.container.members :refer [profile-popover-trigger]]
-            [virtualizer.client.hydrator :refer [get-cached-react-tree]]
+            [virtualizer.client.hydrator :as vhydrator :refer [get-cached-react-tree]]
             [paradise.ui.input.base :refer [inline-editor]]
             [paradise.shared.utils.svg :as icons]
             ["react" :as react]
