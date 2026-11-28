@@ -86,7 +86,7 @@ actual protocol.
 
 (defn load-protocol-engine! [protocol]
   (go
-    (let [{:keys [status protocol-name proto-kw url] :as res}
+    (let [{:keys [status protocol-name proto-kw url manifest] :as res}
           (<! (worker-loader/ensure-protocol-handlers!
                !protocol-handlers
                protocol
@@ -95,10 +95,13 @@ actual protocol.
         res
         (try
           (if-let [bootstrap-fn (get-fallback-bootstrap protocol-name)]
-            (do
-              (<! (bootstrap-fn register-engine! url))
-              (reset! !current-protocol proto-kw)
-              {:status "success"})
+            (let [restore-fetch! (worker-loader/wrap-bootstrap-asset-fetch! protocol-name manifest)]
+              (try
+                (<! (bootstrap-fn register-engine! url))
+                (reset! !current-protocol proto-kw)
+                {:status "success"}
+                (finally
+                  (restore-fetch!))))
             {:status "error"
              :msg    (str "Engine module did not export a bootstrap function: "
                           protocol-name)})
