@@ -140,10 +140,18 @@
           {:keys [deps-sym module-id config-key path shadow-module copy-files]} manifest
           config-kw (keyword config-key)
           dev-path (str "/" (last (str/split path #"/")))
+          i18n-src (io/file engine-path "i18n.edn")
+          i18n-to  (str "i18n-" config-key ".edn")
+          all-copy (cond-> (vec (or copy-files []))
+                     (.exists i18n-src)
+                     (conj {:from "i18n.edn" :to i18n-to}))
+          manifest-with-copy (assoc manifest :copy-files all-copy)
           deps (get-unique-deps engine-path)
           current-state (read-state)
-          new-state (assoc current-state module-id {:manifest manifest :deps deps})
-          dev-manifest (assoc manifest :path dev-path)]
+          new-state (assoc current-state module-id {:manifest manifest-with-copy :deps deps})
+          dev-manifest (cond-> (assoc manifest :path dev-path)
+                         (.exists i18n-src)
+                         (assoc :i18n (str "/" i18n-to)))]
       (edit-edn "deps.edn"
                 (fn [zloc]
                   (-> zloc
@@ -166,9 +174,9 @@
       (spit state-file (pr-str new-state))
       (when (seq deps)
         (b/process {:command-args (into ["pnpm" "add" "--ignore-scripts" "--prefer-offline"] deps)}))
-      (when (seq copy-files)
+      (when (seq all-copy)
         (prep-engine! engine-path copy-files prep)
-        (copy-manifest-files! engine-path copy-files))
+        (copy-manifest-files! engine-path all-copy))
       (println "Successfully mounted:" module-id))))
 
 (defn dismount [{:keys [module-ids]}]
