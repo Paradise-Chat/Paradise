@@ -2354,17 +2354,48 @@ spaces, or folders are displayed.
 ****** TODO Swap home icon out with SVG
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
+(defn- rail-background-target? [e]
+  (let [tgt (.-target e)]
+    (or (nil? tgt)
+        (not (fn? (.-closest tgt)))
+        (nil? (.closest tgt ".space-icon-wrapper, .space-folder-expanded, button, a")))))
+
+(defn- rail-background-menu-props [open-bar-menu!]
+  (let [lp (long-press-props open-bar-menu!)]
+    (reduce-kv
+     (fn [acc k f]
+       (if (= k :on-click-capture)
+         (assoc acc k f)
+         (assoc acc k (fn [e]
+                        (when (rail-background-target? e)
+                          (f e))))))
+     {}
+     lp)))
+
 (defn ^:ui spaces-sidebar []
-  (let [rail-items @(re-frame/subscribe [:spaces/rail-items])
-        active-id  @(re-frame/subscribe [:spaces/active-id])
-        active-dms @(re-frame/subscribe [:rooms/active-dm-pops])
-        tr         @(re-frame/subscribe [:i18n/tr])]
+  (let [rail-items      @(re-frame/subscribe [:spaces/rail-items])
+        active-id       @(re-frame/subscribe [:spaces/active-id])
+        active-dms      @(re-frame/subscribe [:rooms/active-dm-pops])
+        main-focus      @(re-frame/subscribe [:container/main-focus])
+        in-discover?    (= main-focus :discovery)
+        tr              @(re-frame/subscribe [:i18n/tr])
+        open-home-menu! (fn [mx my]
+                          (re-frame/dispatch
+                           [:ui/open-context-menu :spaces-home-actions
+                            {:x mx :y my}]))
+        open-rail-menu! (fn [mx my]
+                          (re-frame/dispatch
+                           [:ui/open-context-menu :spaces-rail-actions
+                            {:x mx :y my}]))]
     [:div.sidebar-spaces
+     (rail-background-menu-props open-rail-menu!)
      [:div.sidebar-spaces-top
       [:div.space-icon-wrapper
-       {:class    (when (nil? active-id) "active")
-        :on-click #(re-frame/dispatch [:space/select nil])
-        :title    (tr [:navigation.spaces.bar/home])}
+       (merge
+        (long-press-props open-home-menu!)
+        {:class    (when (and (nil? active-id) (not in-discover?)) "active")
+         :on-click #(re-frame/dispatch [:space/select nil])
+         :title    (tr [:navigation.spaces.bar/home])})
        [:div.home-icon-container
         [icons/sun {:animate :sun-pulse :size "32px"}]]]
       [:div.sidebar-divider]]
@@ -2373,8 +2404,16 @@ spaces, or folders are displayed.
         [:div.dm-pops-group
          (for [dm active-dms]
            ^{:key (:id dm)}
-           [space-icon-item dm active-id nil])
+           [space-icon-item dm (when-not in-discover? active-id) nil])
          [:div.sidebar-divider]])
-      [spaces-rail-items rail-items active-id]]
+      [spaces-rail-items rail-items (when-not in-discover? active-id)]]
+     [:div.sidebar-spaces-bottom
+      [:div.sidebar-divider]
+      [:div.space-icon-wrapper
+       {:class    (when in-discover? "active")
+        :on-click #(re-frame/dispatch [:discovery/open])
+        :title    (tr [:navigation.spaces.bar/discover])}
+       [:div.discover-icon-container
+        [icons/compass {:size "22px"}]]]]
      [space-touch-drag-ghost]]))
 #+end_src
