@@ -76,12 +76,18 @@ Mildly temporary until we better place these with the engine.
      "timeline-ready"
      (fn [_ get-val]
        (let [source-str (get-val "source" :source)
+             source-kw  (keyword (if (keyword? source-str) (name source-str) (str source-str)))
              room-id    (get-val "room-id" :room-id)
              ast-nodes  (get-val "ast-nodes" :ast-nodes)
-             paths      (get-val "lambda-paths" :lambda-paths)]
-         (swap! state/!ast-handoff assoc room-id {:ast-nodes ast-nodes :paths paths})
-         (re-frame/dispatch [:timeline/process-virtualized-data room-id source-str])
-         (re-frame/dispatch [:app/worker-redraw-ping])))
+             paths      (get-val "lambda-paths" :lambda-paths)
+             stale-src? (and (contains? #{:live :focused} source-kw)
+                             (not (get-in @db/app-db [:timeline-subs room-id source-kw])))]
+         (when-not stale-src?
+           (try
+             (vhydrator/ingest-stream-batch! room-id source-str ast-nodes paths)
+             (catch :default e
+               (js/console.error "Error hydrating timeline batch:" e)))
+           (re-frame/dispatch [:app/worker-redraw-ping]))))
      "widget-message"
      (fn [_ get-val]
        (re-frame/dispatch [:call/recv-widget-message (get-val "data" :data)]))
