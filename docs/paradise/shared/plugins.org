@@ -211,13 +211,17 @@ component slots
   (when-let [link (.getElementById js/document id)]
     (.remove link)))
 
-(defn refresh-registry-state! [custom-urls]
-  (go
-    (reset! reg/!user-registries custom-urls)
-    (<! (reg/ensure-environment!))
-    (rf/dispatch [:plugins/sync-registry-state
-                  (reg/resolve-engines)
-                  (reg/resolve-plugins)])))
+(defn refresh-registry-state!
+  ([custom-urls]
+   (refresh-registry-state! custom-urls nil))
+  ([custom-urls {:keys [force?]}]
+   (go
+     (<! (reg/ensure-environment! {:force?          (boolean force?)
+                                   :user-registries custom-urls}))
+     (let [engines (reg/resolve-engines)
+           plugins (reg/resolve-plugins)]
+       (rf/dispatch [:registry/set-available-engines engines])
+       (rf/dispatch [:plugins/sync-registry-state engines plugins])))))
 #+end_src
 
 
