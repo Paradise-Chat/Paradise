@@ -1,0 +1,204 @@
+(ns ^:virtualizer/skip paradise.shared.worker-loader
+  (:require [cljs-workers.worker :as worker]
+            [cljs.core.async :refer [<! go]]
+            [cljs.core.async.interop :refer-macros [<p!]]
+            [clojure.string :as str]
+            [paradise.shared.client.cache :as cache]
+            [paradise.shared.registry :as registry]
+            [promesa.core :as p]
+            [shadow.esm :refer [dynamic-import]]))
+
+(defn manifest-version-tag [manifest]
+  (registry/manifest-version-tag manifest))
+
+(defn- strip-query [url]
+  (if (string? url)
+    (first (str/split url #"\?"))
+    (str url)))
+
+(defn versioned-import-url
+  "Appends a manifest hash or version query param when appropriate."
+  [url manifest]
+  (let [tag (manifest-version-tag manifest)]
+    (if (and (string? url) tag (not (re-find #"(?:[?&])v=" url)))
+      (str url (if (str/includes? url "?") "&v=" "?v=") (js/encodeURIComponent tag))
+      url)))
+
+(defn- protocol-asset-prefix [protocol-name]
+  (str "engine:" (name (or protocol-name "shared")) ":"))
+
+(defn- protocol-version-meta-key [protocol-name]
+  (str "engine-ver:" (name (or protocol-name "shared"))))
+
+(defn purge-protocol-assets!
+  "Purges stale cached JS/WASM/helper assets for `protocol-name` from IndexedDB
+   (including legacy unprefixed keys and any stale CacheStorage wasm-heavy-cache).
+   Preserves entries already matching `keep-version` so concurrent workers
+   upgrading at the same time never delete each other's freshly fetched assets."
+  [protocol-name & [legacy-js-url keep-version]]
+  (let [pfx (protocol-asset-prefix protocol-name)]
+    (-> (p/all
+         [(cache/delete-assets-by-prefix! pfx {:keep-version keep-version})
+          (if (string? legacy-js-url)
+            (cache/delete-asset! (str "engine-js:" legacy-js-url))
+            (p/resolved false))
+          (cache/delete-assets-by-prefix! "engine-asset:")
+          (if (exists? js/caches)
+            (-> (.delete js/caches "wasm-heavy-cache")
+                (p/catch (fn [_] false)))
+            (p/resolved false))])
+        (p/catch (fn [_] nil)))))
+
+(defn- import-cached-module!
+  "Fetches engine JS via persistent cross-platform IDB cache (versioned by
+   manifest hash/version, or ETag/304 conditional check on local dev URLs),
+   then dynamically imports via Blob URL. Falls back to direct dynamic-import."
+  [protocol-name url manifest]
+  (let [ver-tag   (manifest-version-tag manifest)
+        fetch-url (versioned-import-url url manifest)
+        cache-key (str (protocol-asset-prefix protocol-name) "js:" (strip-query url))]
+    (-> (cache/fetch-text-cached!
+         fetch-url
+         {:key               cache-key
+          :version           ver-tag
+          :local-revalidate? true})
+        (p/then
+         (fn [{:keys [text]}]
+           (if (and (string? text) (not (str/blank? text)))
+             (let [blob     (js/Blob. #js [text] #js {:type "text/javascript"})
+                   blob-url (js/URL.createObjectURL blob)]
+               (-> (dynamic-import blob-url)
+                   (p/finally #(try (js/URL.revokeObjectURL blob-url) (catch :default _ nil)))
+                   (p/catch
+                    (fn [_]
+                      (dynamic-import fetch-url)))))
+             (dynamic-import fetch-url))))
+        (p/catch
+         (fn [_]
+           (dynamic-import fetch-url))))))
+
+(defn- cacheable-bootstrap-asset-url? [url]
+  (when (string? url)
+    (let [clean (strip-query url)]
+      (or (str/ends-with? clean ".wasm")
+          (re-find #"/(?:call-driver|call-encoder|push-[a-z0-9_-]+).*\.js$" clean)))))
+
+(defn- asset-content-type [url]
+  (let [clean (strip-query (str url))]
+    (cond
+      (str/ends-with? clean ".wasm") "application/wasm"
+      (str/ends-with? clean ".js")   "application/javascript"
+      :else                          "application/octet-stream")))
+
+(defn wrap-bootstrap-asset-fetch!
+  "Installs a temporary globalThis.fetch interceptor during engine bootstrap so
+   heavy static engine assets (.wasm, call-driver/encoder/push scripts) are
+   served from persistent IDB cache across restarts on all platforms. Returns a
+   restore fn."
+  ([manifest]
+   (wrap-bootstrap-asset-fetch! (or (some-> (:id manifest) name) "shared") manifest))
+  ([protocol-name manifest]
+   (let [raw-fetch js/globalThis.fetch
+         orig      (.bind raw-fetch js/globalThis)
+         ver-tag   (manifest-version-tag manifest)
+         pfx       (protocol-asset-prefix protocol-name)]
+     (set! js/globalThis.fetch
+           (fn [resource & args]
+             (let [url    (if (string? resource)
+                            resource
+                            (or (.-href resource) (.-url resource)))
+                   init   (first args)
+                   method (or (some-> init .-method str/upper-case) "GET")]
+               (if (and (= method "GET") (cacheable-bootstrap-asset-url? url))
+                 (let [ctype     (asset-content-type url)
+                       clean-url (strip-query url)
+                       fetch-url (versioned-import-url url manifest)
+                       cache-key (str pfx "asset:" clean-url)]
+                   (-> (cache/fetch-bytes-cached!
+                        fetch-url
+                        {:key               cache-key
+                         :version           ver-tag
+                         :content-type      ctype
+                         :local-revalidate? true
+                         :fetch-fn          orig})
+                       (p/then
+                        (fn [{:keys [bytes content-type]}]
+                          (if bytes
+                            (js/Response. bytes
+                                          #js {:status  200
+                                               :headers #js {"Content-Type" (or content-type ctype)}})
+                            (apply orig resource args))))
+                       (p/catch
+                        (fn [_]
+                          (apply orig resource args)))))
+                 (apply orig resource args)))))
+     (fn []
+       (set! js/globalThis.fetch raw-fetch)))))
+
+(defn install-protocol-handlers!
+  "Registers captured worker handlers under both their unqualified and protocol-namespaced keys."
+  [protocol-name captured]
+  (let [namespaced (into {}
+                         (map (fn [[k f]]
+                                [(keyword protocol-name (name k)) f]))
+                         captured)]
+    (swap! worker/handlers merge captured namespaced)))
+
+(defn ensure-protocol-handlers!
+  "Ensures the protocol's worker module is dynamically imported (from persistent
+   IDB cache when valid), diffs and caches any handlers it registers into
+   `!handlers-cache`, and activates them. When a protocol manifest version/hash
+   or entry URL changes, all previous cached assets for that protocol are purged
+   before importing.
+   Optional `:on-before-switch` runs once the registry URL is verified."
+  ([!handlers-cache protocol]
+   (ensure-protocol-handlers! !handlers-cache protocol nil))
+  ([!handlers-cache protocol {:keys [on-before-switch on-loaded]}]
+   (go
+     (<! (registry/ensure-environment!))
+     (try
+       (let [protocol-name (name protocol)
+             proto-kw      (keyword protocol-name)
+             url           (registry/get-engine-url protocol-name)
+             manifest      (registry/get-engine-manifest protocol-name)]
+         (if-not url
+           {:status "error"
+            :msg    (str "Unknown protocol or missing registry URL: " protocol-name)}
+           (do
+             (when on-before-switch
+               (on-before-switch proto-kw))
+             (if-let [cached (get @!handlers-cache proto-kw)]
+               (install-protocol-handlers! protocol-name cached)
+               (let [meta-key  (protocol-version-meta-key protocol-name)
+                     prev-meta (<p! (cache/get-meta meta-key))
+                     prev-ver  (or (:version prev-meta) (get-in prev-meta [:data :version]))
+                     prev-url  (get-in prev-meta [:data :url])
+                     next-ver  (manifest-version-tag manifest)
+                     changed?  (or (and prev-ver (not= (str prev-ver) (str next-ver)))
+                                   (and prev-url (not= (str prev-url) (str url))))
+                     _         (when changed?
+                                 (<p! (purge-protocol-assets! protocol-name (or prev-url url) next-ver)))
+                     before    @worker/handlers
+                     _         (<p! (import-cached-module! protocol-name url manifest))
+                     _         (when (or next-ver url)
+                                 (<p! (cache/put-meta! meta-key
+                                                       {:version next-ver :url url}
+                                                       next-ver)))
+                     after     @worker/handlers
+                     captured  (into {}
+                                     (keep (fn [[k f]]
+                                             (when (not (identical? (get before k) f))
+                                               [(keyword (name k)) f])))
+                                     after)]
+                 (swap! !handlers-cache assoc proto-kw captured)
+                 (when on-loaded
+                   (on-loaded proto-kw captured))
+                 (install-protocol-handlers! protocol-name captured)))
+             {:status        "success"
+              :protocol-name protocol-name
+              :proto-kw      proto-kw
+              :url           url
+              :manifest      manifest})))
+       (catch :default e
+         {:status "error"
+          :msg    (or (.-message e) (str e))})))))
