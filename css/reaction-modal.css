@@ -2,13 +2,13 @@
   .reaction-details-close-btn {
       z-index: 10;
       position: absolute;
-      top: env(safe-area-inset-top, 0px);
+      top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
       right: 20px;
       cursor: pointer;
   }
 
   .reaction-details-header {
-      top: env(safe-area-inset-top, 0px);
+      top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
       margin-top: 0;
       margin-bottom: 20px;
       border-bottom: 1px solid var(--cp-border, #333);
