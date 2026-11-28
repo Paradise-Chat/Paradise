@@ -25,26 +25,167 @@ previous/next navigation chevrons, and bottom options dock (filmstrip and
 action buttons) out of the gesture coordinator so the main component stays
 focused on pointer/zoom transforms.
 
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/lightbox.cljs
+(defn- lightbox-top-bar [{:keys [multi? active-idx total options-open? item-name tr toggle-options! close-fn]}]
+  [:div.lightbox-top-bar
+   {:class           (when options-open? "has-scrim")
+    :on-pointer-down #(.stopPropagation %)
+    :on-click        #(.stopPropagation %)}
+   [:div.lightbox-top-left
+    (when multi?
+      [:div.lightbox-counter
+       (str (inc active-idx) " / " total)])
+    (when (and options-open? (not-empty item-name))
+      [:div.lightbox-title item-name])]
+   [:div.lightbox-top-right
+    [:button.lightbox-icon-btn.lightbox-options-btn
+     {:type       "button"
+      :class      (when options-open? "is-active")
+      :aria-label (@tr [:lightbox/options])
+      :title      (@tr [:lightbox/options])
+      :on-click   (fn [e]
+                    (.stopPropagation e)
+                    (toggle-options!))}
+     [icons/more {:size "20px"}]]
+    [:button.lightbox-icon-btn.lightbox-close-btn
+     {:type       "button"
+      :aria-label (@tr [:lightbox/close])
+      :title      (@tr [:lightbox/close])
+      :on-click   (fn [e]
+                    (.stopPropagation e)
+                    (close-fn))}
+     [icons/exit {:size "22px" :stroke-width "2.5"}]]]])
 
+(defn- lightbox-nav-arrows [{:keys [options-open? prev-fn! next-fn!]}]
+  [:<>
+   [:button.lightbox-nav-btn.is-prev
+    {:type            "button"
+     :class           (when-not options-open? "is-subtle")
+     :on-pointer-down #(.stopPropagation %)
+     :on-click        (fn [e]
+                        (.stopPropagation e)
+                        (prev-fn!))}
+    [:svg {:width "22" :height "22" :viewBox "0 0 24 24" :fill "none"
+           :stroke "currentColor" :stroke-width "2.4" :stroke-linecap "round" :stroke-linejoin "round"}
+     [:polyline {:points "15 18 9 12 15 6"}]]]
+   [:button.lightbox-nav-btn.is-next
+    {:type            "button"
+     :class           (when-not options-open? "is-subtle")
+     :on-pointer-down #(.stopPropagation %)
+     :on-click        (fn [e]
+                        (.stopPropagation e)
+                        (next-fn!))}
+    [:svg {:width "22" :height "22" :viewBox "0 0 24 24" :fill "none"
+           :stroke "currentColor" :stroke-width "2.4" :stroke-linecap "round" :stroke-linejoin "round"}
+     [:polyline {:points "9 18 15 12 9 6"}]]]])
+
+(defn- lightbox-bottom-bar
+  [{:keys [options-open? multi? gallery-items active-idx room-id step-to!
+           scale reset-zoom-fn url current-item resolve-live-url
+           item-source item-source-map item-name item-mime item-room-id item-event-id tr]}]
+  [:div.lightbox-bottom-bar
+   {:class           (if options-open? "is-visible" "is-hidden")
+    :on-click        #(.stopPropagation %)
+    :on-pointer-down #(.stopPropagation %)}
+   (when multi?
+     [:div.lightbox-filmstrip
+      (map-indexed
+       (fn [idx thumb-item]
+         (let [selected? (= idx active-idx)
+               t-uri     (or (:display-uri thumb-item)
+                             (:thumbnail-source thumb-item)
+                             (when-not (:video? thumb-item) (:source thumb-item)))
+               t-map     (or (:display-map thumb-item)
+                             (:thumbnail-source-map thumb-item)
+                             (when-not (:video? thumb-item) (:source-map thumb-item)))]
+           ^{:key (or (:internal-id thumb-item) (:event-id thumb-item) idx)}
+           [:div.lightbox-thumb-item
+            {:class    (when selected? "is-selected")
+             :on-click (fn [e]
+                         (.stopPropagation e)
+                         (step-to! idx))}
+            (when (or t-uri t-map)
+              [media
+               {:uri        t-uri
+                :source-map t-map
+                :tag-type   "img"
+                :alt        "thumb"
+                :mime-type  (:display-mime thumb-item)
+                :room-id    (or (:room-id thumb-item) (:room_id thumb-item) room-id)
+                :event-id   (:event-id thumb-item)
+                :width      (:crop-size thumb-item)
+                :height     (:crop-size thumb-item)
+                :method     (:crop-method thumb-item)}])]))
+       gallery-items)])
+
+   [:div.lightbox-actions
+    (when (> scale 1.01)
+      [:button.lightbox-btn
+       {:type     "button"
+        :on-click (fn [e]
+                    (.stopPropagation e)
+                    (reset-zoom-fn))}
+       [:span (str (@tr [:lightbox/reset-zoom]) " (" (.toFixed scale 1) "×)")]])
+    [:a.lightbox-btn
+     {:href     (or url "#")
+      :target   "_blank"
+      :rel      "noopener noreferrer"
+      :on-click (fn [e]
+                  (when (or current-item (not url))
+                    (.preventDefault e)
+                    (when-let [live-src (resolve-live-url)]
+                      (.open js/window live-src "_blank" "noopener,noreferrer"))))}
+     [:span.btn-icon [icons/external-link]]
+     [:span (@tr [:lightbox/open-original])]]
+    (if (or item-source item-source-map)
+      [:button.lightbox-btn
+       {:type     "button"
+        :on-click (fn [e]
+                    (.preventDefault e)
+                    (.stopPropagation e)
+                    (re-frame/dispatch
+                     [:media/download {:uri        item-source
+                                       :source-map item-source-map
+                                       :filename   item-name
+                                       :mime-type  item-mime
+                                       :room-id    item-room-id
+                                       :event-id   item-event-id}]))}
+       [:span.btn-icon [icons/download]]
+       [:span (@tr [:lightbox/download])]]
+      [:a.lightbox-btn
+       {:href     url
+        :download item-name}
+       [:span.btn-icon [icons/download]]
+       [:span (@tr [:lightbox/download])]])]])
+#+end_src
+
+**** Lightbox Component + CSS
+
+Tracks active pointer gesture mode (~nil~, ~:swipe-x~, ~:dismiss-y~, ~:pan~, or
+~:pinch~), pinch-zoom transforms, and swipe dismissal inside the global modal
+shell.
 
 ***** Component
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/lightbox.cljs
 (defn- default-transform-state [idx]
-  {:index      (or idx 0)
-   :scale      1
-   :last-scale 1
-   :x          0
-   :y          0
-   :last-x     0
-   :last-y     0
-   :down-x     0
-   :down-y     0
-   :moved?     false
-   :start-dist 0})
+  {:index           (or idx 0)
+   :scale           1
+   :last-scale      1
+   :x               0
+   :y               0
+   :last-x          0
+   :last-y          0
+   :down-x          0
+   :down-y          0
+   :down-ts         0
+   :dismiss-y       0
+   :dismissing?     false
+   :moved?          false
+   :start-dist      0
+   :options-open?   false})
 
-
-(defn ^:ui image-lightbox-content [{:keys [url items index room-id]}]
+(defn ^:ui image-lightbox-content [{:keys [url items index room-id filename source source-map mime-type event-id]}]
   (r/with-let [gallery-items    (vec (or items []))
                total            (count gallery-items)
                multi?           (> total 1)
@@ -52,22 +193,50 @@ focused on pointer/zoom transforms.
                !drag-state      (atom {:start-x nil :dx 0})
                !active-pointers (atom {})
                !stage-el        (atom nil)
+               !tap-timer       (atom nil)
+               !last-tap-ts     (atom 0)
+               !gesture-mode    (atom nil)
                tr               (re-frame/subscribe [:i18n/tr])
-               close-fn         #(re-frame/dispatch [:ui/close-modal])
+               clear-tap-timer! (fn []
+                                  (when-let [t @!tap-timer]
+                                    (js/clearTimeout t)
+                                    (reset! !tap-timer nil)))
+               close-fn         (fn []
+                                  (clear-tap-timer!)
+                                  (re-frame/dispatch [:ui/close-modal]))
                reset-zoom-fn    #(swap! !state merge
-                                        {:scale      1
-                                         :last-scale 1
-                                         :x          0
-                                         :y          0
-                                         :last-x     0
-                                         :last-y     0
-                                         :start-dist 0})
+                                        {:scale       1
+                                         :last-scale  1
+                                         :x           0
+                                         :y           0
+                                         :last-x      0
+                                         :last-y      0
+                                         :dismiss-y   0
+                                         :dismissing? false
+                                         :start-dist  0})
                step-to!         (fn [next-idx]
                                   (when (pos? total)
+                                    (clear-tap-timer!)
                                     (reset! !active-pointers {})
-                                    (reset! !state (default-transform-state (mod next-idx total)))))
+                                    (reset! !gesture-mode nil)
+                                    (let [keep-opts? (:options-open? @!state)]
+                                      (reset! !state
+                                              (assoc (default-transform-state (mod next-idx total))
+                                                     :options-open? keep-opts?)))))
                prev-fn!         #(when multi? (step-to! (dec (:index @!state))))
                next-fn!         #(when multi? (step-to! (inc (:index @!state))))
+               toggle-options!  #(swap! !state update :options-open? not)
+               toggle-zoom!     (fn []
+                                  (if (> (:scale @!state) 1.01)
+                                    (reset-zoom-fn)
+                                    (swap! !state merge
+                                           {:scale         2.5
+                                            :last-scale    2.5
+                                            :x             0
+                                            :y             0
+                                            :dismiss-y     0
+                                            :dismissing?   false
+                                            :options-open? false})))
                get-dist         (fn [p1 p2]
                                   (let [dx (- (.-clientX p1) (.-clientX p2))
                                         dy (- (.-clientY p1) (.-clientY p2))]
@@ -77,13 +246,16 @@ focused on pointer/zoom transforms.
                                  {:id         :lightbox
                                   :can-claim? (fn [dx dy]
                                                 (and multi?
+                                                     (nil? @!gesture-mode)
                                                      (<= (:scale @!state) 1)
                                                      (<= (count @!active-pointers) 1)
-                                                     (> (js/Math.abs dx) 8)
-                                                     (> (js/Math.abs dx) (* 1.5 (js/Math.abs dy)))))
+                                                     (> (js/Math.abs dx) 10)
+                                                     (> (js/Math.abs dx) (* 1.4 (js/Math.abs dy)))))
                                   :on-move    (fn [dx]
+                                                (reset! !gesture-mode :swipe-x)
                                                 (swap! !state assoc :x dx :moved? true))
                                   :on-end     (fn [dx]
+                                                (reset! !gesture-mode nil)
                                                 (cond
                                                   (> dx 64)
                                                   (do
@@ -101,10 +273,12 @@ focused on pointer/zoom transforms.
                                   (case (.-key e)
                                     "ArrowLeft"  (do (.preventDefault e) (prev-fn!))
                                     "ArrowRight" (do (.preventDefault e) (next-fn!))
-                                    "Escape"     (do (.preventDefault e) (close-fn))
+                                    "Escape"     (do (.preventDefault e)
+                                                     (.stopPropagation e)
+                                                     (close-fn))
                                     nil))
-               _                (.addEventListener js/window "keydown" key-listener)]
-    (let [{:keys [scale x y moved?] active-idx :index} @!state
+               _                (.addEventListener js/window "keydown" key-listener true)]
+    (let [{:keys [scale x y moved? dismiss-y dismissing? options-open?] active-idx :index} @!state
           active-count     (count @!active-pointers)
           current-item     (when (pos? total)
                              (nth gallery-items (mod active-idx total)))
@@ -114,23 +288,41 @@ focused on pointer/zoom transforms.
                                (:room_id current-item)
                                room-id)
           item-mime        (or (get-in current-item [:info :mimetype])
-                               (:display-mime current-item))
+                               (:display-mime current-item)
+                               mime-type)
+          item-source      (or (:source current-item) source)
+          item-source-map  (or (:source-map current-item) source-map)
+          item-event-id    (or (:event-id current-item) event-id)
           item-name        (or (:filename current-item)
                                (:caption current-item)
+                               filename
                                (if video? "video" "image"))
+          abs-dismiss      (js/Math.abs (double dismiss-y))
+          dismiss-scale    (if dismissing?
+                             (max 0.82 (- 1.0 (/ abs-dismiss 1100.0)))
+                             1.0)
+          backdrop-alpha   (if dismissing?
+                             (max 0.14 (* 0.90 (- 1.0 (/ abs-dismiss 380.0))))
+                             0.90)
+          eff-scale        (* scale dismiss-scale)
+          eff-y            (+ y dismiss-y)
           stage-class      (cond-> "lightbox-media-stage"
-                             video?              (str " is-video")
-                             (> scale 1)         (str " is-zoomed")
-                             (pos? active-count) (str " is-dragging"))
-          image-class      (if multi? "lightbox-image is-multi" "lightbox-image")
+                             video?                             (str " is-video")
+                             (> scale 1)                        (str " is-zoomed")
+                             (or (pos? active-count) dismissing?) (str " is-dragging"))
+          image-class      (if (and multi? options-open?)
+                             "lightbox-image is-multi"
+                             "lightbox-image")
           resolve-live-url (fn []
                              (or (when-let [stage @!stage-el]
                                    (when-let [el (.querySelector stage "img, video")]
                                      (not-empty (.-src el))))
                                  url))]
       [:div.lightbox-interaction-layer
-       {:on-click (fn [_]
-                    (when (and (<= scale 1) (not moved?))
+       {:style {:background-color (str "rgba(6, 8, 12, " backdrop-alpha ")")}
+        :on-click (fn [e]
+                    (when (and (= (.-target e) (.-currentTarget e))
+                               (not moved?))
                       (close-fn)))
         :on-wheel (fn [e]
                     (when-not video?
@@ -138,51 +330,74 @@ focused on pointer/zoom transforms.
                             new-scale   (max 1 (min 5 (* scale zoom-factor)))]
                         (if (<= new-scale 1)
                           (reset-zoom-fn)
-                          (swap! !state assoc :scale new-scale :last-scale new-scale)))))
+                          (swap! !state assoc
+                                 :scale new-scale
+                                 :last-scale new-scale
+                                 :options-open? false)))))
         :on-pointer-down (fn [e]
-                           (when-not video?
-                             ((:on-pointer-down swipe-handlers) e)
-                             (swap! !active-pointers assoc (.-pointerId e) e)
-                             (let [ps (vals @!active-pointers)]
-                               (cond
-                                 (= (count ps) 2)
-                                 (do
-                                   (reset! !drag-state {:start-x nil :dx 0})
-                                   (swap! !swipe-drag-data assoc :owner :pinch)
-                                   (.setPointerCapture (.-currentTarget e) (.-pointerId e))
-                                   (swap! !state assoc
-                                          :moved?     true
-                                          :x          0
-                                          :start-dist (get-dist (first ps) (second ps))
-                                          :last-scale scale))
-
-                                 (= (count ps) 1)
-                                 (swap! !state assoc
-                                        :moved? false
-                                        :down-x (.-clientX e)
-                                        :down-y (.-clientY e)
-                                        :last-x (.-clientX e)
-                                        :last-y (.-clientY e))))))
-        :on-pointer-move (fn [e]
-                           (when-not video?
-                             ((:on-pointer-move swipe-handlers) e)
-                             (when (and (not= (:owner @!swipe-drag-data) :lightbox)
-                                        (contains? @!active-pointers (.-pointerId e)))
+                           (let [primary? (or (= (.-pointerType e) "touch")
+                                              (zero? (.-button e)))]
+                             (when primary?
+                               (when-not video?
+                                 ((:on-pointer-down swipe-handlers) e))
                                (swap! !active-pointers assoc (.-pointerId e) e)
                                (let [ps (vals @!active-pointers)]
                                  (cond
-                                   (= (count ps) 2)
-                                   (let [new-dist  (get-dist (first ps) (second ps))
-                                         {:keys [start-dist last-scale]} @!state
-                                         new-scale (max 1 (min 5 (* last-scale (/ new-dist (max 1 start-dist)))))]
-                                     (swap! !state assoc :scale new-scale :moved? true))
+                                   (and (not video?) (= (count ps) 2))
+                                   (do
+                                     (clear-tap-timer!)
+                                     (reset! !gesture-mode :pinch)
+                                     (reset! !drag-state {:start-x nil :dx 0})
+                                     (swap! !swipe-drag-data assoc :owner :pinch)
+                                     (try
+                                       (.setPointerCapture (.-currentTarget e) (.-pointerId e))
+                                       (catch :default _ nil))
+                                     (swap! !state assoc
+                                            :moved?        true
+                                            :dismissing?   false
+                                            :dismiss-y     0
+                                            :x             0
+                                            :options-open? false
+                                            :start-dist    (get-dist (first ps) (second ps))
+                                            :last-scale    scale))
 
                                    (= (count ps) 1)
-                                   (let [{:keys [down-x down-y]} @!state
-                                         total-dx (- (.-clientX e) down-x)
-                                         total-dy (- (.-clientY e) down-y)
-                                         dragged? (> (js/Math.hypot total-dx total-dy) 6)]
-                                     (if (> scale 1)
+                                   (do
+                                     (reset! !gesture-mode nil)
+                                     (swap! !state assoc
+                                            :moved?      false
+                                            :dismissing? false
+                                            :dismiss-y   0
+                                            :down-x      (.-clientX e)
+                                            :down-y      (.-clientY e)
+                                            :down-ts     (js/Date.now)
+                                            :last-x      (.-clientX e)
+                                            :last-y      (.-clientY e))))))))
+        :on-pointer-move (fn [e]
+                           (when-not video?
+                             ((:on-pointer-move swipe-handlers) e))
+                           (when (and (not= (:owner @!swipe-drag-data) :lightbox)
+                                      (contains? @!active-pointers (.-pointerId e)))
+                             (swap! !active-pointers assoc (.-pointerId e) e)
+                             (let [ps (vals @!active-pointers)]
+                               (cond
+                                 (and (not video?) (= (count ps) 2))
+                                 (let [new-dist  (get-dist (first ps) (second ps))
+                                       {:keys [start-dist last-scale]} @!state
+                                       new-scale (max 1 (min 5 (* last-scale (/ new-dist (max 1 start-dist)))))]
+                                   (swap! !state assoc :scale new-scale :moved? true))
+
+                                 (= (count ps) 1)
+                                 (let [{:keys [down-x down-y]} @!state
+                                       total-dx (- (.-clientX e) down-x)
+                                       total-dy (- (.-clientY e) down-y)
+                                       abs-dx   (js/Math.abs total-dx)
+                                       abs-dy   (js/Math.abs total-dy)
+                                       dragged? (> (js/Math.hypot total-dx total-dy) 8)]
+                                   (cond
+                                     (and (not video?) (> scale 1))
+                                     (do
+                                       (when dragged? (reset! !gesture-mode :pan))
                                        (swap! !state
                                               (fn [{:keys [x y last-x last-y] :as curr}]
                                                 (assoc curr
@@ -190,17 +405,49 @@ focused on pointer/zoom transforms.
                                                        :x      (+ x (- (.-clientX e) last-x))
                                                        :y      (+ y (- (.-clientY e) last-y))
                                                        :last-x (.-clientX e)
-                                                       :last-y (.-clientY e))))
-                                       (when dragged?
-                                         (swap! !state assoc :moved? true)))))))))
+                                                       :last-y (.-clientY e)))))
+
+                                     (or (= @!gesture-mode :dismiss-y)
+                                         (and (nil? @!gesture-mode)
+                                              (<= scale 1)
+                                              (> abs-dy (if video? 18 10))
+                                              (> abs-dy (* 1.2 abs-dx))))
+                                     (do
+                                       (when (not= @!gesture-mode :dismiss-y)
+                                         (clear-tap-timer!)
+                                         (reset! !gesture-mode :dismiss-y)
+                                         (swap! !swipe-drag-data assoc :owner :lightbox-dismiss))
+                                       (swap! !state assoc
+                                              :moved?      true
+                                              :dismissing? true
+                                              :dismiss-y   total-dy))
+
+                                     dragged?
+                                     (swap! !state assoc :moved? true)))))))
         :on-pointer-up (fn [e]
-                         (let [was-swiping? (= (:owner @!swipe-drag-data) :lightbox)]
-                           ((:on-pointer-up swipe-handlers) e)
+                         (let [was-swiping?    (= (:owner @!swipe-drag-data) :lightbox)
+                               was-dismissing? (= @!gesture-mode :dismiss-y)
+                               {:keys [dismiss-y down-ts]} @!state]
+                           (when-not video?
+                             ((:on-pointer-up swipe-handlers) e))
                            (try
                              (.releasePointerCapture (.-currentTarget e) (.-pointerId e))
                              (catch :default _ nil))
                            (swap! !active-pointers dissoc (.-pointerId e))
-                           (when-not was-swiping?
+                           (when (= (:owner @!swipe-drag-data) :lightbox-dismiss)
+                             (swap! !swipe-drag-data assoc :owner nil))
+                           (reset! !gesture-mode nil)
+                           (cond
+                             was-dismissing?
+                             (let [elapsed  (max 1 (- (js/Date.now) (or down-ts 0)))
+                                   abs-dy   (js/Math.abs (double dismiss-y))
+                                   velocity (/ abs-dy elapsed)]
+                               (if (or (>= abs-dy 85)
+                                       (and (>= abs-dy 32) (>= velocity 0.45)))
+                                 (close-fn)
+                                 (swap! !state assoc :dismiss-y 0 :dismissing? false)))
+
+                             (not was-swiping?)
                              (let [ps         (vals @!active-pointers)
                                    curr-scale (:scale @!state)]
                                (cond
@@ -217,55 +464,55 @@ focused on pointer/zoom transforms.
                                  (zero? (count ps))
                                  (swap! !state assoc :last-scale curr-scale))))))
         :on-pointer-cancel (fn [e]
-                             ((:on-pointer-cancel swipe-handlers) e)
+                             (when-not video?
+                               ((:on-pointer-cancel swipe-handlers) e))
                              (try
                                (.releasePointerCapture (.-currentTarget e) (.-pointerId e))
                                (catch :default _ nil))
-                             (reset! !active-pointers {}))}
+                             (when (= (:owner @!swipe-drag-data) :lightbox-dismiss)
+                               (swap! !swipe-drag-data assoc :owner nil))
+                             (reset! !gesture-mode nil)
+                             (reset! !active-pointers {})
+                             (swap! !state assoc :dismiss-y 0 :dismissing? false))}
 
-       [:div.lightbox-close-btn
-        {:on-pointer-down #(.stopPropagation %)
-         :on-click        (fn [e]
-                            (.stopPropagation e)
-                            (close-fn))
-         :title           (@tr [:lightbox/close])}
-        [icons/exit]]
-
-       (when multi?
-         [:div.lightbox-counter
-          (str (inc active-idx) " / " total)])
-
-       (when multi?
-         [:button.lightbox-nav-btn.is-prev
-          {:type            "button"
-           :on-pointer-down #(.stopPropagation %)
-           :on-click        (fn [e]
-                              (.stopPropagation e)
-                              (prev-fn!))}
-          [:svg {:width "20" :height "20" :viewBox "0 0 24 24" :fill "none"
-                 :stroke "currentColor" :stroke-width "2.2" :stroke-linecap "round" :stroke-linejoin "round"}
-           [:polyline {:points "15 18 9 12 15 6"}]]])
+       [lightbox-top-bar
+        {:multi?          multi?
+         :active-idx      active-idx
+         :total           total
+         :options-open?   options-open?
+         :item-name       item-name
+         :tr              tr
+         :toggle-options! toggle-options!
+         :close-fn        close-fn}]
 
        (when multi?
-         [:button.lightbox-nav-btn.is-next
-          {:type            "button"
-           :on-pointer-down #(.stopPropagation %)
-           :on-click        (fn [e]
-                              (.stopPropagation e)
-                              (next-fn!))}
-          [:svg {:width "20" :height "20" :viewBox "0 0 24 24" :fill "none"
-                 :stroke "currentColor" :stroke-width "2.2" :stroke-linecap "round" :stroke-linejoin "round"}
-           [:polyline {:points "9 18 15 12 9 6"}]]])
+         [lightbox-nav-arrows
+          {:options-open? options-open?
+           :prev-fn!      prev-fn!
+           :next-fn!      next-fn!}])
 
        [:div
-        {:class           stage-class
-         :ref             #(reset! !stage-el %)
-         :on-click        (fn [e] (.stopPropagation e))
-         :on-double-click (fn [e]
-                            (.stopPropagation e)
-                            (when-not video?
-                              (reset-zoom-fn)))
-         :style           {:transform (str "translate(" x "px, " y "px) scale(" scale ")")}}
+        {:class    stage-class
+         :ref      #(reset! !stage-el %)
+         :on-click (fn [e]
+                     (.stopPropagation e)
+                     (when (and (not video?) (not moved?))
+                       (let [now (js/Date.now)]
+                         (if (< (- now @!last-tap-ts) 260)
+                           (do
+                             (clear-tap-timer!)
+                             (reset! !last-tap-ts 0)
+                             (toggle-zoom!))
+                           (do
+                             (reset! !last-tap-ts now)
+                             (clear-tap-timer!)
+                             (reset! !tap-timer
+                                     (js/setTimeout
+                                      (fn []
+                                        (reset! !tap-timer nil)
+                                        (toggle-options!))
+                                      220)))))))
+         :style    {:transform (str "translate3d(" x "px, " eff-y "px, 0) scale(" eff-scale ")")}}
         (if (and current-item (or (:source current-item) (:source-map current-item)))
           [:<>
            [:div.message-image-placeholder
@@ -282,77 +529,33 @@ focused on pointer/zoom transforms.
              :event-id   (:event-id current-item)
              :class      image-class}]]
           [:img
-           {:class image-class
-            :src   url}])]
+           {:class     image-class
+            :draggable false
+            :alt       item-name
+            :src       url}])]
 
-       (when multi?
-         [:div.lightbox-filmstrip
-          {:on-click        #(.stopPropagation %)
-           :on-pointer-down #(.stopPropagation %)}
-          (map-indexed
-           (fn [idx thumb-item]
-             (let [selected? (= idx active-idx)
-                   t-uri     (or (:display-uri thumb-item)
-                                 (:thumbnail-source thumb-item)
-                                 (when-not (:video? thumb-item) (:source thumb-item)))
-                   t-map     (or (:display-map thumb-item)
-                                 (:thumbnail-source-map thumb-item)
-                                 (when-not (:video? thumb-item) (:source-map thumb-item)))]
-               ^{:key (or (:internal-id thumb-item) (:event-id thumb-item) idx)}
-               [:div.lightbox-thumb-item
-                {:class    (when selected? "is-selected")
-                 :on-click (fn [e]
-                             (.stopPropagation e)
-                             (step-to! idx))}
-                (when (or t-uri t-map)
-                  [media
-                   {:uri        t-uri
-                    :source-map t-map
-                    :tag-type   "img"
-                    :alt        "thumb"
-                    :mime-type  (:display-mime thumb-item)
-                    :room-id    (or (:room-id thumb-item) (:room_id thumb-item) room-id)
-                    :event-id   (:event-id thumb-item)
-                    :width      (:crop-size thumb-item)
-                    :height     (:crop-size thumb-item)
-                    :method     (:crop-method thumb-item)}])]))
-           gallery-items)])
-
-       [:div.lightbox-actions
-        {:on-click        #(.stopPropagation %)
-         :on-pointer-down #(.stopPropagation %)}
-        [:a.lightbox-btn
-         {:href     (or url "#")
-          :target   "_blank"
-          :rel      "noopener noreferrer"
-          :on-click (fn [e]
-                      (when current-item
-                        (.preventDefault e)
-                        (when-let [live-src (resolve-live-url)]
-                          (.open js/window live-src "_blank" "noopener,noreferrer"))))}
-         [:span.btn-icon [icons/external-link]]
-         [:span (@tr [:lightbox/open-original])]]
-        (if current-item
-          [:a.lightbox-btn
-           {:href     "#"
-            :on-click (fn [e]
-                        (.preventDefault e)
-                        (re-frame/dispatch
-                         [:media/download {:uri        (:source current-item)
-                                           :source-map (:source-map current-item)
-                                           :filename   item-name
-                                           :mime-type  item-mime
-                                           :room-id    item-room-id
-                                           :event-id   (:event-id current-item)}]))}
-           [:span.btn-icon [icons/download]]
-           [:span (@tr [:lightbox/download])]]
-          [:a.lightbox-btn
-           {:href     url
-            :download "image"}
-           [:span.btn-icon [icons/download]]
-           [:span (@tr [:lightbox/download])]])]])
+       [lightbox-bottom-bar
+        {:options-open?    options-open?
+         :multi?           multi?
+         :gallery-items    gallery-items
+         :active-idx       active-idx
+         :room-id          room-id
+         :step-to!         step-to!
+         :scale            scale
+         :reset-zoom-fn    reset-zoom-fn
+         :url              url
+         :current-item     current-item
+         :resolve-live-url resolve-live-url
+         :item-source      item-source
+         :item-source-map  item-source-map
+         :item-name        item-name
+         :item-mime        item-mime
+         :item-room-id     item-room-id
+         :item-event-id    item-event-id
+         :tr               tr}]])
     (finally
-      (.removeEventListener js/window "keydown" key-listener))))
+      (clear-tap-timer!)
+      (.removeEventListener js/window "keydown" key-listener true))))
 
 (defmethod modal-component :image-lightbox [_]
   image-lightbox-content)
@@ -365,50 +568,169 @@ focused on pointer/zoom transforms.
 
 
 #+begin_src css :tangle ../../../../css/lightbox.css
-.lightbox-counter {
+.lightbox-backdrop {
+    position: fixed;
+    inset: 0;
+    padding: 0;
+    background-color: transparent;
+    backdrop-filter: none;
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.15s ease-out;
+}
+
+.lightbox-interaction-layer {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    cursor: zoom-out;
+    transition: background-color 0.16s ease;
+    animation: fadeIn 0.15s ease-out;
+}
+
+.lightbox-top-bar {
     position: absolute;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 6px 14px;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + 14px);
+    padding-left: calc(var(--safe-area-inset-left, env(safe-area-inset-left, 0px)) + 16px);
+    padding-right: calc(var(--safe-area-inset-right, env(safe-area-inset-right, 0px)) + 16px);
+    padding-bottom: 18px;
+    pointer-events: none;
+    z-index: 20;
+    transition: background 0.2s ease;
+}
+
+.lightbox-top-bar.has-scrim {
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0) 100%);
+}
+
+.lightbox-top-left,
+.lightbox-top-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    pointer-events: auto;
+}
+
+.lightbox-counter {
+    padding: 6px 13px;
     border-radius: 999px;
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(15, 18, 26, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.18);
     color: #ffffff;
     font-size: 13px;
     font-weight: 600;
-    pointer-events: none;
-    z-index: 10;
+    backdrop-filter: blur(8px);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.lightbox-title {
+    color: rgba(255, 255, 255, 0.92);
+    font-size: 13.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 52vw;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.65);
+}
+
+.lightbox-icon-btn {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1.5px solid rgba(255, 255, 255, 0.26);
+    background: rgba(15, 18, 26, 0.80);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    transition: background 0.16s ease, border-color 0.16s ease, transform 0.12s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.lightbox-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.45);
+}
+
+.lightbox-icon-btn:active {
+    transform: scale(0.93);
+}
+
+.lightbox-options-btn.is-active {
+    background: rgba(88, 101, 242, 0.85);
+    border-color: rgba(255, 255, 255, 0.45);
+}
+
+.lightbox-close-btn {
+    border-color: rgba(255, 255, 255, 0.36);
+    background: rgba(18, 20, 28, 0.88);
+}
+
+.lightbox-close-btn:hover {
+    background: rgba(235, 69, 95, 0.88);
+    border-color: rgba(255, 255, 255, 0.55);
 }
 
 .lightbox-nav-btn {
     position: absolute;
     top: 50%;
     transform: translateY(-50%);
-    width: 44px;
-    height: 44px;
+    width: 46px;
+    height: 46px;
     border-radius: 50%;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    background: rgba(15, 20, 28, 0.72);
+    border: 1.5px solid rgba(255, 255, 255, 0.22);
+    background: rgba(15, 18, 26, 0.78);
     color: #ffffff;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    z-index: 10;
-    backdrop-filter: blur(4px);
-    transition: background 0.2s ease;
+    z-index: 15;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.38);
+    transition: background 0.18s ease, opacity 0.18s ease, transform 0.12s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.lightbox-nav-btn.is-subtle {
+    opacity: 0.65;
 }
 
 .lightbox-nav-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.24);
+}
+
+.lightbox-nav-btn:active {
+    transform: translateY(-50%) scale(0.93);
 }
 
 .lightbox-nav-btn.is-prev {
-    left: 20px;
+    left: calc(var(--safe-area-inset-left, env(safe-area-inset-left, 0px)) + 16px);
 }
 
 .lightbox-nav-btn.is-next {
-    right: 20px;
+    right: calc(var(--safe-area-inset-right, env(safe-area-inset-right, 0px)) + 16px);
 }
 
 .lightbox-media-stage {
@@ -416,11 +738,12 @@ focused on pointer/zoom transforms.
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
-    cursor: zoom-in;
+    transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+    cursor: pointer;
     touch-action: none;
     user-select: none;
     pointer-events: auto;
+    will-change: transform;
 }
 
 .lightbox-media-stage.is-zoomed {
@@ -449,36 +772,65 @@ focused on pointer/zoom transforms.
 }
 
 .lightbox-media-stage .lightbox-image {
-    max-width: 90vw;
-    max-height: 88vh;
+    max-width: 94vw;
+    max-height: 90vh;
     display: block;
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 12px 44px rgba(0, 0, 0, 0.55);
 }
 
 .lightbox-media-stage .lightbox-image.is-multi {
-    max-height: 78vh;
+    max-height: 76vh;
+}
+
+.lightbox-bottom-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding-top: 22px;
+    padding-left: calc(var(--safe-area-inset-left, env(safe-area-inset-left, 0px)) + 16px);
+    padding-right: calc(var(--safe-area-inset-right, env(safe-area-inset-right, 0px)) + 16px);
+    padding-bottom: calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) + 18px);
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0) 100%);
+    z-index: 20;
+    transition: opacity 0.18s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lightbox-bottom-bar.is-hidden {
+    opacity: 0;
+    transform: translateY(14px);
+    pointer-events: none;
+}
+
+.lightbox-bottom-bar.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
 }
 
 .lightbox-filmstrip {
-    position: absolute;
-    bottom: 68px;
-    left: 50%;
-    transform: translateX(-50%);
     display: flex;
     gap: 6px;
-    max-width: 84vw;
+    max-width: 88vw;
     overflow-x: auto;
     padding: 6px 8px;
-    border-radius: 10px;
-    background: rgba(10, 14, 20, 0.72);
-    backdrop-filter: blur(8px);
-    z-index: 10;
+    border-radius: 12px;
+    background: rgba(12, 16, 24, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(10px);
 }
 
 .lightbox-thumb-item {
     width: 48px;
     height: 48px;
     flex: 0 0 48px;
-    border-radius: 6px;
+    border-radius: 7px;
     overflow: hidden;
     cursor: pointer;
     opacity: 0.55;
@@ -499,119 +851,63 @@ focused on pointer/zoom transforms.
     object-fit: cover;
 }
 
-.lightbox-close-btn {
-    position: absolute;
-    right: 20px;
-    top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
-    background: rgba(0, 0, 0, 0.5);
-    color: white;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    cursor: pointer;
-    z-index: 10;
-    backdrop-filter: blur(4px);
-    transition: background 0.2s;
-}
-
-.lightbox-close-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
-}
-
-.lightbox-actions {
-    z-index: 10;
-    position: absolute;
-    bottom: env(safe-area-inset-bottom, 0px);
-    display: flex;
-    gap: 12px;
-}
-
-.lightbox-interaction-layer {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
-    bottom: env(safe-area-inset-bottom, 0px);
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    animation: fadeIn 0.15s ease-out;
-}
-
-.lightbox-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(0, 0, 0, 0.85);
-    z-index: 999999;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: zoom-out;
-    animation: fadeIn 0.15s ease-out;
-}
-
-.lightbox-container {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    max-width: 90vw;
-    max-height: 90vh;
-    cursor: default;
-}
-
-.lightbox-image {
-    max-width: 100%;
-    max-height: calc(90vh - 40px);
-    object-fit: contain;
-    border-radius: 4px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-}
-
 .lightbox-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-top: 16px;
-    width: 100%;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .lightbox-btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
-    padding: 8px 16px;
-    background-color: rgba(255, 255, 255, 0.1);
-    color: #e3e5e8;
+    min-height: 40px;
+    padding: 8px 18px;
+    background-color: rgba(20, 24, 34, 0.82);
+    color: #f2f3f5;
     text-decoration: none;
-    border-radius: 20px;
+    border-radius: 999px;
     font-size: 14px;
-    font-weight: 500;
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s ease;
+    font-weight: 600;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    transition: background-color 0.16s ease, border-color 0.16s ease, transform 0.12s ease;
     cursor: pointer;
     user-select: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .lightbox-btn:hover {
-    background-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.34);
     color: #ffffff;
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     text-decoration: none;
 }
 
 .lightbox-btn:active {
-    transform: translateY(1px);
+    transform: scale(0.96);
 }
 
 @media (max-width: 768px) {
+    .lightbox-icon-btn {
+        width: 48px;
+        height: 48px;
+    }
+
+    .lightbox-nav-btn {
+        display: none;
+    }
+
+    .lightbox-media-stage .lightbox-image {
+        max-width: 98vw;
+        max-height: 88vh;
+    }
+
     .event-tile-container {
         -webkit-user-select: none !important;
         user-select: none !important;
@@ -647,4 +943,4 @@ focused on pointer/zoom transforms.
     }
 }
 
-#+end_src;
+#+end_src
