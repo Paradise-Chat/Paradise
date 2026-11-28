@@ -89,6 +89,10 @@ not pull in UI namespaces.
                                 slot-id
                                 (assoc item :plugin-id @!current-eval-plugin)))
    '!active-overrides        registry/!active-overrides
+   '!height-estimators       registry/!height-estimators
+   'reg-height-estimator!    (fn [id estimator-fn]
+                               (registry/reg-height-estimator!
+                                id estimator-fn @!current-eval-plugin))
    'remove-plugin-overrides! registry/remove-plugin-overrides!
    'get-slot                 registry/get-slot})
 
