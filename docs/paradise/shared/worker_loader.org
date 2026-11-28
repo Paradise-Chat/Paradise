@@ -16,7 +16,9 @@ handler snapshot diffing, and namespaced + unqualified handler registration.
             [cljs.core.async :refer [<! go]]
             [cljs.core.async.interop :refer-macros [<p!]]
             [clojure.string :as str]
+            [paradise.shared.client.cache :as cache]
             [paradise.shared.registry :as registry]
+            [promesa.core :as p]
             [shadow.esm :refer [dynamic-import]]))
 #+end_src
 
