@@ -2064,6 +2064,11 @@ library itself some context of deferred components...
         [reply-container tr in-reply-to (or (:room-id item) active-room)]
         [poll-message item inner active-room]]
 
+       (= tag "PollResult")
+       [:div.message-render-container
+        [reply-container tr in-reply-to (or (:room-id item) active-room)]
+        [poll-result-message item inner active-room]]
+
        (= tag "Sticker")
        [render-message-content tr "Sticker" inner in-reply-to item active-room]
 
