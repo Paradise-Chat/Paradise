@@ -210,22 +210,34 @@ bounded, and any replaced attachment preview URLs are revoked via
 (re-frame/reg-event-fx
  :composer/on-change
  (fn [{:keys [db]} [_ room-id text html]]
-   (let [old-timer (get-in db [:composer room-id :save-timer])]
-     (when old-timer (js/clearTimeout old-timer))
+   (clear-composer-save-timer! db room-id)
+   (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))]
      {:db (update-in db [:composer room-id]
                      merge
-                     {:text        text
-                      :html        html
-                      :loaded-text nil
-                      :save-timer  (js/setTimeout
-                                    #(re-frame/dispatch [:composer/persist-draft room-id])
-                                    500)})})))
+                     {:text            text
+                      :html            html
+                      :loaded-text     nil
+                      :draft-hydrated? true
+                      :edit-seq        next-seq
+                      :save-timer      (js/setTimeout
+                                        #(re-frame/dispatch
+                                          [:composer/persist-draft room-id {:text-only? true}])
+                                        500)})})))
 
 (re-frame/reg-event-fx
  :composer/add-attachment
  (fn [{:keys [db]} [_ room-id attachment]]
-   {:db       (update-in db [:drafts room-id :attachments] (fnil conj []) attachment)
-    :dispatch [:composer/persist-draft room-id]}))
+   (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))
+         mobile?  (get-in db [:ui :mobile?])]
+     {:db                   (-> db
+                                (update-in [:drafts room-id :attachments] (fnil conj []) attachment)
+                                (update-in [:composer room-id]
+                                           merge
+                                           {:draft-hydrated? true
+                                            :edit-seq        next-seq}))
+      :input/focus-composer {:focus?    (not mobile?)
+                             :draft-key room-id}
+      :dispatch             [:composer/persist-draft room-id]})))
 
 (re-frame/reg-sub
  :composer/attachments
@@ -235,52 +247,82 @@ bounded, and any replaced attachment preview URLs are revoked via
 (re-frame/reg-event-fx
  :composer/remove-attachment
  (fn [{:keys [db]} [_ room-id index]]
-   (let [attachment (get-in db [:drafts room-id :attachments index])]
-     (when (:preview-url attachment)
-       (js/URL.revokeObjectURL (:preview-url attachment)))
-     (when (:file-id attachment)
-       (unregister-file! (:file-id attachment))))
-   {:db       (update-in db [:drafts room-id :attachments]
-                         (fn [atts] (vec (concat (take index atts) (drop (inc index) atts)))))
-    :dispatch [:composer/persist-draft room-id]}))
+   (let [attachment (get-in db [:drafts room-id :attachments index])
+         next-seq   (inc (get-in db [:composer room-id :edit-seq] 0))
+         mobile?    (get-in db [:ui :mobile?])]
+     (when attachment
+       (release-attachments! [attachment]))
+     {:db                   (-> db
+                                (update-in [:drafts room-id :attachments]
+                                           (fn [atts]
+                                             (vec (concat (take index atts)
+                                                          (drop (inc index) atts)))))
+                                (update-in [:composer room-id]
+                                           merge
+                                           {:draft-hydrated? true
+                                            :edit-seq        next-seq}))
+      :input/focus-composer {:focus?    (not mobile?)
+                             :draft-key room-id}
+      :dispatch             [:composer/persist-draft room-id]})))
 
 (re-frame/reg-event-fx
  :composer/load-draft
- (fn [_ [_ room-id]]
-   (if-let [pool @state/!engine-pool]
-     (go
-       (let [res (<! (main/do-with-pool! pool {:handler   :load-draft
-                                               :arguments {:room-id room-id}}))]
-         (when (and (= (:status res) "success") (:draft res))
-           (re-frame/dispatch [:composer/draft-loaded room-id (:draft res)]))))
-     (log/error "No engine pool to load draft"))
-   {}))
+ (fn [{:keys [db]} [_ room-id]]
+   (let [already-hydrated? (get-in db [:composer room-id :draft-hydrated?])
+         start-seq         (get-in db [:composer room-id :edit-seq] 0)]
+     (when (and (not already-hydrated?)
+                (zero? start-seq)
+                (not (has-local-draft-content? db room-id)))
+       (if-let [pool @state/!engine-pool]
+         (go
+           (let [res (<! (main/do-with-pool! pool {:handler   :load-draft
+                                                   :arguments {:room-id room-id}}))]
+             (when (and (= (:status res) "success") (:draft res))
+               (re-frame/dispatch [:composer/draft-loaded room-id start-seq (:draft res)]))))
+         (log/error "No engine pool to load draft")))
+     {})))
 
 (re-frame/reg-event-fx
  :composer/draft-loaded
- (fn [{:keys [db]} [_ room-id draft]]
-   (let [plain-text (:text draft)
-         html-text  (:html draft)
-         raw-atts   (:attachments draft)
-         restored-atts
-         (mapv (fn [att]
-                 (let [buffer (:buffer att)
-                       mime   (or (:mimetype att) (:mime att) "application/octet-stream")
-                       blob   (js/Blob. #js [buffer] #js {:type mime})
-                       url    (js/URL.createObjectURL blob)
-                       fid    (register-file! blob)]
-                   (-> att
-                       (assoc :preview-url url :file-id fid :mimetype mime :mime mime)
-                       (dissoc :buffer))))
-               raw-atts)]
-     {:db (-> db
-              (assoc-in [:composer room-id :loaded-text] (or html-text plain-text))
-              (assoc-in [:drafts room-id :attachments] restored-atts))})))
+ (fn [{:keys [db]} [_ room-id start-seq draft]]
+   (let [cur-seq (get-in db [:composer room-id :edit-seq] 0)]
+     (if (or (not= cur-seq start-seq)
+             (has-local-draft-content? db room-id))
+       {:db (assoc-in db [:composer room-id :draft-hydrated?] true)}
+       (let [plain-text    (:text draft)
+             html-text     (:html draft)
+             raw-atts      (:attachments draft)
+             eff-text      (or (not-empty html-text) (not-empty plain-text))
+             _             (release-attachments! (get-in db [:drafts room-id :attachments] []))
+             restored-atts (into []
+                                 (keep (fn [att]
+                                         (when-let [buffer (:buffer att)]
+                                           (let [mime (or (:mimetype att)
+                                                          (:mime att)
+                                                          "application/octet-stream")
+                                                 blob (js/Blob. #js [buffer] #js {:type mime})
+                                                 url  (when-not (platform/ios-runtime?)
+                                                        (js/URL.createObjectURL blob))
+                                                 fid  (register-file! blob)]
+                                             (-> att
+                                                 (assoc :preview-url url
+                                                        :file-id     fid
+                                                        :mimetype    mime
+                                                        :mime        mime)
+                                                 (dissoc :buffer))))))
+                                 raw-atts)]
+         {:db (cond-> (-> db
+                          (assoc-in [:composer room-id :draft-hydrated?] true)
+                          (assoc-in [:drafts room-id :attachments] restored-atts))
+                eff-text
+                (-> (assoc-in [:composer room-id :loaded-text] eff-text)
+                    (assoc-in [:composer room-id :text] (or plain-text ""))
+                    (assoc-in [:composer room-id :html] (or html-text ""))))})))))
 
 (re-frame/reg-sub
  :composer/loaded-text
  (fn [db [_ room-id]]
-   (get-in db [:composer room-id :loaded-text] "")))
+   (get-in db [:composer room-id :loaded-text])))
 
 (re-frame/reg-sub
  :composer/has-content?
