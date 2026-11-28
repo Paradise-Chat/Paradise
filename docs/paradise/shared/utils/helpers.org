@@ -570,40 +570,116 @@ slice (PNG, GIF, JPEG, WebP, and HEIC ~ispe~ boxes) before falling back to
          (do
            (log/warn "Extract-metadata received an empty or undefined file object. Bailing.")
            (resolve-fn nil))
-         (let [mime      (or (.-type raw-file) "application/octet-stream")
-               filename  (or (.-name raw-file) (str "upload-" (random-uuid)))
-               size      (or (.-size raw-file) 0)
-               is-image? (str/starts-with? mime "image/")
-               is-video? (str/starts-with? mime "video/")]
+         (let [mime          (or (not-empty (.-type raw-file)) "application/octet-stream")
+               filename      (or (not-empty (.-name raw-file)) (str "upload-" (random-uuid)))
+               size          (or (.-size raw-file) 0)
+               is-image?     (str/starts-with? mime "image/")
+               is-video?     (str/starts-with? mime "video/")
+               ios?          (platform/ios-runtime?)
+               make-preview? (and is-image?
+                                  (or (not ios?)
+                                      (<= size max-ios-inline-preview-bytes)))]
            (log/info "Safe extract-metadata -> Name:" filename "Mime:" mime "Size:" size)
            (let [fid      (register-file! raw-file)
-                 preview  (try (js/URL.createObjectURL raw-file)
-                               (catch :default e
-                                 (log/warn "Failed to create object URL" e)
-                                 nil))
+                 preview  (when make-preview?
+                            (try (js/URL.createObjectURL raw-file)
+                                 (catch :default e
+                                   (log/warn "Failed to create object URL" e)
+                                   nil)))
                  base-att {:file-id     fid
                            :mime        mime
                            :mimetype    mime
                            :filename    filename
                            :size        size
-                           :preview-url preview}]
-             (if (and preview (or is-image? is-video?))
-               (let [el (if is-image? (js/Image.) (js/document.createElement "video"))]
-                 (set! (.-onerror el)
-                       (fn [e]
-                         (log/warn "Failed to load media to extract dimensions." e)
-                         (resolve-fn base-att)))
-                 (if is-image?
-                   (set! (.-onload el)
-                         (fn []
-                           (resolve-fn (assoc base-att :width (.-width el) :height (.-height el)))))
-                   (do
-                     (set! (.-preload el) "metadata")
-                     (set! (.-onloadedmetadata el)
+                           :preview-url preview}
+                 !settled (atom false)
+                 finish!  (fn [att]
+                            (when (compare-and-set! !settled false true)
+                              (resolve-fn att)))]
+             (cond
+               is-image?
+               (-> (probe-image-header-dims raw-file)
+                   (p/then
+                    (fn [dims]
+                      (cond
+                        (and dims (pos? (:width dims)) (pos? (:height dims)))
+                        (finish! (merge base-att dims))
+
+                        (and (not ios?) preview)
+                        (let [img   (js/Image.)
+                              timer (js/setTimeout
+                                     (fn []
+                                       (set! (.-onload img) nil)
+                                       (set! (.-onerror img) nil)
+                                       (set! (.-src img) "")
+                                       (finish! base-att))
+                                     2500)
+                              done! (fn [att]
+                                      (js/clearTimeout timer)
+                                      (set! (.-onload img) nil)
+                                      (set! (.-onerror img) nil)
+                                      (set! (.-src img) "")
+                                      (finish! att))]
+                          (set! (.-onerror img)
+                                (fn [e]
+                                  (log/warn "Failed to load image to extract dimensions." e)
+                                  (done! base-att)))
+                          (set! (.-onload img)
+                                (fn []
+                                  (done! (assoc base-att
+                                                :width  (.-width img)
+                                                :height (.-height img)))))
+                          (set! (.-src img) preview))
+
+                        :else
+                        (finish! base-att))))
+                   (p/catch (fn [_] (finish! base-att))))
+
+               (and is-video? (not ios?))
+               (let [probe-url (try (js/URL.createObjectURL raw-file)
+                                    (catch :default _ nil))]
+                 (if-not probe-url
+                   (finish! base-att)
+                   (let [vid   (js/document.createElement "video")
+                         timer (js/setTimeout
+                                (fn []
+                                  (try
+                                    (set! (.-onloadedmetadata vid) nil)
+                                    (set! (.-onerror vid) nil)
+                                    (.removeAttribute vid "src")
+                                    (.load vid)
+                                    (catch :default _ nil))
+                                  (revoke-object-url! probe-url)
+                                  (finish! base-att))
+                                2500)
+                         done! (fn [att]
+                                 (js/clearTimeout timer)
+                                 (try
+                                   (set! (.-onloadedmetadata vid) nil)
+                                   (set! (.-onerror vid) nil)
+                                   (.removeAttribute vid "src")
+                                   (.load vid)
+                                   (catch :default _ nil))
+                                 (revoke-object-url! probe-url)
+                                 (finish! att))]
+                     (set! (.-muted vid) true)
+                     (set! (.-playsInline vid) true)
+                     (set! (.-preload vid) "metadata")
+                     (set! (.-onerror vid)
+                           (fn [e]
+                             (log/warn "Failed to load video metadata." e)
+                             (done! base-att)))
+                     (set! (.-onloadedmetadata vid)
                            (fn []
-                             (resolve-fn (assoc base-att :width (.-videoWidth el) :height (.-videoHeight el)))))))
-                 (set! (.-src el) preview))
-               (resolve-fn base-att)))))
+                             (done! (assoc base-att
+                                           :width    (.-videoWidth vid)
+                                           :height   (.-videoHeight vid)
+                                           :duration (when (js/Number.isFinite (.-duration vid))
+                                                       (Math/round (* 1000 (.-duration vid))))))))
+                     (set! (.-src vid) probe-url))))
+
+               :else
+               (finish! base-att)))))
        (catch :default e
          (log/error "Catastrophic error in extract-metadata:" e)
          (resolve-fn nil))))))
