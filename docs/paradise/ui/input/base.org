@@ -1358,8 +1358,11 @@ Ideally, we should break this apart more later.
             (if recording?
               [:div.timeline-input-wrapper.is-mobile-voice
                [voice-recorder-bar
-                {:room-id  active-id
-                 :on-close #(reset! !recording-voice? false)}]]
+                {:room-id      active-id
+                 :hold-gesture @!voice-hold-gesture
+                 :on-close     (fn []
+                                 (reset! !voice-hold-gesture nil)
+                                 (reset! !recording-voice? false))}]]
               [:div.mobile-composer-bar
                [:button.mobile-composer-plus-btn
                 {:type     "button"
