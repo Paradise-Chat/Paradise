@@ -142,8 +142,7 @@ enable passing functions through them.
         (reset! !ro nil)))))
 
 (defn ^:ui context-menu-root []
-  (r/with-let [!drag-y (r/atom 0)
-               !start-y (r/atom 0)
+  (r/with-let [!sheet-drag (r/atom {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
                !safe-to-click? (r/atom false)
                !listener-active? (r/atom false)
                is-mobile? (<= js/window.innerWidth 768)
@@ -156,8 +155,7 @@ enable passing functions through them.
     (let [active-menu @!active-context-menu
           submenus    @overlays-base/!context-submenus]
       (when-not active-menu
-        (reset! !drag-y 0)
-        (reset! !start-y 0)
+        (reset! !sheet-drag {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
         (reset! !safe-to-click? false)
         (when @!listener-active?
           (enable-clicks!)))
@@ -180,45 +178,34 @@ enable passing functions through them.
               menu-height (or height 250)
               render-x    (max 8 (if (> (+ x menu-width) js/window.innerWidth) (- x menu-width) x))
               render-y    (max 8 (if (> (+ y menu-height) js/window.innerHeight) (- y menu-height) y))
-
-              handle-ptr-down (fn [e]
-                                (when-not (some-> (.-target e)
-                                                  (.closest "input, select, textarea, .context-menu-slider-block"))
-                                  (reset! !start-y (.-clientY e))
-                                  (.setPointerCapture (.-target e) (.-pointerId e))))
-              handle-ptr-move (fn [e]
-                                (when (pos? @!start-y)
-                                  (let [delta (- (.-clientY e) @!start-y)]
-                                    (reset! !drag-y (max 0 delta)))))
-              handle-ptr-up   (fn [e]
-                                (when (pos? @!start-y)
-                                  (if (> @!drag-y 100)
-                                    (close-fn)
-                                    (reset! !drag-y 0))
-                                  (reset! !start-y 0)
-                                  (try
-                                    (.releasePointerCapture (.-target e) (.-pointerId e))
-                                    (catch :default _ nil))))]
+              {:keys [dy dragging?]} @!sheet-drag
+              sheet-handlers (when is-mobile?
+                               (make-swipe-handlers
+                                :bottom-sheet
+                                {:!drag-state      !sheet-drag
+                                 :ignore-selector  "input, select, textarea, .context-menu-slider-block"
+                                 :min-dy           0
+                                 :dismiss-threshold 100
+                                 :on-dismiss       close-fn}))]
 
           [click-away-wrapper
            {:on-close close-fn :z-index 9998}
            [:div.universal-context-menu
-            {:class (when is-mobile? "mobile-sheet")
-             :on-context-menu (fn [e] (.preventDefault e))
-             :on-pointer-down (when is-mobile? handle-ptr-down)
-             :on-pointer-move (when is-mobile? handle-ptr-move)
-             :on-pointer-up   (when is-mobile? handle-ptr-up)
-             :style (if is-mobile?
-                      {:transform (str "translateY(" @!drag-y "px)")
-                       :transition (if (pos? @!start-y) "none" "transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)")
-                       :z-index 99999
-                       :pointer-events (if @!safe-to-click? "auto" "none")}
-                      (cond-> {:left (str render-x "px")
-                               :transform "none"
-                               :z-index 99999
-                               :pointer-events (if @!safe-to-click? "auto" "none")}
-                        anchor-bottom (assoc :bottom (str (max 8 anchor-bottom) "px"))
-                        (not anchor-bottom) (assoc :top (str render-y "px"))))}
+            (merge
+             {:class (when is-mobile? "mobile-sheet")
+              :on-context-menu (fn [e] (.preventDefault e))
+              :style (if is-mobile?
+                       {:transform (str "translateY(" (max 0 (or dy 0)) "px)")
+                        :transition (if dragging? "none" "transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)")
+                        :z-index 99999
+                        :pointer-events (if @!safe-to-click? "auto" "none")}
+                       (cond-> {:left (str render-x "px")
+                                :transform "none"
+                                :z-index 99999
+                                :pointer-events (if @!safe-to-click? "auto" "none")}
+                         anchor-bottom (assoc :bottom (str (max 8 anchor-bottom) "px"))
+                         (not anchor-bottom) (assoc :top (str render-y "px"))))}
+             sheet-handlers)
             [:div.mobile-drag-handle]
             (when Target
               [Target (assoc props :close-fn close-fn)])]
@@ -1780,6 +1767,83 @@ also likely not be selectable (as the fallback will be literal text).
              :sidebar-start-y nil
              :sidebar-dx      0
              :sidebar-target  nil))))
+
+(defmethod handle-swipe! :bottom-sheet
+  [_ phase {:keys [e !drag-state ignore-selector min-dy max-dy
+                   dismiss-threshold expand-threshold collapse-max-dy
+                   expanded? on-dismiss on-expand on-collapse]}]
+  (case phase
+    :down
+    (when (and (or (nil? (.-button e)) (zero? (.-button e)))
+               (not (and ignore-selector
+                         (some-> (.-target e) (.closest ignore-selector)))))
+      (let [x (.-clientX e)
+            y (.-clientY e)]
+        (when !drag-state
+          (reset! !drag-state {:start-x   x
+                               :start-y   y
+                               :dy        0
+                               :dragging? false
+                               :target    (.-currentTarget e)}))))
+
+    :move
+    (let [{:keys [start-x start-y target]} (when !drag-state @!drag-state)
+          owner                            (:owner @!swipe-drag-data)]
+      (cond
+        (and owner (not= owner :bottom-sheet))
+        (when !drag-state
+          (reset! !drag-state {:start-x nil :start-y nil :dy 0 :dragging? false :target nil}))
+
+        start-y
+        (let [dx       (- (.-clientX e) (or start-x 0))
+              dy       (- (.-clientY e) start-y)
+              lo       (or min-dy 0)
+              hi       (or max-dy 600)
+              can-dir? (or (and (pos? dy) (pos? hi))
+                           (and (neg? dy) (neg? lo)))
+              claimed? (or (= owner :bottom-sheet)
+                           (and can-dir?
+                                (> (js/Math.abs dy) 6)
+                                (> (js/Math.abs dy) (js/Math.abs dx))))]
+          (when claimed?
+            (.stopPropagation e)
+            (when (nil? owner)
+              (when target
+                (try
+                  (.setPointerCapture target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner :bottom-sheet))
+            (let [clamped (max lo (min hi dy))]
+              (when !drag-state
+                (swap! !drag-state assoc :dy clamped :dragging? true)))))))
+
+    :up
+    (let [{:keys [start-y dy target]} (when !drag-state @!drag-state)
+          owner                       (:owner @!swipe-drag-data)
+          cancelled?                  (= (.-type e) "pointercancel")
+          dismiss-th                  (or dismiss-threshold 90)
+          expand-th                   (or expand-threshold 60)
+          collapse-hi                 (or collapse-max-dy 220)]
+      (when start-y
+        (when (= owner :bottom-sheet)
+          (when target
+            (try
+              (.releasePointerCapture target (.-pointerId e))
+              (catch :default _ nil)))
+          (when-not cancelled?
+            (cond
+              (and (not expanded?) (fn? on-expand) (< dy (- expand-th)))
+              (on-expand)
+
+              (and expanded? (fn? on-collapse) (> dy dismiss-th) (< dy collapse-hi))
+              (on-collapse)
+
+              (and (fn? on-dismiss) (> dy dismiss-th))
+              (on-dismiss)))))
+      (when !drag-state
+        (reset! !drag-state {:start-x nil :start-y nil :dy 0 :dragging? false :target nil}))
+      (when (= (:owner @!swipe-drag-data) :bottom-sheet)
+        (swap! !swipe-drag-data assoc :owner nil)))))
 
 (defmethod handle-swipe! :default
   [kind phase {:keys [e !drag-state on-start on-move on-end can-claim?]}]
