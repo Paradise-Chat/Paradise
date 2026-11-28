@@ -81,62 +81,80 @@ another space (unless the user has made them set as global).
 ***** Reframe
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/emotes.cljs
+(def ^:private emote-pack-cache-ttl-ms (* 10 60 1000))
+
+(defn- emote-pack-cache-key [db source-type room-id]
+  (let [eng (name (or (:active-engine db) :default))
+        uid (some-> (:active-user-id db) str not-empty)]
+    (when uid
+      (str "emotes:" eng ":" uid ":" (name source-type) ":" (or room-id "all")))))
+
 (re-frame/reg-event-fx
  :sdk/fetch-room-emotes
- (fn [_ [_ source-type room-id]]
-   (if-let [pool @state/!engine-pool]
-     (go
-       (let [res (<! (main/do-with-pool! pool
-                                         {:handler   :fetch-emotes
-                                          :arguments {:source-type (name source-type)
-                                                      :room-id     room-id}}))]
-         (if (= (:status res) "success")
-           (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:packs res)])
-           (log/error "Worker emote fetch failed:" (:msg res)))))
-     (log/error "No engine pool to fetch emotes"))
+ (fn [{:keys [db]} [_ source-type room-id opts]]
+   (let [force?    (boolean (and (map? opts) (:force? opts)))
+         cache-key (emote-pack-cache-key db source-type room-id)
+         gen       (:session/gen db)]
+     (if-let [pool @state/!engine-pool]
+       (go
+         (let [cached (when cache-key
+                        (try (<p! (cache/get-meta cache-key))
+                             (catch :default _ nil)))
+               fresh? (and (not force?)
+                           cached
+                           (some? (:data cached))
+                           (< (- (js/Date.now) (or (:updated-at cached) 0))
+                              emote-pack-cache-ttl-ms))]
+           (when (and cached (some? (:data cached)))
+             (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:data cached) gen]))
+           (when-not fresh?
+             (let [res (<! (main/do-with-pool! pool
+                                               {:handler   :fetch-emotes
+                                                :arguments {:source-type (name source-type)
+                                                            :room-id     room-id}}))]
+               (if (#{"success" :success} (:status res))
+                 (do
+                   (when cache-key
+                     (cache/put-meta! cache-key (:packs res)))
+                   (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:packs res) gen]))
+                 (log/error "Worker emote fetch failed:" (:msg res)))))))
+       (log/error "No engine pool to fetch emotes")))
+   {}))
+
+(re-frame/reg-event-fx
+ :sdk/fetch-frequent-emotes
+ (fn [{:keys [db]} _]
+   (let [gen (:session/gen db)]
+     (when-let [pool @state/!engine-pool]
+       (go
+         (let [res (<! (main/do-with-pool! pool
+                                           {:handler   :fetch-frequent-emotes
+                                            :arguments {}}))]
+           (when (#{"success" :success} (:status res))
+             (re-frame/dispatch [:emoji/set-frequent-items
+                                 gen
+                                 {:items    (:items res)
+                                  :stickers (:stickers res)}]))))))
    {}))
 
 (re-frame/reg-event-fx
  :sdk/fetch-all-emotes
- (fn [{:keys [db]} _]
-   (re-frame/dispatch [:sdk/fetch-room-emotes :account nil])
+ (fn [{:keys [db]} [_ opts]]
+   (re-frame/dispatch [:sdk/fetch-room-emotes :account nil opts])
+   (re-frame/dispatch [:sdk/fetch-frequent-emotes])
    (when-let [active-room (:active-room-id db)]
-     (re-frame/dispatch [:sdk/fetch-room-emotes :room active-room]))
+     (re-frame/dispatch [:sdk/fetch-room-emotes :room active-room opts]))
    (when-let [active-space (:active-space-id db)]
-     (re-frame/dispatch [:sdk/fetch-room-emotes :space active-space]))
+     (re-frame/dispatch [:sdk/fetch-room-emotes :space active-space opts]))
    {}))
 
 (re-frame/reg-event-db
  :sdk/save-all-emotes
- (fn [db [_ source-type source-id fetched-packs]]
-   (let [structured-packs
-         (into {}
-               (for [{:keys [pack-id data]} (remove nil? fetched-packs)
-                     :let [clj-data    (if (map? data) data (js->clj data :keywordize-keys true))
-                           raw-images  (or (:images clj-data) (:items clj-data))
-                           pack-info   (or (:pack clj-data) clj-data)
-                           usage-set   (set (:usage pack-info []))
-                           is-sticker? (or (:is-sticker-pack? pack-info)
-                                           (contains? usage-set "sticker"))
-                           images      (into {}
-                                             (for [[raw-k v] raw-images
-                                                   :let [sc  (clean-shortcode raw-k)
-                                                         uri (or (:uri v) (:url v))]
-                                                   :when (and (seq sc) uri)]
-                                               [sc {:id               (or (:id v) (:emote-id v) (str pack-id ":" sc))
-                                                    :emote-id         (:emote-id v)
-                                                    :shortcode        sc
-                                                    :uri              uri
-                                                    :url              uri
-                                                    :info             (:info v)
-                                                    :search-text      (:search-text v)
-                                                    :is-unicode?      false
-                                                    :is-sticker-pack? is-sticker?}]))]
-                     :when (seq images)]
-                 [pack-id {:name             (or (:name pack-info) (:display_name pack-info) pack-id)
-                           :avatar           (or (:avatar pack-info) (:avatar_url pack-info))
-                           :is-sticker-pack? is-sticker?
-                           :images           images}]))]
+ [(state/guard-session-gen #(nth % 4 nil))]
+ (fn [db [_ source-type source-id fetched-packs _gen]]
+   (let [structured-packs (shared-emotes/normalize-emote-packs
+                           fetched-packs
+                           {:as-map? true :keep-empty? false})]
      (if (= source-type :account)
        (assoc-in db [:emoji/packs :account] structured-packs)
        (assoc-in db [:emoji/packs source-type source-id] structured-packs)))))
