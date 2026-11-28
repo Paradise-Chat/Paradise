@@ -1009,6 +1009,10 @@ Now for the CSS
     min-height: 0;
 }
 
+.room-collection [data-virtuoso-scroller="true"] {
+    overflow-x: hidden !important;
+}
+
 .filter-bar::-webkit-scrollbar {
     display: none;
 }
@@ -1038,28 +1042,36 @@ component.
         room-array      (to-array rooms)]
     [:div.sidebar-rooms
 
-     [:div.room-list-header-container
-      {:style {:display "flex" :justify-content "space-between" :align-items "center" :padding-right "16px"}}
-      (if active-space
-        [:h3.room-list-header (:name active-space)]
-        [:h3.room-list-header (tr [:navigation.room-list.headers/home])])
+      [:div.room-list-header-container
+       (if active-space
+         [:h3.room-list-header (:name active-space)]
+         [:h3.room-list-header (tr [:navigation.room-list.headers/home])])
 
-      (when active-space
-        [:button.header-icon-btn
-         {:class (when join-mode? "active-green")
-          :title (if join-mode? "Hide Joinable Rooms" "Show Joinable Rooms")
-          :on-click #(re-frame/dispatch [:rooms/toggle-join-mode])}
-         [icons/compass {:size "20px"}]
-         ])]
+       (if active-space
+         [:button.header-icon-btn
+          {:class (when join-mode? "active-green")
+           :title (if join-mode? "Hide Joinable Rooms" "Show Joinable Rooms")
+           :on-click #(re-frame/dispatch [:rooms/toggle-join-mode])}
+          [icons/compass {:size "18px"}]]
+         [:button.header-icon-btn.new-dm-header-btn
+          {:type     "button"
+           :title    (tr [:navigation.room-list/new-dm])
+           :on-click #(re-frame/dispatch [:dm/open-create-modal])}
+          [icons/plus {:size "18px"}]])]
 
-     (when-not active-space
-       [filter-toggle-bar])
+      (when-not active-space
+        [:<>
+         [:button.dm-search-trigger-btn
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:dm/open-create-modal])}
+          [icons/search {:size "14px"}]
+          [:span (tr [:navigation.room-list/start-dm-placeholder])]]
+         [filter-toggle-bar]])
 
-     (if (or (nil? room-array) (== (alength room-array) 0))
-       [:div.empty-state (tr [:navigation.room-list.empty-state/no-rooms])]
-       [:div.room-collection
-        [virtualized-room-list tr client room-array active-space active-room closed-drawers active-filter]])
-     [active-call-panel]]))
+      (if (or (nil? room-array) (== (alength room-array) 0))
+        [:div.empty-state (tr [:navigation.room-list.empty-state/no-rooms])]
+        [:div.room-collection
+         [virtualized-room-list tr client room-array active-space active-room closed-drawers active-filter]])]))
 
 
 #+end_src
@@ -1104,18 +1116,68 @@ component.
 }
 
 
+.room-list-header-container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    height: 52px;
+    min-height: 52px;
+    padding: 0 12px 0 14px;
+    margin: -12px -12px 10px -12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.22);
+    flex-shrink: 0;
+}
+
 .room-list-header {
     display: flex;
     align-items: center;
-    height: 48px;
-    justify-content: center;
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text-primary, #f2f3f5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     min-width: 0;
+}
+
+.dm-search-trigger-btn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 7px 10px;
+    margin-bottom: 6px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: #1e1f22;
+    color: #949ba4;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.dm-search-trigger-btn:hover {
+    background: #1a1b1e;
+    color: #dbdee1;
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.dm-search-trigger-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .sidebar-rooms {
     width: 240px;
     flex-shrink: 0;
     background-color: #2b2d31;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
     display: flex;
     flex-direction: column;
     padding: 12px;
