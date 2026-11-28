@@ -434,6 +434,10 @@ Now before we define the panel we may want to define media buttons...
         audio-on?       @(re-frame/subscribe [:call/audio-enabled?])
         video-on?       @(re-frame/subscribe [:call/video-enabled?])
         deafened?       @(re-frame/subscribe [:call/deafened?])
+        input-vol       @(re-frame/subscribe [:settings/input-volume])
+        output-vol      @(re-frame/subscribe [:settings/output-volume])
+        mic-active?     (and audio-on? (not deafened?) (pos? (or input-vol 100)))
+        out-active?     (and (not deafened?) (pos? (or output-vol 100)))
         screen-sharing? @(re-frame/subscribe [:call/screen-sharing?])
         rooms-map       @(re-frame/subscribe [:rooms/unfiltered-indexed-map])
         room-obj        (when active-call-id (get rooms-map active-call-id))
@@ -456,16 +460,28 @@ Now before we define the panel we may want to define media buttons...
          [icons/phone-hangup]]]
 
        [:div.call-controls-grid
-        [media-button audio-on?
-         [icons/mic] [icons/mic-off]
-         (if audio-on? "Mute" "Unmute")
-         #(re-frame/dispatch [:call/toggle-audio])
+        [media-button mic-active?
+         ^{:key :mic-on} [icons/mic] ^{:key :mic-off} [icons/mic-off]
+         (if mic-active? "Mute" "Unmute")
+         (fn []
+           (if (and audio-on? (not deafened?) (<= (or input-vol 100) 0))
+             (re-frame/dispatch [:settings/set-input-volume 100])
+             (do
+               (when (and (not mic-active?) (<= (or input-vol 100) 0))
+                 (re-frame/dispatch [:settings/set-input-volume 100]))
+               (re-frame/dispatch [:call/toggle-audio]))))
          "var(--text-normal)" "#f04747"]
 
-        [media-button (not deafened?)
-         [icons/headphones] [icons/headphones-off]
-         (if deafened? "Undeafen" "Deafen")
-         #(re-frame/dispatch [:call/toggle-deafen])
+        [media-button out-active?
+         ^{:key :deaf-off} [icons/headphones] ^{:key :deaf-on} [icons/headphones-off]
+         (if out-active? "Deafen" "Undeafen")
+         (fn []
+           (if (and (not deafened?) (<= (or output-vol 100) 0))
+             (re-frame/dispatch [:settings/set-output-volume 100])
+             (do
+               (when (and (not out-active?) (<= (or output-vol 100) 0))
+                 (re-frame/dispatch [:settings/set-output-volume 100]))
+               (re-frame/dispatch [:call/toggle-deafen]))))
          "var(--text-normal)" "#f04747"]
 
         [media-button video-on?
@@ -488,17 +504,18 @@ Now before we define the panel we may want to define media buttons...
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/entry.cljs
 (re-frame/reg-event-fx
  :rooms/join
-  (fn [{:keys [db]} [_ room-id opts]]
-   (go
-     (let [res (<! (main/do-with-pool! @state/!engine-pool
-                                       {:handler :join-room
-                                        :arguments {:room-id room-id}}))]
-       (if (= (:status res) "success")
-         (do
-           (log/info "Successfully joined room:" room-id)
-           (re-frame/dispatch [:room/set-membership room-id "joined"])
-           (re-frame/dispatch [:rooms/finish-select room-id opts]))
-         (log/error "Failed to join room:" (:msg res)))))
+ (fn [{:keys [db]} [_ room-id opts]]
+   (let [gen (or (:gen opts) (:session/gen db))]
+     (go
+       (let [res (<! (main/do-with-pool! @state/!engine-pool
+                                         {:handler   :join-room
+                                          :arguments {:room-id room-id}}))]
+         (if (= (:status res) "success")
+           (do
+             (log/info "Successfully joined room:" room-id)
+             (re-frame/dispatch [:room/set-membership room-id "joined" gen])
+             (re-frame/dispatch [:rooms/finish-select room-id (assoc (or opts {}) :gen gen)]))
+           (log/error "Failed to join room:" (:msg res))))))
    {:db (assoc-in db [:rooms/joining? room-id] true)}))
 
 
@@ -642,7 +659,8 @@ for now this will work though.
 
 (re-frame/reg-event-db
  :room/set-membership
- (fn [db [_ room-id status]]
+ [(state/guard-session-gen #(nth % 3 nil))]
+ (fn [db [_ room-id status _gen]]
    (-> db
        (assoc-in [:rooms/membership room-id] status)
        (update :rooms/membership-loading? dissoc room-id)
@@ -752,8 +770,7 @@ ever do this once per room.
 (re-frame/reg-sub
  :room/is-forum?
  (fn [db [_ room-id]]
-   (or (boolean (get-in db [:room-previews room-id :is-forum?]))
-       (contains? (get db :forum-room-overrides #{}) room-id))))
+   (state/room-forum-mode? db room-id)))
 #+end_src
 
 
