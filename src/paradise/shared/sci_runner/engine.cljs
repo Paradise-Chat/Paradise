@@ -4,7 +4,6 @@
             [cljs-workers.worker :as worker]
             [cljs-workers.mesh :as mesh]
             [paradise.engine.state :as state]
-            [net :as net]
             [paradise.shared.sci-runner.factory :as factory]))
 
 (defonce !current-eval-plugin (atom nil))
@@ -12,11 +11,10 @@
 
 (def worker-namespaces
   {'paradise.engine.state {'register-handler state/register-handler
-                  '!client state/!client
-                  '!media-cache state/!media-cache}
-   'net {'fetch net/fetch}
-   'cljs-workers.mesh   {'do-with-thread! mesh/do-with-thread!}
-   'cljs-workers.worker {'register worker/register}})
+                           '!client          state/!client
+                           '!media-cache     state/!media-cache}
+   'cljs-workers.mesh     {'do-with-thread! mesh/do-with-thread!}
+   'cljs-workers.worker   {'register worker/register}})
 
 (def worker-context
   (factory/build-context
