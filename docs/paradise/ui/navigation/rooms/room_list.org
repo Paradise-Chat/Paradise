@@ -242,6 +242,18 @@ I add the call room previewing.
                                                :unreadMentionsCount)
                                      0)
                                  0)
+                   unread-msgs (if summary
+                                 (or (safe-get summary
+                                               "unreadMessagesCount"
+                                               :unreadMessagesCount)
+                                     0)
+                                 0)
+                   is-bold?    (boolean
+                                (when summary
+                                  (safe-get summary "isBold" :isBold)))
+                   marked-unr? (boolean
+                                (when summary
+                                  (safe-get summary "isMarkedUnread" :isMarkedUnread)))
                    item        {:id                         id
                                 :is-space?                  is-space?
                                 :parent-id                  parent-id
@@ -251,7 +263,10 @@ I add the call room previewing.
                                 :name                       r-name
                                 :avatar                     r-avatar
                                 :unreadNotificationsCount   unread-cnt
-                                :unreadMentionsCount        mention-cnt}
+                                :unreadMentionsCount        mention-cnt
+                                :unreadMessagesCount        unread-msgs
+                                :isBold                     is-bold?
+                                :isMarkedUnread             marked-unr?}
                    acc'        (conj! acc item)]
                (if (and is-space? (not (contains? closed-drawers id)))
                  (flatten-tree* acc'
@@ -333,7 +348,7 @@ now this is effectively a functioning *stub*.
    (let [prev        (get-in db [:room-previews room-id] {})
          merged      (merge prev preview-data)
          forum?      (or (boolean (:is-forum? merged))
-                         (contains? (get db :forum-room-overrides #{}) room-id))
+                         (state/room-forum-mode? db room-id))
          merged'     (cond-> merged
                        (contains? preview-data :is-forum?)
                        (assoc :native-forum? (boolean (:is-forum? preview-data)))
@@ -695,10 +710,6 @@ and file structures.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/rooms/room_list.cljs
 (defn- is-call-room? [db room-id]
   (get-in db [:room-previews room-id :is-call?] false))
-
-(defn- is-forum-room? [db room-id]
-  (or (boolean (get-in db [:room-previews room-id :is-forum?]))
-      (contains? (get db :forum-room-overrides #{}) room-id)))
 
 (re-frame/reg-event-fx
  :rooms/hydrate-room
