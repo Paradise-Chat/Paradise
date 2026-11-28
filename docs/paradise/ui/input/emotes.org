@@ -16,20 +16,23 @@ https://github.com/matrix-org/matrix-spec-proposals/pull/2545
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/emotes.cljs
 (ns paradise.ui.input.emotes
   (:require
-   [promesa.core :as p]
    [re-frame.core :as re-frame]
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [cljs.core.async :refer [go <!]]
+   [cljs.core.async.interop :refer-macros [<p!]]
    [cljs-workers.core :as main]
+   [paradise.shared.client.cache :as cache]
    [paradise.shared.client.state :as state]
    [reagent.core :as r]
-   [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.shared.utils.emotes :as shared-emotes]
+   [paradise.shared.utils.helpers :refer [clean-shortcode safe-lower safe-lower-trim]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.global :refer [click-away-wrapper]]
+   [paradise.ui.global :refer [click-away-wrapper make-swipe-handlers]]
    [paradise.media.component :refer [media]]
    ["emojibase-data/en/data.json" :as emoji-data]
-   ["react" :as react]))
+   ["emojibase-data/en/shortcodes/emojibase.json" :as emojibase-shortcodes]
+   ["emojibase-data/en/shortcodes/joypixels.json" :as joypixels-shortcodes]))
 #+end_src
 
 
