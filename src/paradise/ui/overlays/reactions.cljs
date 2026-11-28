@@ -52,7 +52,9 @@
 
 (defn reaction-picker-content [{:keys [room-id msg-id close-fn]}]
   [emoji-sticker-board
-   {:on-close close-fn
+   {:on-close        close-fn
+    :allow-stickers? false
+    :default-mode    :inline
     :on-insert-emoji (fn [emote-or-shortcode & [maybe-url]]
                        (let [uri (if (map? emote-or-shortcode)
                                    (or (:uri emote-or-shortcode) (:url emote-or-shortcode))
@@ -67,4 +69,3 @@
 
 (defmethod popover-component :reaction-picker [_]
   reaction-picker-content)
-
