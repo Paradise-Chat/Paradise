@@ -1,6 +1,7 @@
 (ns paradise.ui.overlays.settings.voice-video
   (:require
    [paradise.shared.client.session-store :as store]
+   [paradise.shared.utils.helpers :refer [clamp01]]
    [paradise.ui.container.call.runtime :as call-rtc]
    [promesa.core :as p]
    [re-frame.core :as re-frame]
@@ -38,11 +39,56 @@
  :settings/hydrate-voice-threshold
  (fn [{:keys [db]} [_ threshold]]
    (let [threshold (if (and (number? threshold)
-                            (<= 0 threshold 1))
+                            (<= 0 threshold 1)
+                            (not= threshold 0.12))
                      threshold
-                     0.12)]
+                     0.004)]
      {:db (assoc-in db [:settings :voice-threshold] threshold)
       :call.audio/set-voice-threshold threshold})))
+
+(defn- clamp-audio-volume [v]
+  (let [n (js/Number v)]
+    (if (js/Number.isFinite n)
+      (-> n (max 0) (min 200) js/Math.round)
+      100)))
+
+(re-frame/reg-event-fx
+ :settings/hydrate-input-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (if (nil? volume) 100 (clamp-audio-volume volume))]
+     {:db (assoc-in db [:settings :input-volume] vol)
+      :call.audio/set-input-volume vol})))
+
+(re-frame/reg-event-fx
+ :settings/set-input-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (clamp-audio-volume volume)]
+     (store/set-setting! "call_input_volume" vol)
+     {:db (assoc-in db [:settings :input-volume] vol)
+      :call.audio/set-input-volume vol})))
+
+(re-frame/reg-sub
+ :settings/input-volume
+ (fn [db _]
+   (get-in db [:settings :input-volume] 100)))
+
+(re-frame/reg-event-db
+ :settings/hydrate-output-volume
+ (fn [db [_ volume]]
+   (let [vol (if (nil? volume) 100 (clamp-audio-volume volume))]
+     (assoc-in db [:settings :output-volume] vol))))
+
+(re-frame/reg-event-fx
+ :settings/set-output-volume
+ (fn [{:keys [db]} [_ volume]]
+   (let [vol (clamp-audio-volume volume)]
+     (store/set-setting! "call_output_volume" vol)
+     {:db (assoc-in db [:settings :output-volume] vol)})))
+
+(re-frame/reg-sub
+ :settings/output-volume
+ (fn [db _]
+   (get-in db [:settings :output-volume] 100)))
 
 (re-frame/reg-event-fx
  :settings/set-noise-suppression
@@ -68,7 +114,7 @@
 (re-frame/reg-sub
  :settings/voice-threshold
  (fn [db _]
-   (get-in db [:settings :voice-threshold] 0.12)))
+   (get-in db [:settings :voice-threshold] 0.004)))
 
 (re-frame/reg-event-fx
  :settings/set-call-device
@@ -310,6 +356,9 @@
                         (when-let [set-suppression (aget processor "setNoiseSuppressionEnabled")]
                           (set-suppression @!noise-suppression))
 
+                        (when-let [set-gain (aget processor "setInputGain")]
+                          (set-gain (/ @call-rtc/!input-volume 100.0)))
+
                         (when-let [get-level (aget processor "getLevel")]
                           (reset! !level (get-level)))
 
@@ -395,9 +444,6 @@
          (media-device-label device fallback-label idx)])
       devices))]])
 
-(defn- clamp01 [x]
-  (max 0.0 (min 1.0 x)))
-
 (defn- amplitude->meter
   [amplitude]
   (let [db (* 20 (js/Math.log10 (max amplitude 0.00001)))
@@ -464,10 +510,29 @@
       [:span
        (str (js/Math.round (* meter-threshold 100)) "%")]]]))
 
+(defn- volume-slider-field
+  [{:keys [tr label value on-change]}]
+  [:div.settings-field
+   [:div.settings-row
+    [:label.settings-label label]
+    [:span.settings-row-description
+     {:title           (tr [:container.call/reset-volume])
+      :style           {:cursor "pointer" :font-variant-numeric "tabular-nums"}
+      :on-double-click #(on-change 100)}
+     (str value "%")]]
+   [:input.settings-range-input
+    {:type      "range"
+     :min       0
+     :max       200
+     :step      1
+     :value     value
+     :on-change #(on-change (.. % -target -value))}]])
+
 (defn- microphone-section
   [{:keys [tr
            devices
            audio-input
+           input-volume
            voice-threshold
            noise-suppression-enabled?
            live-mic-active?
@@ -483,113 +548,118 @@
            !restore-live-mic?
            !error
            !devices]}]
-  [:div.settings-section
-   [:h3.settings-subheading
+  [:div.settings-hub-group
+   [:div.settings-hub-group-label
     (tr [:settings.voice-video.microphone/title])]
-
-   [:p.settings-description
-    (tr [:settings.voice-video.microphone/description])]
-
-   [media-device-select
-    {:label (tr [:settings.voice-video.devices/input-label])
-     :kind :audioinput
-     :devices (:audioinput devices)
-     :selected audio-input
-     :fallback-label (tr [:settings.voice-video.devices/microphone])
-     :default-label (tr [:settings.voice-video.devices/default])
-     :on-change
-     (fn [device-id]
-       (re-frame/dispatch
-        [:settings/set-call-device :audioinput device-id])
-
-       (when @!mic-testing?
-         (start-mic-test!
-          device-id
-          live-mic-active?
-          !mic-track
-          !mic-audio-el
-          !mic-processor
-          !mic-audio-context
-          !mic-raf-id
-          !mic-level
-          !mic-testing?
-          !voice-threshold
-          !noise-suppression
-          !restore-live-mic?
-          !error
-          !devices)))}]
-
-   [:div.settings-row
-    [:div.settings-row-text
-     [:div.settings-row-title
-      (tr [:settings.voice-video.microphone/sensitivity-title])]
-     [:div.settings-row-description
-      (tr [:settings.voice-video.microphone/sensitivity-description])]]
-
-    [:button.settings-button
-     {:type "button"
-      :on-click
-      (fn [_]
-        (if @!mic-testing?
-          (stop-mic-test!
-           !mic-track
-           !mic-audio-el
-           !mic-processor
-           !mic-audio-context
-           !mic-raf-id
-           !mic-level
-           !mic-testing?
-           !restore-live-mic?
-           true)
-
-          (start-mic-test!
-           audio-input
-           live-mic-active?
-           !mic-track
-           !mic-audio-el
-           !mic-processor
-           !mic-audio-context
-           !mic-raf-id
-           !mic-level
-           !mic-testing?
-           !voice-threshold
-           !noise-suppression
-           !restore-live-mic?
-           !error
-           !devices)))}
-     (if @!mic-testing?
-       (tr [:settings.voice-video.microphone/stop-test])
-       (tr [:settings.voice-video.microphone/test]))]]
-
-   [mic-level-meter
-    tr
-    @!mic-level
-    @!mic-testing?
-    voice-threshold
-    (fn [threshold]
-      (reset! !voice-threshold threshold)
-      (re-frame/dispatch
-       [:settings/set-voice-threshold threshold]))]
-
-   [:div.settings-row.toggle-row
-    [:div.settings-row-text
-     [:div.settings-row-title
-      (tr [:settings.voice-video.microphone/noise-suppression-title])]
-     [:div.settings-row-description
-      (tr [:settings.voice-video.microphone/noise-suppression-description])]]
-
-    [:label.settings-toggle
-     [:input
-      {:type "checkbox"
-       :checked noise-suppression-enabled?
+   [:div.settings-hub-group-card
+    [:div.settings-card-stack
+     [:p.settings-description
+      (tr [:settings.voice-video.microphone/description])]
+     [media-device-select
+      {:label          (tr [:settings.voice-video.devices/input-label])
+       :kind           :audioinput
+       :devices        (:audioinput devices)
+       :selected       audio-input
+       :fallback-label (tr [:settings.voice-video.devices/microphone])
+       :default-label  (tr [:settings.voice-video.devices/default])
        :on-change
-       (fn [e]
-         (let [enabled? (.. e -target -checked)]
-           (reset! !noise-suppression enabled?)
-           (re-frame/dispatch
-            [:settings/set-noise-suppression enabled?])))}]
-     [:div.settings-toggle-track
-      [:div.settings-toggle-knob]]]]])
+       (fn [device-id]
+         (re-frame/dispatch
+          [:settings/set-call-device :audioinput device-id])
+         (when @!mic-testing?
+           (start-mic-test!
+            device-id
+            live-mic-active?
+            !mic-track
+            !mic-audio-el
+            !mic-processor
+            !mic-audio-context
+            !mic-raf-id
+            !mic-level
+            !mic-testing?
+            !voice-threshold
+            !noise-suppression
+            !restore-live-mic?
+            !error
+            !devices)))}]
+     [volume-slider-field
+      {:tr        tr
+       :label     (tr [:settings.voice-video.microphone/input-volume])
+       :value     input-volume
+       :on-change #(re-frame/dispatch [:settings/set-input-volume %])}]]
+
+    [:div.settings-card-stack
+     [:div.settings-row
+      [:div.settings-row-text
+       [:div.settings-row-title
+        (tr [:settings.voice-video.microphone/sensitivity-title])]
+       [:div.settings-row-description
+        (tr [:settings.voice-video.microphone/sensitivity-description])]]
+
+      [:button.settings-button
+       {:type  "button"
+        :class (if @!mic-testing? "destructive" "secondary")
+        :on-click
+        (fn [_]
+          (if @!mic-testing?
+            (stop-mic-test!
+             !mic-track
+             !mic-audio-el
+             !mic-processor
+             !mic-audio-context
+             !mic-raf-id
+             !mic-level
+             !mic-testing?
+             !restore-live-mic?
+             true)
+            (start-mic-test!
+             audio-input
+             live-mic-active?
+             !mic-track
+             !mic-audio-el
+             !mic-processor
+             !mic-audio-context
+             !mic-raf-id
+             !mic-level
+             !mic-testing?
+             !voice-threshold
+             !noise-suppression
+             !restore-live-mic?
+             !error
+             !devices)))}
+       (if @!mic-testing?
+         (tr [:settings.voice-video.microphone/stop-test])
+         (tr [:settings.voice-video.microphone/test]))]]
+
+     [mic-level-meter
+      tr
+      @!mic-level
+      @!mic-testing?
+      voice-threshold
+      (fn [threshold]
+        (reset! !voice-threshold threshold)
+        (re-frame/dispatch
+         [:settings/set-voice-threshold threshold]))]]
+
+    [:div.settings-card-row.is-toggle
+     [:div.settings-row-text
+      [:div.settings-row-title
+       (tr [:settings.voice-video.microphone/noise-suppression-title])]
+      [:div.settings-row-description
+       (tr [:settings.voice-video.microphone/noise-suppression-description])]]
+
+     [:label.settings-toggle
+      [:input
+       {:type    "checkbox"
+        :checked noise-suppression-enabled?
+        :on-change
+        (fn [e]
+          (let [enabled? (.. e -target -checked)]
+            (reset! !noise-suppression enabled?)
+            (re-frame/dispatch
+             [:settings/set-noise-suppression enabled?])))}]
+      [:div.settings-toggle-track
+       [:div.settings-toggle-knob]]]]]])
 
 (defn- camera-section
   [{:keys [tr
@@ -600,102 +670,112 @@
            !previewing?
            !error
            !devices]}]
-  [:div.settings-section
-   [:h3.settings-subheading
+  [:div.settings-hub-group
+   [:div.settings-hub-group-label
     (tr [:settings.voice-video.camera/title])]
+   [:div.settings-hub-group-card
+    [:div.settings-card-stack
+     [:p.settings-description
+      (tr [:settings.voice-video.camera/description])]
+     [media-device-select
+      {:label          (tr [:settings.voice-video.devices/video-label])
+       :kind           :videoinput
+       :devices        (:videoinput devices)
+       :selected       video-input
+       :fallback-label (tr [:settings.voice-video.devices/camera])
+       :default-label  (tr [:settings.voice-video.devices/default])
+       :on-change
+       (fn [device-id]
+         (re-frame/dispatch
+          [:settings/set-call-device :videoinput device-id])
+         (when @!previewing?
+           (start-camera-preview!
+            device-id
+            !camera-track
+            !video-el
+            !previewing?
+            !error
+            !devices)))}]]
 
-   [:p.settings-description
-    (tr [:settings.voice-video.camera/description])]
+    [:div.settings-card-stack
+     [:div.settings-actions
+      [:button.settings-button
+       {:type  "button"
+        :class (if @!previewing? "destructive" "secondary")
+        :on-click
+        (fn [_]
+          (if @!previewing?
+            (stop-camera-preview! !camera-track !video-el !previewing?)
+            (start-camera-preview!
+             video-input
+             !camera-track
+             !video-el
+             !previewing?
+             !error
+             !devices)))}
+       (if @!previewing?
+         (tr [:settings.voice-video.camera/stop-preview])
+         (tr [:settings.voice-video.camera/preview]))]]
 
-   [media-device-select
-    {:label (tr [:settings.voice-video.devices/video-label])
-     :kind :videoinput
-     :devices (:videoinput devices)
-     :selected video-input
-     :fallback-label (tr [:settings.voice-video.devices/camera])
-     :default-label (tr [:settings.voice-video.devices/default])
-     :on-change
-     (fn [device-id]
-       (re-frame/dispatch
-        [:settings/set-call-device :videoinput device-id])
+     [:div.settings-media-preview
+      [:video.settings-media-preview-video
+       {:class        (when @!previewing? "is-active")
+        :ref          #(reset! !video-el %)
+        :auto-play    true
+        :plays-inline true
+        :muted        true}]
 
-       (when @!previewing?
-         (start-camera-preview!
-          device-id
-          !camera-track
-          !video-el
-          !previewing?
-          !error
-          !devices)))}]
-
-   [:div.settings-actions
-    [:button.settings-button
-     {:type "button"
-      :on-click
-      (fn [_]
-        (if @!previewing?
-          (stop-camera-preview! !camera-track !video-el !previewing?)
-          (start-camera-preview!
-           video-input
-           !camera-track
-           !video-el
-           !previewing?
-           !error
-           !devices)))}
-     (if @!previewing?
-       (tr [:settings.voice-video.camera/stop-preview])
-       (tr [:settings.voice-video.camera/preview]))]]
-
-   [:div.settings-media-preview
-    [:video.settings-media-preview-video
-     {:class (when @!previewing? "is-active")
-      :ref #(reset! !video-el %)
-      :auto-play true
-      :plays-inline true
-      :muted true}]
-
-    (when-not @!previewing?
-      [:div.settings-media-preview-empty
-       (tr [:settings.voice-video.camera/preview-off])])]])
+      (when-not @!previewing?
+        [:div.settings-media-preview-empty
+         (tr [:settings.voice-video.camera/preview-off])])]]]])
 
 (defn- output-section
   [{:keys [tr
            devices
-           audio-output]}]
-  [:div.settings-section
-   [:h3.settings-subheading
+           audio-output
+           output-volume]}]
+  [:div.settings-hub-group
+   [:div.settings-hub-group-label
     (tr [:settings.voice-video.output/title])]
+   [:div.settings-hub-group-card
+    [:div.settings-card-stack
+     [:p.settings-description
+      (tr [:settings.voice-video.output/description])]
 
-   [:p.settings-description
-    (tr [:settings.voice-video.output/description])]
+     [media-device-select
+      {:label          (tr [:settings.voice-video.devices/output-label])
+       :kind           :audiooutput
+       :devices        (:audiooutput devices)
+       :selected       audio-output
+       :fallback-label (tr [:settings.voice-video.devices/output])
+       :default-label  (tr [:settings.voice-video.devices/default])
+       :on-change
+       #(re-frame/dispatch
+         [:settings/set-call-device :audiooutput %])}]
 
-   [media-device-select
-    {:label (tr [:settings.voice-video.devices/output-label])
-     :kind :audiooutput
-     :devices (:audiooutput devices)
-     :selected audio-output
-     :fallback-label (tr [:settings.voice-video.devices/output])
-     :default-label (tr [:settings.voice-video.devices/default])
-     :on-change
-     #(re-frame/dispatch
-       [:settings/set-call-device :audiooutput %])}]
+     [volume-slider-field
+      {:tr        tr
+       :label     (tr [:settings.voice-video.output/output-volume])
+       :value     output-volume
+       :on-change #(re-frame/dispatch [:settings/set-output-volume %])}]
 
-   [:p.settings-description
-    (tr [:settings.voice-video.output/browser-support])]])
+     [:p.settings-description
+      (tr [:settings.voice-video.output/browser-support])]]]])
 
 (defn- media-error-banner
   [tr error]
   (when error
     [:div.settings-banner.warning
-     [:div.settings-banner-title
-      (tr [:settings.voice-video.error/title])]
-     [:div.settings-banner-description
-      (or (.-message error) (str error))]]))
+     [:div.settings-banner-copy
+      [:div.settings-banner-title
+       (tr [:settings.voice-video.error/title])]
+      [:div.settings-banner-description
+       (or (.-message error) (str error))]]]))
 
 (defn ^:ui voice-video-tab []
   (r/with-let [!devices
-               (r/atom {:audioinput []
-                        :videoinput []
+               (r/atom {:audioinput  []
+                        :videoinput  []
                         :audiooutput []})
                !error             (r/atom nil)
                !mic-track         (atom nil)
@@ -717,6 +797,8 @@
           audio-input                @(re-frame/subscribe [:settings/call-device :audioinput])
           video-input                @(re-frame/subscribe [:settings/call-device :videoinput])
           audio-output               @(re-frame/subscribe [:settings/call-device :audiooutput])
+          input-volume               @(re-frame/subscribe [:settings/input-volume])
+          output-volume              @(re-frame/subscribe [:settings/output-volume])
           voice-threshold            @(re-frame/subscribe [:settings/voice-threshold])
           noise-suppression-enabled? @(re-frame/subscribe [:settings/noise-suppression-enabled?])
           call-status                @(re-frame/subscribe [:call/status])
@@ -729,48 +811,47 @@
       (reset! !noise-suppression noise-suppression-enabled?)
 
       [:div.settings-tab-content
-       [:div.settings-page-header
-        [:h2.settings-heading
-         (tr [:settings.voice-video/title])]
-        [:p.settings-description
-         (tr [:settings.voice-video/description])]]
+       [:p.settings-subview-lead
+        (tr [:settings.voice-video/description])]
+
+       [media-error-banner tr error]
 
        [microphone-section
-        {:tr tr
-         :devices devices
-         :audio-input audio-input
-         :voice-threshold voice-threshold
+        {:tr                         tr
+         :devices                    devices
+         :audio-input                audio-input
+         :input-volume               input-volume
+         :voice-threshold            voice-threshold
          :noise-suppression-enabled? noise-suppression-enabled?
-         :live-mic-active? live-mic-active?
-         :!mic-track !mic-track
-         :!mic-audio-el !mic-audio-el
-         :!mic-processor !mic-processor
-         :!mic-audio-context !mic-audio-context
-         :!mic-raf-id !mic-raf-id
-         :!mic-level !mic-level
-         :!mic-testing? !mic-testing?
-         :!voice-threshold !voice-threshold
-         :!noise-suppression !noise-suppression
-         :!restore-live-mic? !restore-live-mic?
-         :!error !error
-         :!devices !devices}]
+         :live-mic-active?           live-mic-active?
+         :!mic-track                 !mic-track
+         :!mic-audio-el              !mic-audio-el
+         :!mic-processor             !mic-processor
+         :!mic-audio-context         !mic-audio-context
+         :!mic-raf-id                !mic-raf-id
+         :!mic-level                 !mic-level
+         :!mic-testing?              !mic-testing?
+         :!voice-threshold           !voice-threshold
+         :!noise-suppression         !noise-suppression
+         :!restore-live-mic?         !restore-live-mic?
+         :!error                     !error
+         :!devices                   !devices}]
 
        [camera-section
-        {:tr tr
-         :devices devices
-         :video-input video-input
+        {:tr            tr
+         :devices       devices
+         :video-input   video-input
          :!camera-track !camera-track
-         :!video-el !video-el
-         :!previewing? !previewing?
-         :!error !error
-         :!devices !devices}]
+         :!video-el     !video-el
+         :!previewing?  !previewing?
+         :!error        !error
+         :!devices      !devices}]
 
        [output-section
-        {:tr tr
-         :devices devices
-         :audio-output audio-output}]
-
-       [media-error-banner tr error]])
+        {:tr            tr
+         :devices       devices
+         :audio-output  audio-output
+         :output-volume output-volume}]])
 
     (finally
       (stop-mic-test!
