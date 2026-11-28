@@ -701,6 +701,19 @@ We need to be able to convert timestamps to date otherwise people might not be t
                                              :day   "numeric"
                                              :year  "numeric"}))
 
+(defn normalize-ts-ms
+  "Normalizes a numeric epoch timestamp (in seconds or milliseconds) to milliseconds, or nil."
+  [raw]
+  (when (and (number? raw) (pos? raw))
+    (if (< raw 100000000000) (* raw 1000) raw)))
+
+(defn date-day-key
+  "Returns a `[year month day]` calendar key for a millisecond timestamp, or nil."
+  [ts]
+  (when-let [ms (normalize-ts-ms ts)]
+    (let [d (js/Date. ms)]
+      [(.getFullYear d) (.getMonth d) (.getDate d)])))
+
 (defn format-divider-date [ts]
   (let [date         (js/Date. ts)
         today        (js/Date.)
