@@ -208,7 +208,7 @@ when a drop is committed.
   ([db next-user-layout {:keys [sync-remote?] :or {sync-remote? true}}]
    (let [ukey        (active-layout-key db)
          all-layouts (assoc (:space-layouts db {}) ukey next-user-layout)]
-     (store/set-setting! "space_layouts" (pr-str all-layouts))
+     (store/set-setting! "space_layouts" all-layouts)
      (when sync-remote?
        (sync-layout-to-engine! next-user-layout))
      {:db (assoc db :space-layouts all-layouts)})))
