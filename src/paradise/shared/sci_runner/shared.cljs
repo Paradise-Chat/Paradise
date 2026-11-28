@@ -6,6 +6,7 @@
             [cljs.core.async]
             [promesa.core]
             [clojure.string]
+            [net]
             [paradise.shared.utils.macros :refer [expose-ns]]))
 
 (defn jvm-return-chan [state value]
@@ -75,7 +76,8 @@
 (def common-namespaces
   (merge async-namespaces
          {'promesa.core   (expose-ns promesa.core)
-          'clojure.string (expose-ns clojure.string)}))
+          'clojure.string (expose-ns clojure.string)
+          'net            (expose-ns net)}))
 
 (def common-classes
   {'js   goog/global :allow :all
