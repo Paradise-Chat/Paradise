@@ -147,7 +147,7 @@ enable passing functions through them.
   (r/with-let [!sheet-drag (r/atom {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
                !safe-to-click? (r/atom false)
                !listener-active? (r/atom false)
-               is-mobile? (<= js/window.innerWidth 768)
+               is-mobile? (platform/mobile-viewport?)
                enable-clicks! (fn enable-clicks! []
                                 (reset! !safe-to-click? true)
                                 (reset! !listener-active? false)
@@ -692,7 +692,7 @@ much simpler.
   (let [active-popover @!active-popover
         submenus       @overlays-base/!context-submenus
         has-ctx-menu?  (some? @!active-context-menu)
-        is-mobile?     (<= js/window.innerWidth 768)]
+        is-mobile?     (platform/mobile-viewport?)]
     (when active-popover
       (let [{:keys [id props]} active-popover
             props    (if (map? props) props (js->clj props :keywordize-keys true))
