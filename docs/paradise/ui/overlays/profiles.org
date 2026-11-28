@@ -47,39 +47,223 @@ aspect.
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/overlays/profiles.cljs
-(defonce ^:private !profile-cache (r/atom {}))
-(defonce ^:private !in-flight-profiles (atom #{}))
 (def ^:private profile-ttl-ms 60000)
+
+(defonce ^:private !profile-cache
+  (mem-cache/make-ttl-cache {:ttl-ms         profile-ttl-ms
+                             :max-entries    250
+                             :atom-fn        r/atom
+                             :session-scoped? true}))
+
+(defonce ^:private !mutuals-cache
+  (mem-cache/make-ttl-cache {:ttl-ms         profile-ttl-ms
+                             :max-entries    250
+                             :atom-fn        r/atom
+                             :session-scoped? true}))
+
+(defn- normalize-mutual-room [raw]
+  (when-let [r (norm/normalize-room raw)]
+    {:id           (:id r)
+     :name         (:name r)
+     :avatar       (:avatar-url r)
+     :is-space?    (:is-space? r)
+     :member-count (:member-count r)
+     :parent-id    (:parent-id r)}))
+
+(defn- ensure-user-mutuals-loaded! [engine-kw user-id]
+  (when (and user-id (not (str/blank? (str user-id))))
+    (let [uid    (str user-id)
+          ckey   [(or engine-kw :default) uid]
+          cached (:value (mem-cache/get-entry !mutuals-cache ckey))]
+      (when-not (mem-cache/get-fresh !mutuals-cache ckey)
+        (when-not cached
+          (mem-cache/put! !mutuals-cache ckey {:loading?       true
+                                               :mutual-rooms   []
+                                               :mutual-friends []}))
+        (mem-cache/fetch-once!
+         !mutuals-cache
+         ckey
+         (fn []
+           (js/Promise.
+            (fn [resolve _]
+              (go
+                (try
+                  (let [res (<! (mesh/do-with-thread!
+                                 :engine-pool
+                                 {:handler   :fetch-user-mutuals
+                                  :arguments {:user-id uid}}))]
+                    (if (ok-status? res)
+                      (let [rooms   (into []
+                                          (keep normalize-mutual-room)
+                                          (concat (or (:mutual-spaces res) [])
+                                                  (or (:mutual-rooms res) [])))
+                            dedup-r (->> rooms
+                                         (reduce (fn [acc r]
+                                                   (if (contains? acc (:id r)) acc (assoc acc (:id r) r)))
+                                                 {})
+                                         vals
+                                         vec)
+                            friends (into []
+                                          (keep norm/normalize-user)
+                                          (or (:mutual-friends res) []))]
+                        (resolve {:loading?       false
+                                  :mutual-rooms   dedup-r
+                                  :mutual-friends friends}))
+                      (resolve {:loading?       false
+                                :mutual-rooms   (or (:mutual-rooms cached) [])
+                                :mutual-friends (or (:mutual-friends cached) [])})))
+                  (catch :default _
+                    (resolve {:loading?       false
+                              :mutual-rooms   (or (:mutual-rooms cached) [])
+                              :mutual-friends (or (:mutual-friends cached) [])})))))))
+         {:force? true})))))
+
+(re-frame/reg-sub
+ :profiles/client-mutual-rooms
+ (fn [db [_ user-id]]
+   (let [uid       (some-> user-id str not-empty)
+         rooms-map (:rooms-unfiltered-cache db {})
+         spaces    (:spaces db {})
+         members   (:room-members db {})]
+     (if-not uid
+       []
+       (->> members
+            (keep (fn [[rid entry]]
+                    (let [d    (:data entry)
+                          has? (cond
+                                 (map? d)        (contains? d uid)
+                                 (sequential? d) (boolean
+                                                  (some #(= (some-> (:user-id %) str) uid) d))
+                                 :else           false)]
+                      (when has?
+                        (let [r (or (get rooms-map rid) (get spaces rid))]
+                          (when-let [nr (norm/normalize-room (assoc r :id rid))]
+                            (when-not (:is-direct? nr)
+                              {:id        (:id nr)
+                               :name      (:name nr)
+                               :avatar    (:avatar-url nr)
+                               :is-space? (:is-space? nr)
+                               :parent-id (:parent-id nr)})))))))
+            vec)))))
+
+(defn ^:ui profile-mutuals-section [{:keys [uid engine-kw tr]}]
+  (r/with-let [!tab (r/atom :rooms)]
+    (let [_              (ensure-user-mutuals-loaded! engine-kw uid)
+          ckey           [(or engine-kw :default) uid]
+          cached         (:value (mem-cache/get-entry !mutuals-cache ckey))
+          client-rooms   @(re-frame/subscribe [:profiles/client-mutual-rooms uid])
+          remote-rooms   (or (:mutual-rooms cached) [])
+          mutual-rooms   (let [by-id (reduce (fn [acc r] (assoc acc (:id r) r)) {} remote-rooms)]
+                           (->> (reduce (fn [acc r]
+                                          (if (contains? acc (:id r)) acc (assoc acc (:id r) r)))
+                                        by-id
+                                        client-rooms)
+                                vals
+                                (sort-by (fn [r] [(if (:is-space? r) 0 1)
+                                                  (safe-lower (:name r))]))
+                                vec))
+          mutual-friends (or (:mutual-friends cached) [])
+          loading?       (boolean (:loading? cached))
+          active-tab     @!tab]
+      [:div.profile-mutuals-card
+       [:div.profile-mutuals-tabs
+        [:button.profile-mutuals-tab
+         {:type     "button"
+          :class    (when (= active-tab :rooms) "is-active")
+          :on-click #(reset! !tab :rooms)}
+         (tr [:profile.mutuals/rooms-tab] [(count mutual-rooms)])]
+        [:button.profile-mutuals-tab
+         {:type     "button"
+          :class    (when (= active-tab :friends) "is-active")
+          :on-click #(reset! !tab :friends)}
+         (tr [:profile.mutuals/friends-tab] [(count mutual-friends)])]]
+       [:div.profile-mutuals-list
+        (cond
+          (and loading?
+               (if (= active-tab :rooms) (empty? mutual-rooms) (empty? mutual-friends)))
+          [:div.profile-mutuals-empty (tr [:profile.mutuals/loading])]
+
+          (= active-tab :rooms)
+          (if (empty? mutual-rooms)
+            [:div.profile-mutuals-empty (tr [:profile.mutuals/no-rooms])]
+            (for [r mutual-rooms]
+              ^{:key (:id r)}
+              [:button.profile-mutual-row
+               {:type     "button"
+                :on-click (fn []
+                            (re-frame/dispatch [:ui/close-popover])
+                            (re-frame/dispatch [:container/set-main-focus :timeline])
+                            (if (:is-space? r)
+                              (re-frame/dispatch [:space/select (:id r)])
+                              (do
+                                (when (:parent-id r)
+                                  (re-frame/dispatch [:space/select (:parent-id r)]))
+                                (re-frame/dispatch [:rooms/select (:id r)]))))}
+               [avatar {:id    (:id r)
+                        :name  (:name r)
+                        :url   (:avatar r)
+                        :size  24
+                        :shape (if (:is-space? r) :squircle :rounded)}]
+               [:span.profile-mutual-name (:name r)]
+               (when (:is-space? r)
+                 [:span.profile-mutual-badge (tr [:profile.mutuals/space-badge])])]))
+
+          :else
+          (if (empty? mutual-friends)
+            [:div.profile-mutuals-empty (tr [:profile.mutuals/no-friends])]
+            (for [f mutual-friends
+                  :let [fid (:user-id f)
+                        st  @(re-frame/subscribe [:presence/user fid (:presence f)])]]
+              ^{:key fid}
+              [:button.profile-mutual-row
+               {:type     "button"
+                :on-click (fn [e]
+                            (let [rect (.getBoundingClientRect (.-currentTarget e))]
+                              (re-frame/dispatch
+                               [:ui/open-popover :profile-preview
+                                {:x         (.-left rect)
+                                 :y         (.-top rect)
+                                 :width     300
+                                 :height    380
+                                 :backdrop? true
+                                 :member    {:user-id      fid
+                                             :display-name (:display-name f)
+                                             :username     (:username f)
+                                             :avatar-url   (:avatar-url f)}
+                                 :tags      {}}])))}
+               [avatar {:id     fid
+                        :name   (:display-name f)
+                        :url    (:avatar-url f)
+                        :size   24
+                        :status st}]
+               [:div.profile-mutual-user-copy
+                [:span.profile-mutual-name (:display-name f)]
+                (when (and (:handle f) (not= (:handle f) (:display-name f)))
+                  [:span.profile-mutual-sub (:handle f)])]])))]])))
 
 (defn- ensure-member-profile-loaded! [engine-kw user-id room-id]
   (when (and user-id (not (str/blank? (str user-id))))
     (let [uid    (str user-id)
           ckey   [(or engine-kw :default) uid]
-          cached (get @!profile-cache ckey)
-          now    (js/Date.now)
-          stale? (or (nil? cached)
-                     (> (- now (or (:fetched-at cached) 0)) profile-ttl-ms))]
-      (when (and stale? (not (contains? @!in-flight-profiles ckey)))
-        (swap! !in-flight-profiles conj ckey)
-        (go
-          (try
-            (let [res (<! (mesh/do-with-thread!
-                           :engine-pool
-                           {:handler   :fetch-profile
-                            :arguments (cond-> {:user-id uid}
-                                         room-id (assoc :room-id (str room-id)))}))]
-              (if (ok-status? res)
-                (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
-                                                  :data       (or (:profile res) {})})
-                (when-not cached
-                  (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
-                                                    :data       {}}))))
-            (catch :default _
-              (when-not cached
-                (swap! !profile-cache assoc ckey {:fetched-at (js/Date.now)
-                                                  :data       {}})))
-            (finally
-              (swap! !in-flight-profiles disj ckey))))))))
+          cached (:value (mem-cache/get-entry !profile-cache ckey))]
+      (mem-cache/fetch-once!
+       !profile-cache
+       ckey
+       (fn []
+         (js/Promise.
+          (fn [resolve _]
+            (go
+              (try
+                (let [res (<! (mesh/do-with-thread!
+                               :engine-pool
+                               {:handler   :fetch-profile
+                                :arguments (cond-> {:user-id uid}
+                                             room-id (assoc :room-id (str room-id)))}))]
+                  (if (ok-status? res)
+                    (resolve (or (:profile res) {}))
+                    (resolve (or cached {}))))
+                (catch :default _
+                  (resolve (or cached {}))))))))))))
 
 (defn- resolve-preview-state [member remote self-p]
   (let [uid      (first-non-blank (:user-id member))
