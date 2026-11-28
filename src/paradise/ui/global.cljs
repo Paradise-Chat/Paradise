@@ -6,10 +6,13 @@
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [reagent.core :as r]
-   [paradise.ui.overlays.base :refer [modal-component popover-component context-menu-component]]
+   [paradise.ui.overlays.base :as overlays-base
+    :refer [modal-component popover-component context-menu-component]]
+   [paradise.shared.utils.helpers :refer [local-media-url?]]
+   [paradise.shared.utils.haptics :refer [trigger-haptic!]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.shared.utils.svg :as icons]
-   [paradise.media.component :refer [media]]
-   ))
+   [paradise.media.component :refer [media]]))
 
 (defn click-away-wrapper
   "A reusable invisible backdrop for 'light dismiss' popovers.
@@ -30,41 +33,99 @@
 (defonce !active-context-menu (r/atom nil))
 (defonce !active-modal (r/atom nil))
 (defonce !active-popover (r/atom nil))
+(defonce !long-press-state (atom {}))
+(declare !swipe-drag-data make-swipe-handlers)
 
 (re-frame/reg-event-fx
  :ui/open-context-menu
  (fn [_ [_ id props]]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-context-menu {:id id :props props})
    {}))
 
 (re-frame/reg-event-fx
  :ui/close-context-menu
  (fn [_ _]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-context-menu nil)
    {}))
 
+(defn- clamp-submenu-pos [anchor-rect panel-w panel-h]
+  (let [vw        js/window.innerWidth
+        vh        js/window.innerHeight
+        pad       8
+        w         (or panel-w 200)
+        h         (or panel-h 220)
+        right-x   (+ (:right anchor-rect) 4)
+        left-x    (- (:left anchor-rect) w 4)
+        x         (if (<= (+ right-x w pad) vw)
+                    right-x
+                    (max pad left-x))
+        raw-y     (- (:top anchor-rect) 6)
+        max-y     (max pad (- vh h pad))
+        y         (max pad (min raw-y max-y))]
+    {:left x :top y}))
+
+(defn ^:ui context-menu-submenu-panel [{:keys [sub close-fn safe-to-click?]}]
+  (r/with-let [!size (r/atom {:w 200 :h 220})
+               !ro   (atom nil)
+               measure! (fn [el]
+                          (when el
+                            (let [nw (.-offsetWidth el)
+                                  nh (.-offsetHeight el)]
+                              (when (and (pos? nw) (pos? nh)
+                                         (or (not= nw (:w @!size))
+                                             (not= nh (:h @!size))))
+                                (reset! !size {:w nw :h nh})))))]
+    (let [{:keys [level anchor-rect render-fn]} sub
+          {:keys [w h]} @!size
+          {:keys [left top]} (clamp-submenu-pos anchor-rect w h)]
+      [:div.universal-context-menu.is-submenu
+       {:ref (fn [el]
+               (when-let [prev-ro @!ro]
+                 (.disconnect prev-ro)
+                 (reset! !ro nil))
+               (when el
+                 (measure! el)
+                 (when (exists? js/ResizeObserver)
+                   (let [ro (js/ResizeObserver. (fn [_] (measure! el)))]
+                     (.observe ro el)
+                     (reset! !ro ro)))))
+        :on-context-menu (fn [e] (.preventDefault e))
+        :on-mouse-enter  (fn [_] (overlays-base/cancel-submenu-close!))
+        :on-mouse-leave  (fn [_] (overlays-base/schedule-close-submenus-from! level))
+        :style           {:left           (str left "px")
+                          :top            (str top "px")
+                          :z-index        (+ 100000 (or level 0))
+                          :pointer-events (if safe-to-click? "auto" "none")}}
+       (when render-fn
+         [render-fn close-fn])])
+    (finally
+      (when-let [ro @!ro]
+        (.disconnect ro)
+        (reset! !ro nil)))))
+
 (defn ^:ui context-menu-root []
-  (r/with-let [!drag-y (r/atom 0)
-               !start-y (r/atom 0)
+  (r/with-let [!sheet-drag (r/atom {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
                !safe-to-click? (r/atom false)
                !listener-active? (r/atom false)
-               is-mobile? (<= js/window.innerWidth 768)
+               is-mobile? (platform/mobile-viewport?)
                enable-clicks! (fn enable-clicks! []
                                 (reset! !safe-to-click? true)
                                 (reset! !listener-active? false)
                                 (.removeEventListener js/window "touchend" enable-clicks! true)
                                 (.removeEventListener js/window "pointerup" enable-clicks! true)
                                 (.removeEventListener js/window "touchcancel" enable-clicks! true))]
-    (let [active-menu @!active-context-menu]
+    (let [active-menu @!active-context-menu
+          submenus    @overlays-base/!context-submenus]
       (when-not active-menu
-        (reset! !drag-y 0)
-        (reset! !start-y 0)
+        (reset! !sheet-drag {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
         (reset! !safe-to-click? false)
         (when @!listener-active?
           (enable-clicks!)))
 
       (when (and active-menu (not @!safe-to-click?) (not @!listener-active?))
-        (if is-mobile?
+        (if (and is-mobile? (:touch-active? @!long-press-state))
           (do
             (reset! !listener-active? true)
             (.addEventListener js/window "touchend" enable-clicks! true)
@@ -74,49 +135,52 @@
 
       (when active-menu
         (let [{:keys [id props]} active-menu
-              {:keys [x y]} props
-              close-fn #(re-frame/dispatch [:ui/close-context-menu])
-              Target   (context-menu-component id)
-              menu-width  200
-              menu-height 250
-              render-x (if (> (+ x menu-width) js/window.innerWidth) (- x menu-width) x)
-              render-y (if (> (+ y menu-height) js/window.innerHeight) (- y menu-height) y)
-
-              handle-ptr-down (fn [e]
-                                (reset! !start-y (.-clientY e))
-                                (.setPointerCapture (.-target e) (.-pointerId e)))
-              handle-ptr-move (fn [e]
-                                (when (pos? @!start-y)
-                                  (let [delta (- (.-clientY e) @!start-y)]
-                                    (reset! !drag-y (max 0 delta)))))
-              handle-ptr-up   (fn [e]
-                                (if (> @!drag-y 100)
-                                  (close-fn)
-                                  (reset! !drag-y 0))
-                                (reset! !start-y 0)
-                                (.releasePointerCapture (.-target e) (.-pointerId e)))]
+              {:keys [x y width height anchor-bottom]} props
+              close-fn    #(re-frame/dispatch [:ui/close-context-menu])
+              Target      (context-menu-component id)
+              menu-width  (or width 200)
+              menu-height (or height 250)
+              render-x    (max 8 (if (> (+ x menu-width) js/window.innerWidth) (- x menu-width) x))
+              render-y    (max 8 (if (> (+ y menu-height) js/window.innerHeight) (- y menu-height) y))
+              {:keys [dy dragging?]} @!sheet-drag
+              sheet-handlers (when is-mobile?
+                               (make-swipe-handlers
+                                :bottom-sheet
+                                {:!drag-state      !sheet-drag
+                                 :ignore-selector  "input, select, textarea, .context-menu-slider-block"
+                                 :min-dy           0
+                                 :dismiss-threshold 100
+                                 :on-dismiss       close-fn}))]
 
           [click-away-wrapper
            {:on-close close-fn :z-index 9998}
            [:div.universal-context-menu
-            {:class (when is-mobile? "mobile-sheet")
-             :on-context-menu (fn [e] (.preventDefault e))
-             :on-pointer-down (when is-mobile? handle-ptr-down)
-             :on-pointer-move (when is-mobile? handle-ptr-move)
-             :on-pointer-up   (when is-mobile? handle-ptr-up)
-             :style (if is-mobile?
-                      {:transform (str "translateY(" @!drag-y "px)")
-                       :transition (if (pos? @!start-y) "none" "transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)")
-                       :z-index 99999
-                       :pointer-events (if @!safe-to-click? "auto" "none")}
-                      {:left (str render-x "px")
-                       :top  (str render-y "px")
-                       :transform "none"
-                       :z-index 99999
-                       :pointer-events (if @!safe-to-click? "auto" "none")})}
+            (merge
+             {:class (when is-mobile? "mobile-sheet")
+              :on-context-menu (fn [e] (.preventDefault e))
+              :style (if is-mobile?
+                       {:transform (str "translateY(" (max 0 (or dy 0)) "px)")
+                        :transition (if dragging? "none" "transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)")
+                        :z-index 99999
+                        :pointer-events (if @!safe-to-click? "auto" "none")}
+                       (cond-> {:left (str render-x "px")
+                                :transform "none"
+                                :z-index 99999
+                                :pointer-events (if @!safe-to-click? "auto" "none")}
+                         anchor-bottom (assoc :bottom (str (max 8 anchor-bottom) "px"))
+                         (not anchor-bottom) (assoc :top (str render-y "px"))))}
+             sheet-handlers)
             [:div.mobile-drag-handle]
             (when Target
-              [Target (assoc props :close-fn close-fn)])]])))))
+              [Target (assoc props :close-fn close-fn)])]
+           (when (and (not is-mobile?) (seq submenus))
+             [:<>
+              (for [sub submenus]
+                ^{:key (str (:level sub) "-" (:id sub))}
+                [context-menu-submenu-panel
+                 {:sub            sub
+                  :close-fn       close-fn
+                  :safe-to-click? @!safe-to-click?}])])])))))
 
 (re-frame/reg-event-fx
  :ui/open-modal
@@ -165,27 +229,32 @@
 (re-frame/reg-event-fx
  :ui/open-popover
  (fn [_ [_ id props]]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-popover {:id id :props props})
    {}))
 
 (re-frame/reg-event-fx
  :ui/close-popover
  (fn [_ _]
+   (overlays-base/clear-context-submenus!)
    (reset! !active-popover nil)
    {}))
 
 (defn popover-root []
-  (let [active-popover @!active-popover]
+  (let [active-popover @!active-popover
+        submenus       @overlays-base/!context-submenus
+        has-ctx-menu?  (some? @!active-context-menu)
+        is-mobile?     (platform/mobile-viewport?)]
     (when active-popover
       (let [{:keys [id props]} active-popover
             props    (if (map? props) props (js->clj props :keywordize-keys true))
-            {:keys [x y width height backdrop?]
+            {:keys [x y width height backdrop? anchor-bottom]
              :or {width 320 height 380 backdrop? true}} props
             close-fn #(re-frame/dispatch [:ui/close-popover])
             Target   (popover-component id)]
         (when Target
-          (let [win-w js/window.innerWidth
-                win-h js/window.innerHeight
+          (let [win-w    js/window.innerWidth
+                win-h    js/window.innerHeight
                 render-x (max 10 (if (> (+ x width) win-w) (- x width) x))
                 render-y (max 10 (if (> (+ y height) win-h) (- y height) y))]
             [:<>
@@ -193,97 +262,236 @@
                [:div.popover-backdrop
                 {:style {:position "fixed" :top 0 :left 0 :right 0 :bottom 0 :z-index 11999}
                  :on-click close-fn
-                 :on-context-menu (fn [e] (close-fn))}])
+                 :on-context-menu (fn [_] (close-fn))}])
              [:div.popover-container
-              {:style {:left (str render-x "px")
-                       :top  (str render-y "px")
-                       :position "fixed"
-                       :z-index 12000}}
-              [Target (assoc props :close-fn close-fn)]]]))))))
+              {:style (cond-> {:left     (str render-x "px")
+                               :position "fixed"
+                               :z-index  12000}
+                        anchor-bottom
+                        (assoc :bottom (str (max 10 anchor-bottom) "px"))
+                        (not anchor-bottom)
+                        (assoc :top (str render-y "px")))}
+              [Target (assoc props :close-fn close-fn)]]
+             (when (and (not is-mobile?) (not has-ctx-menu?) (seq submenus))
+               [:<>
+                (for [sub submenus]
+                  ^{:key (str (:level sub) "-" (:id sub))}
+                  [context-menu-submenu-panel
+                   {:sub            sub
+                    :close-fn       close-fn
+                    :safe-to-click? true}])])]))))))
 
+(defn- attach-scroll-lock! [!state handler]
+  (when-not (:scroll-handler @!state)
+    (swap! !state assoc :scroll-handler handler)
+    (.addEventListener js/window "touchmove" handler #js {:passive false :capture true})))
 
+(defn- suppress-next-click! []
+  (swap! !long-press-state assoc :suppress-click-until (+ (js/Date.now) 400)))
 
-(defn start-long-press! [handler !long-press-state action-fn mx my]
+(defn start-long-press!
+  ([handler !state action-fn mx my]
+   (start-long-press! handler !state action-fn mx my 500))
+  ([handler !state action-fn mx my delay-ms]
+   (js/setTimeout
+    (fn []
+      (try
+        (when-not (:dragging? @!state)
+          (attach-scroll-lock! !state handler)
+          (swap! !state assoc :fired? true)
+          (if action-fn
+            (action-fn mx my)
+            (js/console.error "[LongPress Debug] Timer fired but action-fn is nil!")))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash inside timeout! !state:" !state)
+          (throw err))))
+    delay-ms)))
+
+(defn- start-drag-arm! [handler !state drag-opts mx my target-el]
   (js/setTimeout
    (fn []
-     (try
-       (swap! !long-press-state assoc
-              :fired? true
-              :scroll-handler handler)
-       (.addEventListener js/window "touchmove" handler #js {:passive false :capture true})
-       (if action-fn
-         (action-fn mx my)
-         (js/console.error "[LongPress Debug] Timer fired but action-fn is nil!"))
-       (catch :default err
-         (js/console.error "[LongPress Debug] Crash inside timeout! !long-press-state:" !long-press-state)
-         (throw err))))
-   500))
-
-(defonce !long-press-state (atom {}))
+     (when-not (:dragging? @!state)
+       (attach-scroll-lock! !state handler)
+       (swap! !swipe-drag-data assoc :owner :touch-drag)
+       (swap! !state assoc :armed? true)
+       (trigger-haptic! :light)
+       (when-let [f (:on-arm drag-opts)]
+         (f mx my target-el))))
+   200))
 
 (defn clear-long-press! []
-  (let [{:keys [timer scroll-handler]} @!long-press-state]
+  (let [{:keys [timer arm-timer scroll-handler suppress-click-until last-touch-at]} @!long-press-state]
     (when timer (js/clearTimeout timer))
+    (when arm-timer (js/clearTimeout arm-timer))
     (when scroll-handler
       (.removeEventListener js/window "touchmove" scroll-handler true))
-    (reset! !long-press-state {:timer nil :fired? false :start-pos nil :scroll-handler nil})))
+    (when (= (:owner @!swipe-drag-data) :touch-drag)
+      (swap! !swipe-drag-data assoc :owner nil))
+    (reset! !long-press-state
+            {:timer                nil
+             :arm-timer            nil
+             :touch-active?        false
+             :armed?               false
+             :dragging?            false
+             :fired?               false
+             :started-at           nil
+             :start-pos            nil
+             :target-el            nil
+             :scroll-handler       nil
+             :last-touch-at        (or last-touch-at 0)
+             :suppress-click-until (or suppress-click-until 0)})))
 
-(defn long-press-props [action-fn]
-  {:on-context-menu (fn [e]
-                      (try
-                        (.stopPropagation e)
-                        (.preventDefault e)
-                        (when (and action-fn (not (:fired? @!long-press-state)))
-                          (action-fn (.-clientX e) (.-clientY e)))
-                        (clear-long-press!)
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-context-menu. action-fn:" action-fn)
-                          (throw err))))
+(defn long-press-props
+  ([action-fn]
+   (long-press-props action-fn nil))
+  ([action-fn drag-opts]
+   {:on-click-capture
+    (fn [e]
+      (when (< (js/Date.now) (:suppress-click-until @!long-press-state 0))
+        (.stopPropagation e)
+        (.preventDefault e)))
 
-   :on-touch-start  (fn [e]
-                      (try
-                        (clear-long-press!)
-                        (let [touch (aget (.-touches e) 0)
-                              mx    (.-clientX touch)
-                              my    (.-clientY touch)
-                              handler (fn [ev] (.preventDefault ev))
-                              timer  (start-long-press! handler !long-press-state action-fn mx my)]
-                          (swap! !long-press-state assoc
-                                 :start-pos {:x mx :y my}
-                                 :timer timer))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-start. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-context-menu
+    (fn [e]
+      (try
+        (.stopPropagation e)
+        (.preventDefault e)
+        (let [st     @!long-press-state
+              now    (js/Date.now)
+              touch? (or (:touch-active? st)
+                         (< (- now (:last-touch-at st 0)) 750))]
+          (when-not touch?
+            (when (and action-fn (not (:fired? st)))
+              (action-fn (.-clientX e) (.-clientY e)))
+            (clear-long-press!)))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-context-menu. action-fn:" action-fn)
+          (throw err))))
 
-   :on-touch-move   (fn [e]
-                      (try
-                        (let [{:keys [timer start-pos fired?]} @!long-press-state]
-                          (when (and timer (not fired?))
-                            (let [touch (aget (.-touches e) 0)
-                                  mx    (.-clientX touch)
-                                  my    (.-clientY touch)
-                                  {:keys [x y]} start-pos
-                                  dx    (- mx x)
-                                  dy    (- my y)
-                                  dist-sq (+ (* dx dx) (* dy dy))]
-                              (when (> dist-sq 100)
-                                (clear-long-press!)))))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-move. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-touch-start
+    (fn [e]
+      (try
+        (clear-long-press!)
+        (when-let [touch (aget (.-touches e) 0)]
+          (let [mx        (.-clientX touch)
+                my        (.-clientY touch)
+                target-el (.-currentTarget e)
+                now       (js/Date.now)
+                handler   (fn [ev] (.preventDefault ev))]
+            (if drag-opts
+              (let [arm-timer (start-drag-arm! handler !long-press-state drag-opts mx my target-el)]
+                (swap! !long-press-state assoc
+                       :touch-active?  true
+                       :last-touch-at  now
+                       :started-at     now
+                       :start-pos      {:x mx :y my}
+                       :target-el      target-el
+                       :arm-timer      arm-timer
+                       :timer          nil))
+              (let [timer (start-long-press! handler !long-press-state action-fn mx my 500)]
+                (swap! !long-press-state assoc
+                       :touch-active?  true
+                       :last-touch-at  now
+                       :started-at     now
+                       :start-pos      {:x mx :y my}
+                       :target-el      target-el
+                       :timer          timer)))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-start. !long-press-state:" !long-press-state)
+          (throw err))))
 
-   :on-touch-end    (fn [e]
-                      (try
-                        (let [{:keys [fired?]} @!long-press-state]
-                          (clear-long-press!)
-                          (when fired?
-                            (.stopPropagation e)
-                            (.preventDefault e)))
-                        (catch :default err
-                          (js/console.error "[LongPress Debug] Crash in on-touch-end. !long-press-state:" !long-press-state)
-                          (throw err))))
+    :on-touch-move
+    (fn [e]
+      (try
+        (when-let [touch (aget (.-touches e) 0)]
+          (swap! !long-press-state assoc :last-touch-at (js/Date.now))
+          (let [mx    (.-clientX touch)
+                my    (.-clientY touch)
+                state @!long-press-state
+                {:keys [timer arm-timer start-pos armed? dragging? fired? target-el]} state]
+            (cond
+              dragging?
+              (do
+                (.stopPropagation e)
+                (when-let [f (:on-drag-move drag-opts)]
+                  (f mx my)))
 
-   :on-touch-cancel (fn [_] (clear-long-press!))})
+              (and drag-opts armed? start-pos)
+              (let [{:keys [x y]} start-pos
+                    dx            (- mx x)
+                    dy            (- my y)
+                    dist-sq       (+ (* dx dx) (* dy dy))]
+                (when (> dist-sq 64)
+                  (swap! !swipe-drag-data assoc :owner :touch-drag)
+                  (swap! !long-press-state assoc :dragging? true)
+                  (.stopPropagation e)
+                  (when-let [f (:on-drag-start drag-opts)]
+                    (f x y target-el))
+                  (when-let [f (:on-drag-move drag-opts)]
+                    (f mx my))))
+
+              (and (or timer arm-timer) (not fired?) start-pos)
+              (let [{:keys [x y]} start-pos
+                    dx            (- mx x)
+                    dy            (- my y)
+                    dist-sq       (+ (* dx dx) (* dy dy))]
+                (when (> dist-sq 100)
+                  (clear-long-press!))))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-move. !long-press-state:" !long-press-state)
+          (throw err))))
+
+    :on-touch-end
+    (fn [e]
+      (try
+        (let [now        (js/Date.now)
+              state      @!long-press-state
+              {:keys [armed? dragging? fired? start-pos started-at]} state
+              end-touch  (some-> (.-changedTouches e) (aget 0))
+              ex         (if end-touch (.-clientX end-touch) (:x start-pos 0))
+              ey         (if end-touch (.-clientY end-touch) (:y start-pos 0))
+              elapsed    (- now (or started-at 0))
+              cancelled? (= (.-type e) "touchcancel")]
+          (swap! !long-press-state assoc :last-touch-at now)
+          (clear-long-press!)
+          (cond
+            dragging?
+            (do
+              (suppress-next-click!)
+              (.stopPropagation e)
+              (.preventDefault e)
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey cancelled?)))
+
+            fired?
+            (do
+              (suppress-next-click!)
+              (.stopPropagation e)
+              (.preventDefault e)
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey true)))
+
+            armed?
+            (do
+              (when-let [f (:on-drag-end drag-opts)]
+                (f ex ey true))
+              (when (and (not cancelled?) (>= elapsed 450) action-fn start-pos)
+                (suppress-next-click!)
+                (.stopPropagation e)
+                (.preventDefault e)
+                (action-fn (:x start-pos) (:y start-pos))))))
+        (catch :default err
+          (js/console.error "[LongPress Debug] Crash in on-touch-end. !long-press-state:" !long-press-state)
+          (throw err))))
+
+    :on-touch-cancel
+    (fn [_]
+      (let [{:keys [armed? dragging? start-pos]} @!long-press-state]
+        (swap! !long-press-state assoc :last-touch-at (js/Date.now))
+        (clear-long-press!)
+        (when (or armed? dragging?)
+          (when-let [f (:on-drag-end drag-opts)]
+            (f (:x start-pos 0) (:y start-pos 0) true)))))}))
 
 (defonce !redraw-timer (atom nil))
 
@@ -322,18 +530,6 @@
 (def avatar-colors
   ["#5865f2" "#3ba55c" "#faa61a" "#ed4245" "#eb459e" "#9b59b6"])
 
-(defn get-avatar-color [id]
-  (if-not id
-    (first avatar-colors)
-    (let [hash (reduce #(+ %1 (.charCodeAt %2 0)) 0 (str id))]
-      (nth avatar-colors (mod hash (count avatar-colors))))))
-
-;; Hacky fix, but I need to clean the 'shape' up anyway haha
-(defn kname [arg]
-  (name arg))
-
-(defonce !broken-urls (r/atom #{}))
-
 (defn get-avatar-color
   ([id]
    (if-not id
@@ -343,29 +539,240 @@
   ([id fallback]
    (get-avatar-color (or id fallback))))
 
-(defn avatar [{:keys [id name url size status shape] :as props :or {size 32 shape :circle}}]
-  (let [url-str     (when url (str url))
-        broken?     (and url-str (contains? @!broken-urls url-str))
-        show-image? (and url-str (not (str/blank? url-str)) (not broken?))
-        len         (count name)
-        target      (if (#{:space :squircle :square} shape) 2 1)
-        initials    (if (pos? len) (subs name 0 (min len target)) "?")
-        bg-color    (if (= shape :none) "transparent" (get-avatar-color id name))
-        local-url?  (and url-str (or (str/starts-with? url-str "blob:")
-                                     (str/starts-with? url-str "data:")))
-        thumb-size  (if (<= size 48) 96 256)
-        dom-props   (dissoc props :id :name :url :size :status :shape)]
+(defn kname [arg]
+  (name arg))
+
+(defn normalize-presence [raw]
+  (when raw
+    (case (str/lower-case (if (keyword? raw) (name raw) (str raw)))
+      ("online" "active")                               :online
+      ("away" "idle" "unavailable")                     :away
+      ("dnd" "do_not_disturb" "do-not-disturb" "busy")  :dnd
+      ("offline" "invisible" "hidden")                  :offline
+      nil)))
+
+(defn presence-label [status]
+  (case (normalize-presence status)
+    :online  "Online"
+    :away    "Away"
+    :dnd     "Do Not Disturb"
+    :offline "Offline"
+    nil))
+
+(re-frame/reg-event-db
+ :presence/sync-batch
+ (fn [db [_ raw-presences]]
+   (let [m         (cond
+                     (map? raw-presences)    raw-presences
+                     (object? raw-presences) (js->clj raw-presences)
+                     :else                   nil)
+         prev-map  (:user-presences db {})
+         next-map  (if (seq m)
+                     (reduce-kv
+                      (fn [acc k v]
+                        (let [uid  (if (keyword? k)
+                                     (subs (str k) 1)
+                                     (str k))
+                              norm (normalize-presence v)]
+                          (if (and (not (str/blank? uid)) norm)
+                            (if (= (get acc uid) norm)
+                              acc
+                              (assoc acc uid norm))
+                            acc)))
+                      prev-map
+                      m)
+                     prev-map)]
+     (if (identical? prev-map next-map)
+       db
+       (assoc db :user-presences next-map)))))
+
+(re-frame/reg-event-db
+ :presence/receive-own-status
+ (fn [db [_ raw-status status-msg]]
+   (let [norm (normalize-presence raw-status)
+         db1  (if (and norm (not= (:own-presence db) norm))
+                (assoc db :own-presence norm)
+                db)]
+     (if (string? status-msg)
+       (assoc db1 :own-status-message status-msg)
+       db1))))
+
+(re-frame/reg-event-fx
+ :presence/hydrate-own-status
+ (fn [{:keys [db]} [_ saved-val]]
+   (let [norm (or (normalize-presence saved-val) :online)
+         msg  (:own-status-message db)]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments (cond-> {:status (name norm)}
+                            (not (str/blank? msg)) (assoc :status-msg msg))}))
+         (catch :default _ nil)))
+     {:db (assoc db :own-presence norm)})))
+
+(re-frame/reg-event-fx
+ :presence/hydrate-own-status-message
+ (fn [{:keys [db]} [_ saved-msg]]
+   (let [msg  (str/trim (str (or saved-msg "")))
+         norm (or (:own-presence db) :online)]
+     (when-not (str/blank? msg)
+       (go
+         (try
+           (<! (mesh/do-with-thread!
+                :engine-pool
+                {:handler   :set-presence
+                 :arguments {:status     (name norm)
+                             :status-msg msg}}))
+           (catch :default _ nil))))
+     {:db (assoc db :own-status-message msg)})))
+
+(re-frame/reg-event-fx
+ :presence/set-own-status
+ (fn [{:keys [db]} [_ status]]
+   (let [norm (or (normalize-presence status) :online)
+         msg  (str/trim (str (or (:own-status-message db) "")))]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments (cond-> {:status (name norm)}
+                            (not (str/blank? msg)) (assoc :status-msg msg))}))
+         (catch :default e
+           (log/warn "Engine does not support :set-presence or failed:" e))))
+     {:db       (assoc db :own-presence norm)
+      :dispatch [:settings/save "user_presence" (name norm)]})))
+
+(re-frame/reg-event-fx
+ :presence/set-own-status-message
+ (fn [{:keys [db]} [_ raw-msg]]
+   (let [msg  (str/trim (str (or raw-msg "")))
+         norm (or (:own-presence db) :online)]
+     (go
+       (try
+         (<! (mesh/do-with-thread!
+              :engine-pool
+              {:handler   :set-presence
+               :arguments {:status     (name norm)
+                           :status-msg msg}}))
+         (catch :default e
+           (log/warn "Engine does not support :set-presence status-msg or failed:" e))))
+     {:db       (assoc db :own-status-message msg)
+      :dispatch [:settings/save "user_status_message" msg]})))
+
+(re-frame/reg-sub
+ :presence/map
+ (fn [db _]
+   (get db :user-presences {})))
+
+(re-frame/reg-sub
+ :presence/own-status
+ (fn [db _]
+   (get db :own-presence :online)))
+
+(re-frame/reg-sub
+ :presence/own-status-message
+ (fn [db _]
+   (get db :own-status-message "")))
+
+(re-frame/reg-sub
+ :presence/user
+ :<- [:presence/map]
+ :<- [:presence/own-status]
+ :<- [:auth/active-user-id]
+ (fn [[p-map own-status my-uid] [_ user-id fallback]]
+   (let [uid (when user-id (str user-id))]
+     (cond
+       (or (nil? uid) (str/blank? uid))
+       nil
+
+       (and my-uid (= uid (str my-uid)))
+       own-status
+
+       :else
+       (or (get p-map uid)
+           (normalize-presence fallback))))))
+
+(defonce !broken-urls (r/atom #{}))
+
+(defn- render-mini-member-avatar [member sub-size]
+  (let [m-id       (or (:id member) (:user-id member))
+        m-name     (str (or (:name member) (:display-name member) "?"))
+        m-url      (some-> (or (:url member) (:avatar-url member)) str)
+        broken?    (and m-url (contains? @!broken-urls m-url))
+        show-img?  (and m-url (not (str/blank? m-url)) (not broken?))
+        local-url? (and m-url (local-media-url? m-url))
+        initial    (if (pos? (count m-name)) (subs m-name 0 1) "?")]
+    [:div.avatar-group-member
+     {:style {:width            sub-size
+              :height           sub-size
+              :background-color (get-avatar-color m-id m-name)}}
+     (if show-img?
+       (if local-url?
+         [:img.avatar-img-layer
+          {:src      m-url
+           :alt      ""
+           :on-error #(swap! !broken-urls conj m-url)}]
+         [media
+          {:uri      m-url
+           :width    64
+           :height   64
+           :method   "crop"
+           :class    "avatar-img-layer"
+           :alt      ""
+           :on-error #(swap! !broken-urls conj m-url)}])
+       [:span.avatar-text
+        {:style {:font-size (str (max 8 (js/Math.round (/ sub-size 2.1))) "px")}}
+        initial])]))
+
+(defn avatar
+  [{:keys [id name url size status shape is-group? group-members]
+    :as   props
+    :or   {size 32 shape :circle}}]
+  (let [url-str       (when url (str url))
+        broken?       (and url-str (contains? @!broken-urls url-str))
+        show-image?   (and url-str (not (str/blank? url-str)) (not broken?))
+        group-stack?  (and (not show-image?) is-group? (seq group-members))
+        len           (count name)
+        target        (if (#{:space :squircle :square} shape) 2 1)
+        initials      (if (pos? len) (subs name 0 (min len target)) "?")
+        bg-color      (cond
+                        (= shape :none) "transparent"
+                        group-stack?    "#2b2d31"
+                        :else           (get-avatar-color id name))
+        local-url?    (and url-str (local-media-url? url-str))
+        thumb-size    (if (<= size 48) 96 256)
+        sub-size      (max 14 (js/Math.round (* size 0.64)))
+        [m1 m2]       (take 2 group-members)
+        dom-props     (dissoc props :id :name :url :size :status :shape
+                              :is-group? :group-members)]
     (into [:div.avatar-wrapper
            (merge dom-props
-                  {:class (kname shape)
+                  {:class [(kname shape) (when group-stack? "is-group-avatar")]
                    :style (merge (:style dom-props) {:width size :height size})})]
-          [(when-not show-image?
+          [(when (and (not show-image?) (not group-stack?))
              [:div.avatar-placeholder-layer
               {:style {:background-color bg-color}}
               (when-not (= shape :none)
                 [:span.avatar-text
                  {:style {:font-size (str (/ size (if (= shape :circle) 2.2 2.5)) "px")}}
                  initials])])
+
+           (when group-stack?
+             [:div.avatar-group-stack
+              {:style {:background-color bg-color}}
+              (when m1
+                [:div.avatar-group-slot.slot-first
+                 [render-mini-member-avatar m1 sub-size]])
+              (if m2
+                [:div.avatar-group-slot.slot-second
+                 [render-mini-member-avatar m2 sub-size]]
+                [:div.avatar-group-slot.slot-second
+                 [render-mini-member-avatar {:id   (str id "-group")
+                                             :name "+"}
+                  sub-size]])])
 
            (when show-image?
              (if local-url?
@@ -382,96 +789,403 @@
                  :alt      ""
                  :on-error #(swap! !broken-urls conj url-str)}]))
 
-           (when status
-             [:div.avatar-status {:class (kname status)}])])))
+           (when (and status (not is-group?))
+             (when-let [norm-status (normalize-presence status)]
+               (let [size-cls (cond
+                                (<= size 26) "status-sm"
+                                (<= size 44) "status-md"
+                                :else        "status-lg")]
+                 [:div.avatar-status
+                  {:class [(kname norm-status) size-cls]
+                   :title (presence-label norm-status)}])))])))
 
+(defonce !swipe-drag-data
+  (atom {:start-x         nil
+         :start-y         nil
+         :owner           nil
+         :action          nil
+         :fg-node         nil
+         :bg-node         nil
+         :reply-node      nil
+         :edit-node       nil
+         :sidebar-start-x nil
+         :sidebar-start-y nil
+         :sidebar-dx      0
+         :sidebar-target  nil}))
 
-(defonce !swipe-drag-data (atom {:start-x nil :action nil :fg-node nil :bg-node nil :reply-node nil :edit-node nil}))
+(defmulti handle-swipe!
+  (fn [kind _phase _ctx] kind))
 
+(defmethod handle-swipe! :message
+  [_ phase {:keys [e can-edit? edit-threshold reply-threshold on-action]}]
+  (case phase
+    :down
+    (when (and (or (nil? (.-button e)) (zero? (.-button e)))
+               (not (some-> (.-target e) (.closest "input, textarea, [contenteditable]"))))
+      (swap! !swipe-drag-data assoc
+             :start-x    (.-clientX e)
+             :start-y    (.-clientY e)
+             :owner      nil
+             :action     nil
+             :fg-node    (.-currentTarget e)
+             :bg-node    nil
+             :reply-node nil
+             :edit-node  nil))
+
+    :move
+    (let [{:keys [start-x start-y owner fg-node reply-node edit-node]} @!swipe-drag-data]
+      (when (and start-x fg-node (or (nil? owner) (= owner :message)))
+        (let [dx        (- (.-clientX e) start-x)
+              dy        (- (.-clientY e) (or start-y 0))
+              pull-dist (- dx)
+              claimed?  (or (= owner :message)
+                            (and (> pull-dist 6)
+                                 (> pull-dist (js/Math.abs dy))))]
+          (when claimed?
+            (let [first-claim? (nil? owner)
+                  wrapper      (when first-claim? (.-parentNode fg-node))
+                  bg           (if first-claim?
+                                 (when wrapper (.querySelector wrapper ".swipe-action-bg"))
+                                 (:bg-node @!swipe-drag-data))
+                  reply-el     (if first-claim?
+                                 (when bg (.querySelector bg ".reply-action"))
+                                 reply-node)
+                  edit-el      (if first-claim?
+                                 (when bg (.querySelector bg ".edit-action"))
+                                 edit-node)
+                  bounded-dx   (max 0 (min pull-dist 180))
+                  new-action   (cond
+                                 (and can-edit? (> bounded-dx edit-threshold)) :edit
+                                 (> bounded-dx reply-threshold)                :reply
+                                 :else                                         nil)]
+              (when first-claim?
+                (try
+                  (.setPointerCapture fg-node (.-pointerId e))
+                  (catch :default _ nil))
+                (set! (.-transition (.-style fg-node)) "none")
+                (set! (.-userSelect (.-style fg-node)) "none")
+                (when bg (set! (.-opacity (.-style bg)) "1")))
+              (swap! !swipe-drag-data assoc
+                     :owner      :message
+                     :action     new-action
+                     :bg-node    bg
+                     :reply-node reply-el
+                     :edit-node  edit-el)
+              (set! (.-transform (.-style fg-node)) (str "translateX(-" bounded-dx "px)"))
+              (when reply-el
+                (set! (.-display (.-style reply-el)) (if (= new-action :reply) "flex" "none")))
+              (when edit-el
+                (set! (.-display (.-style edit-el)) (if (= new-action :edit) "flex" "none"))))))))
+
+    :up
+    (let [{:keys [start-x owner action fg-node bg-node]} @!swipe-drag-data
+          cancelled? (= (.-type e) "pointercancel")]
+      (when start-x
+        (when (= owner :message)
+          (try
+            (.releasePointerCapture fg-node (.-pointerId e))
+            (catch :default _ nil))
+          (when (and (not cancelled?) action (fn? on-action))
+            (on-action action))
+          (when fg-node
+            (set! (.-transform (.-style fg-node)) "translateX(0px)")
+            (set! (.-transition (.-style fg-node)) "transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)")
+            (set! (.-userSelect (.-style fg-node)) "auto"))
+          (when bg-node
+            (set! (.-opacity (.-style bg-node)) "0")))
+        (swap! !swipe-drag-data assoc
+               :start-x    nil
+               :start-y    nil
+               :owner      (if (= owner :message) :consumed owner)
+               :action     nil
+               :fg-node    nil
+               :bg-node    nil
+               :reply-node nil
+               :edit-node  nil)))))
+
+(defmethod handle-swipe! :sidebar
+  [_ phase {:keys [e sidebar-open? on-toggle]}]
+  (case phase
+    :down
+    (when (or (nil? (.-button e)) (zero? (.-button e)))
+      (swap! !swipe-drag-data assoc
+             :owner           nil
+             :sidebar-start-x (.-clientX e)
+             :sidebar-start-y (.-clientY e)
+             :sidebar-dx      0
+             :sidebar-target  (.-currentTarget e)))
+
+    :move
+    (let [{:keys [owner sidebar-start-x sidebar-start-y sidebar-target]} @!swipe-drag-data]
+      (when (and sidebar-start-x (or (nil? owner) (= owner :sidebar)))
+        (let [dx       (- (.-clientX e) sidebar-start-x)
+              dy       (- (.-clientY e) (or sidebar-start-y 0))
+              claimed? (or (= owner :sidebar)
+                           (and (> (js/Math.abs dx) (* 1.5 (js/Math.abs dy)))
+                                (if sidebar-open?
+                                  (< dx -10)
+                                  (> dx 10))))]
+          (when claimed?
+            (when (nil? owner)
+              (when sidebar-target
+                (try
+                  (.setPointerCapture sidebar-target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner :sidebar))
+            (swap! !swipe-drag-data assoc :sidebar-dx dx)))))
+
+    :up
+    (let [{:keys [owner sidebar-start-x sidebar-dx sidebar-target]} @!swipe-drag-data
+          cancelled? (= (.-type e) "pointercancel")]
+      (when sidebar-start-x
+        (when (= owner :sidebar)
+          (when sidebar-target
+            (try
+              (.releasePointerCapture sidebar-target (.-pointerId e))
+              (catch :default _ nil)))
+          (when (and (not cancelled?) (fn? on-toggle))
+            (cond
+              (and (not sidebar-open?) (> sidebar-dx 60))
+              (on-toggle true)
+
+              (and sidebar-open? (< sidebar-dx -60))
+              (on-toggle false)))))
+      (swap! !swipe-drag-data assoc
+             :owner           nil
+             :sidebar-start-x nil
+             :sidebar-start-y nil
+             :sidebar-dx      0
+             :sidebar-target  nil))))
+
+(defmethod handle-swipe! :bottom-sheet
+  [_ phase {:keys [e !drag-state ignore-selector min-dy max-dy
+                   dismiss-threshold expand-threshold collapse-max-dy
+                   expanded? on-dismiss on-expand on-collapse]}]
+  (case phase
+    :down
+    (when (and (or (nil? (.-button e)) (zero? (.-button e)))
+               (not (and ignore-selector
+                         (some-> (.-target e) (.closest ignore-selector)))))
+      (let [x (.-clientX e)
+            y (.-clientY e)]
+        (when !drag-state
+          (reset! !drag-state {:start-x   x
+                               :start-y   y
+                               :dy        0
+                               :dragging? false
+                               :target    (.-currentTarget e)}))))
+
+    :move
+    (let [{:keys [start-x start-y target]} (when !drag-state @!drag-state)
+          owner                            (:owner @!swipe-drag-data)]
+      (cond
+        (and owner (not= owner :bottom-sheet))
+        (when !drag-state
+          (reset! !drag-state {:start-x nil :start-y nil :dy 0 :dragging? false :target nil}))
+
+        start-y
+        (let [dx       (- (.-clientX e) (or start-x 0))
+              dy       (- (.-clientY e) start-y)
+              lo       (or min-dy 0)
+              hi       (or max-dy 600)
+              can-dir? (or (and (pos? dy) (pos? hi))
+                           (and (neg? dy) (neg? lo)))
+              claimed? (or (= owner :bottom-sheet)
+                           (and can-dir?
+                                (> (js/Math.abs dy) 6)
+                                (> (js/Math.abs dy) (js/Math.abs dx))))]
+          (when claimed?
+            (.stopPropagation e)
+            (when (nil? owner)
+              (when target
+                (try
+                  (.setPointerCapture target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner :bottom-sheet))
+            (let [clamped (max lo (min hi dy))]
+              (when !drag-state
+                (swap! !drag-state assoc :dy clamped :dragging? true)))))))
+
+    :up
+    (let [{:keys [start-y dy target]} (when !drag-state @!drag-state)
+          owner                       (:owner @!swipe-drag-data)
+          cancelled?                  (= (.-type e) "pointercancel")
+          dismiss-th                  (or dismiss-threshold 90)
+          expand-th                   (or expand-threshold 60)
+          collapse-hi                 (or collapse-max-dy 220)]
+      (when start-y
+        (when (= owner :bottom-sheet)
+          (when target
+            (try
+              (.releasePointerCapture target (.-pointerId e))
+              (catch :default _ nil)))
+          (when-not cancelled?
+            (cond
+              (and (not expanded?) (fn? on-expand) (< dy (- expand-th)))
+              (on-expand)
+
+              (and expanded? (fn? on-collapse) (> dy dismiss-th) (< dy collapse-hi))
+              (on-collapse)
+
+              (and (fn? on-dismiss) (> dy dismiss-th))
+              (on-dismiss)))))
+      (when !drag-state
+        (reset! !drag-state {:start-x nil :start-y nil :dy 0 :dragging? false :target nil}))
+      (when (= (:owner @!swipe-drag-data) :bottom-sheet)
+        (swap! !swipe-drag-data assoc :owner nil)))))
+
+(defmethod handle-swipe! :voice-hold
+  [_ phase {:keys [e pointer-id start-x start-y lock-threshold cancel-threshold
+                   on-move on-lock on-cancel on-release]}]
+  (let [match-ptr? (fn [ev]
+                     (or (nil? pointer-id)
+                         (nil? ev)
+                         (= (.-pointerId ev) pointer-id)))]
+    (case phase
+      :start
+      (swap! !swipe-drag-data assoc
+             :owner           :voice-hold
+             :sidebar-start-x nil
+             :sidebar-start-y nil
+             :sidebar-dx      0)
+
+      :move
+      (when (and (= (:owner @!swipe-drag-data) :voice-hold)
+                 (match-ptr? e))
+        (let [dx (max 0 (- start-x (.-clientX e)))
+              dy (max 0 (- start-y (.-clientY e)))]
+          (when (fn? on-move) (on-move dx dy))
+          (cond
+            (and lock-threshold (>= dy lock-threshold) (>= dy dx))
+            (do
+              (swap! !swipe-drag-data assoc :owner nil)
+              (when (fn? on-lock) (on-lock)))
+
+            (and cancel-threshold (>= dx cancel-threshold) (> dx dy))
+            (do
+              (swap! !swipe-drag-data assoc :owner nil)
+              (when (fn? on-cancel) (on-cancel))))))
+
+      :up
+      (when (and (= (:owner @!swipe-drag-data) :voice-hold)
+                 (match-ptr? e))
+        (let [cancelled? (= (.-type e) "pointercancel")]
+          (swap! !swipe-drag-data assoc :owner nil)
+          (if cancelled?
+            (when (fn? on-cancel) (on-cancel))
+            (when (fn? on-release) (on-release)))))
+
+      :cleanup
+      (when (= (:owner @!swipe-drag-data) :voice-hold)
+        (swap! !swipe-drag-data assoc :owner nil)))))
+
+(defn attach-window-swipe!
+  "Registers window-level pointer listeners for a swipe gesture kind (such as
+   `:voice-hold`) that claims `:owner` in `!swipe-drag-data` immediately so
+   sidebar/message gestures cannot collide. Returns an idempotent cleanup fn."
+  [kind ctx]
+  (let [!active? (atom true)
+        on-move  (fn [ev]
+                   (when @!active?
+                     (handle-swipe! kind :move (assoc ctx :e ev))))
+        on-up    (fn [ev]
+                   (when @!active?
+                     (handle-swipe! kind :up (assoc ctx :e ev))))]
+    (handle-swipe! kind :start ctx)
+    (when (exists? js/window)
+      (.addEventListener js/window "pointermove" on-move #js {:passive true})
+      (.addEventListener js/window "pointerup" on-up)
+      (.addEventListener js/window "pointercancel" on-up))
+    (fn []
+      (when (compare-and-set! !active? true false)
+        (when (exists? js/window)
+          (.removeEventListener js/window "pointermove" on-move)
+          (.removeEventListener js/window "pointerup" on-up)
+          (.removeEventListener js/window "pointercancel" on-up))
+        (handle-swipe! kind :cleanup ctx)))))
+
+(defmethod handle-swipe! :default
+  [kind phase {:keys [e !drag-state on-start on-move on-end can-claim?]}]
+  (case phase
+    :down
+    (when (or (nil? (.-button e)) (zero? (.-button e)))
+      (when-not (:fg-node @!swipe-drag-data)
+        (swap! !swipe-drag-data assoc :owner nil))
+      (let [x (.-clientX e)
+            y (.-clientY e)]
+        (when !drag-state
+          (reset! !drag-state {:start-x x :start-y y :dx 0 :target (.-currentTarget e)}))
+        (when (fn? on-start) (on-start x))))
+
+    :move
+    (let [{:keys [start-x start-y target]} (when !drag-state @!drag-state)
+          owner                            (:owner @!swipe-drag-data)]
+      (cond
+        (and owner (not= owner kind))
+        (when !drag-state
+          (reset! !drag-state {:start-x nil :start-y nil :dx 0 :target nil}))
+
+        start-x
+        (let [dx       (- (.-clientX e) start-x)
+              dy       (- (.-clientY e) (or start-y 0))
+              claimed? (or (= owner kind)
+                           (if (fn? can-claim?)
+                             (can-claim? dx dy)
+                             (and (> (js/Math.abs dx) 6)
+                                  (> (js/Math.abs dx) (js/Math.abs dy)))))]
+          (when claimed?
+            (when (nil? owner)
+              (when target
+                (try
+                  (.setPointerCapture target (.-pointerId e))
+                  (catch :default _ nil)))
+              (swap! !swipe-drag-data assoc :owner kind))
+            (when !drag-state
+              (swap! !drag-state assoc :dx dx))
+            (when (fn? on-move) (on-move dx))))))
+
+    :up
+    (let [{:keys [start-x dx target]} (when !drag-state @!drag-state)
+          owner                       (:owner @!swipe-drag-data)
+          cancelled?                  (= (.-type e) "pointercancel")]
+      (when start-x
+        (when (= owner kind)
+          (when target
+            (try
+              (.releasePointerCapture target (.-pointerId e))
+              (catch :default _ nil)))
+          (when (and (not cancelled?) (fn? on-end))
+            (on-end dx))))
+      (when !drag-state
+        (reset! !drag-state {:start-x nil :start-y nil :dx 0 :target nil}))
+      (swap! !swipe-drag-data assoc :owner nil))))
 
 (defn make-swipe-handlers
-  "Abstracts pointer event tracking for horizontal swipes.
-   Safe for main-thread Reagent components.
-   !drag-state should be an atom containing {:start-x nil :dx 0}."
-  [!drag-state {:keys [on-start on-move on-end]}]
-  (let [handle-ptr-down
-        (fn [e]
-          (when (= (.-button e) 0)
-            (.setPointerCapture (.-target e) (.-pointerId e))
-            (let [x (.-clientX e)]
-              (reset! !drag-state {:start-x x :dx 0})
-              (when (fn? on-start) (on-start x)))))
+  [id-or-atom opts]
+  (let [id  (if (keyword? id-or-atom)
+              id-or-atom
+              (or (:id opts) :generic))
+        ctx (if (keyword? id-or-atom)
+              opts
+              (assoc opts :!drag-state id-or-atom))]
+    {:on-pointer-down   #(handle-swipe! id :down (assoc ctx :e %))
+     :on-pointer-move   #(handle-swipe! id :move (assoc ctx :e %))
+     :on-pointer-up     #(handle-swipe! id :up (assoc ctx :e %))
+     :on-pointer-cancel #(handle-swipe! id :up (assoc ctx :e %))}))
 
-        handle-ptr-move
-        (fn [e]
-          (let [{:keys [start-x]} @!drag-state]
-            (when start-x
-              (let [dx (- (.-clientX e) start-x)]
-                (swap! !drag-state assoc :dx dx)
-                (when (fn? on-move) (on-move dx))))))
-
-        handle-ptr-up
-        (fn [e]
-          (let [{:keys [start-x dx]} @!drag-state]
-            (when start-x
-              (.releasePointerCapture (.-target e) (.-pointerId e))
-              (when (fn? on-end) (on-end dx))
-              (reset! !drag-state {:start-x nil :dx 0}))))]
-
-    {:on-pointer-down   handle-ptr-down
-     :on-pointer-move   handle-ptr-move
-     :on-pointer-up     handle-ptr-up
-     :on-pointer-cancel handle-ptr-up}))
 
 (defn handle-swipe-down! [e]
-  (when (= (.-button e) 0)
-    (let [fg         (.-currentTarget e)
-          wrapper    (.-parentNode fg)
-          bg         (.querySelector wrapper ".swipe-action-bg")
-          reply-el   (.querySelector bg ".reply-action")
-          edit-el    (.querySelector bg ".edit-action")]
-      (.setPointerCapture fg (.-pointerId e))
-      (set! (.-transition (.-style fg)) "none")
-      (set! (.-userSelect (.-style fg)) "none")
-      (when bg (set! (.-opacity (.-style bg)) "1"))
-      (reset! !swipe-drag-data {:start-x (.-clientX e)
-                                :action nil
-                                :fg-node fg
-                                :bg-node bg
-                                :reply-node reply-el
-                                :edit-node edit-el}))))
+  (handle-swipe! :message :down {:e e}))
 
 (defn handle-swipe-move! [e can-edit? edit-threshold reply-threshold]
-  (let [{:keys [start-x fg-node bg-node reply-node edit-node]} @!swipe-drag-data]
-    (when start-x
-      (let [dx         (- (.-clientX e) start-x)
-            pull-dist  (- dx)
-            bounded-dx (max 0 (min pull-dist 180))
-            new-action (cond
-                         (and can-edit? (> bounded-dx edit-threshold)) :edit
-                         (> bounded-dx reply-threshold)                :reply
-                         :else                                         nil)]
-        (swap! !swipe-drag-data assoc :action new-action)
-        (when fg-node
-          (set! (.-transform (.-style fg-node)) (str "translateX(-" bounded-dx "px)")))
-        (when reply-node
-          (set! (.-display (.-style reply-node)) (if (= new-action :reply) "flex" "none")))
-        (when edit-node
-          (set! (.-display (.-style edit-node)) (if (= new-action :edit) "flex" "none")))))))
+  (handle-swipe! :message :move {:e               e
+                                 :can-edit?       can-edit?
+                                 :edit-threshold  edit-threshold
+                                 :reply-threshold reply-threshold}))
 
 (defn handle-swipe-up! [e on-action]
-  (let [{:keys [start-x action fg-node bg-node]} @!swipe-drag-data]
-    (when start-x
-      (.releasePointerCapture (.-target e) (.-pointerId e))
-      (when (and action (fn? on-action))
-        (on-action action))
-      (reset! !swipe-drag-data {:start-x nil :action nil :fg-node nil :bg-node nil :reply-node nil :edit-node nil})
-      (when fg-node
-        (set! (.-transform (.-style fg-node)) "translateX(0px)")
-        (set! (.-transition (.-style fg-node)) "transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)")
-        (set! (.-userSelect (.-style fg-node)) "auto"))
-      (when bg-node
-        (set! (.-opacity (.-style bg-node)) "0")))))
+  (handle-swipe! :message :up {:e e :on-action on-action}))
+
 
 (defn swipe-to-action-wrapper [{:keys [can-edit? on-action wrapper-props enabled?]} & children]
   (if-not enabled?
