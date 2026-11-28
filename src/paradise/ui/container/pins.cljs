@@ -7,7 +7,7 @@
    [cljs.core.async :refer [go <!]]
    [reagent.core :as r]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.container.reusable :refer [message-preview-item]]))
+   [paradise.ui.container.reusable :refer [message-preview-list]]))
 
 
 
@@ -45,14 +45,9 @@
         pins        @(re-frame/subscribe [:room/pinned-events active-room])
         tr          @(re-frame/subscribe [:i18n/tr])]
     [:div.sidebar-pins-container
-     {:style {:display "flex" :flex-direction "column" :height "100%" :padding "16px"}}
      (if (empty? pins)
        [:div.empty-pins
-        {:style {:text-align "center" :margin-top "40px" :opacity 0.5}}
-        [icons/pins {:width "48px" :height "48px"}]
+        [:div.empty-pins-icon
+         [icons/pins {:width "28px" :height "28px"}]]
         [:p (tr [:container.pins/no-pins] "No pinned messages")]]
-       [:div.pins-list
-        {:style {:flex 1 :overflow-y "auto"}}
-        (for [event pins]
-          ^{:key (:id event)}
-          [message-preview-item active-room event])])]))
+       [message-preview-list active-room pins {:class "pins-list" :sort-by-ts-desc? true}])]))
