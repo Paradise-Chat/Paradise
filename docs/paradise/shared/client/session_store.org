@@ -14,8 +14,8 @@ File with methods to help us store our client configurations and such.
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
             [goog.object :as gobj]
-            [promesa.core :as p]
-            [taoensso.timbre :as log]))
+            [paradise.shared.client.idb :as idb]
+            [promesa.core :as p]))
 #+end_src
 
 **** Constants and Utilities
@@ -196,57 +196,105 @@ OPFS is unideal for the main thread to use and we don't really
 *need* it.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
+(def ^:private settings-db-name "paradise-settings")
+(def ^:private settings-store-name "settings")
+
 (defn- open-settings-db []
-  (p/create
-   (fn [resolve-fn _]
-     (let [req (.open js/indexedDB "paradise-settings" 1)]
-       (set! (.-onupgradeneeded req)
-             #(let [db (.. % -target -result)]
-                (when-not (.contains (.-objectStoreNames db) "settings")
-                  (.createObjectStore db "settings"))))
-       (set! (.-onsuccess req) #(resolve-fn (.. % -target -result)))
-       (set! (.-onerror req) #(resolve-fn nil))))))
+  (idb/open-db
+   settings-db-name
+   1
+   (fn [db _]
+     (when-not (.contains (.-objectStoreNames db) settings-store-name)
+       (.createObjectStore db settings-store-name)))))
+
+(defn- parse-stored-setting [key raw-val]
+  (cond
+    (nil? raw-val) nil
+    (string? raw-val)
+    (let [trimmed    (str/trim raw-val)
+          first-char (when (pos? (count trimmed)) (subs trimmed 0 1))]
+      (cond
+        (= trimmed "true")  true
+        (= trimmed "false") false
+        (= trimmed "nil")   nil
+
+        (re-matches #"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$" trimmed)
+        (try
+          (reader/read-string trimmed)
+          (catch :default _ raw-val))
+
+        (#{"{" "[" "(" "#" ":" "\""} first-char)
+        (try
+          (if (str/starts-with? trimmed "#js ")
+            (reader/read-string (str/replace trimmed #"#js\s+(?=[\[\{])" ""))
+            (reader/read-string raw-val))
+          (catch :default e
+            (try
+              (if (str/includes? raw-val "#js ")
+                (reader/read-string (str/replace raw-val #"#js\s+(?=[\[\{])" ""))
+                (do
+                  (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
+                  raw-val))
+              (catch :default _
+                (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
+                raw-val))))
+
+        :else raw-val))
+    :else
+    (js->clj raw-val :keywordize-keys true)))
+
+(defn- normalize-setting-for-storage [value]
+  (cond
+    (array? value)
+    (js->clj value :keywordize-keys true)
+
+    (and (object? value) (= (type value) js/Object))
+    (js->clj value :keywordize-keys true)
+
+    :else
+    value))
 
 (defn get-setting [key]
-  (p/let [db (open-settings-db)]
-    (if-not db
-      (p/resolved nil)
-      (p/create
-       (fn [resolve-fn _]
-         (let [tx    (.transaction db #js ["settings"] "readonly")
-               store (.objectStore tx "settings")
-               req   (.get store key)]
-           (set! (.-onsuccess req)
-                 #(let [raw-val (.-result req)]
-                    (resolve-fn
-                     (cond
-                       (nil? raw-val) nil
-                       (string? raw-val)
-                       (let [first-char (subs raw-val 0 1)]
-                         (if (#{"{" "[" "#" ":" "\""} first-char)
-                           (try
-                             (reader/read-string raw-val)
-                             (catch :default e
-                               (js/console.error "EDN Parse Error for key:" key "val:" raw-val e)
-                               raw-val))
-                           raw-val))
-                       :else
-                       (js->clj raw-val :keywordize-keys true)))))
-           (set! (.-onerror req) #(resolve-fn nil))))))))
+  (p/let [raw (idb/get-record (open-settings-db) settings-store-name key)]
+    (parse-stored-setting key raw)))
 
 (defn set-setting! [key value]
-  (p/let [db (open-settings-db)]
-    (if-not db
-      false
-      (p/create
-       (fn [resolve-fn _]
-         (let [tx      (.transaction db #js ["settings"] "readwrite")
-               store   (.objectStore tx "settings")
-               put-req (if (some? value)
-                         (.put store (pr-str value) key)
-                         (.delete store key))]
-           (set! (.-onsuccess put-req) #(resolve-fn true))
-           (set! (.-onerror put-req) #(resolve-fn false))))))))
+  (if (some? value)
+    (idb/put-record! (open-settings-db)
+                     settings-store-name
+                     (pr-str (normalize-setting-for-storage value))
+                     key)
+    (idb/delete-record! (open-settings-db) settings-store-name key)))
+
+(defn nav-state-key [engine-id user-id]
+  (let [eng (when engine-id (name engine-id))
+        uid (some-> user-id str not-empty)]
+    (when (and eng uid)
+      (str "last_nav_" eng "_" uid))))
+
+(defn save-nav-state! [engine-id user-id {:keys [space-id room-id filter-id]}]
+  (when-let [k (nav-state-key engine-id user-id)]
+    (let [payload {:space-id  (some-> space-id str not-empty)
+                   :room-id   (some-> room-id str not-empty)
+                   :filter-id (or (some-> filter-id str not-empty) "people")}]
+      (set-setting! k payload))))
+
+(defn load-nav-state [engine-id user-id]
+  (let [k   (nav-state-key engine-id user-id)
+        uid (some-> user-id str not-empty)]
+    (p/let [atomic-val (when k (get-setting k))]
+      (if (map? atomic-val)
+        {:space-id  (some-> (:space-id atomic-val) str not-empty)
+         :room-id   (some-> (:room-id atomic-val) str not-empty)
+         :filter-id (or (some-> (:filter-id atomic-val) str not-empty) "people")}
+        (if uid
+          (p/let [[legacy-room legacy-space]
+                  (p/all [(get-setting (str "last_room_" uid))
+                          (get-setting (str "last_space_" uid))])]
+            {:space-id  (some-> legacy-space str not-empty)
+             :room-id   (some-> legacy-room str not-empty)
+             :filter-id "people"})
+          {:space-id nil :room-id nil :filter-id "people"})))))
 #+end_src
 
 
@@ -258,22 +306,8 @@ It wraps the raw IDBRequest in a Promise so we can await its
 completion before clearing the session metadata.
 We standardize on the name prefix closura-store-.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/session_store.cljs
-(defn- delete-db! [db-name]
-  (js/Promise.
-   (fn [resolve-fn _]
-     (try
-       (let [request (.deleteDatabase js/indexedDB db-name)]
-         (set! (.-onsuccess request) #(do (log/info "Destroyed IDB:" db-name) (resolve-fn true)))
-         (set! (.-onerror request) #(do (log/error "Error deleting IDB:" db-name) (resolve-fn false)))
-         (set! (.-onblocked request) #(do (log/warn "BLOCKED deleting IDB:" db-name) (resolve-fn false))))
-       (catch :default e
-         (log/error "Fatal crash attempting to delete IDB:" db-name "Error:" e)
-         (resolve-fn false))))))
-
 (defn- delete-dbs! [db-names]
-  (if (seq db-names)
-    (.allSettled js/Promise (into-array (map delete-db! db-names)))
-    (p/resolved true)))
+  (idb/delete-dbs! db-names))
 #+end_src
 
 
