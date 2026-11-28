@@ -24,6 +24,7 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
    ["@capacitor/core" :refer [Capacitor registerPlugin]]
    [clojure.string :as str]
    [goog.object :as gobj]
+   [paradise.shared.utils.platform :as platform]
    [promesa.core :as p]
    [re-frame.core :as rf]
    [taoensso.timbre :as log]))
@@ -33,7 +34,7 @@ This namespace bridges Paradise's protocol-agnostic call events with the native
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/native.cljs
 (defonce call-plugin
-  (when (and (exists? Capacitor) (.isNativePlatform Capacitor))
+  (when (platform/native-platform?)
     (registerPlugin "ParadiseCall")))
 
 (defonce ^:private !listeners-initialized? (atom false))
