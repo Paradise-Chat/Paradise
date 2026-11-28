@@ -25,13 +25,26 @@ The components for the timeline. Need to move these to the correct spot.
        (tr [:container.timeline/loading])
        (tr [:container.timeline/no-room]))]))
 
-(defn timeline-jump-button [do-jump! focus-mode?]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [:button.jump-to-bottom
-     {:on-click do-jump!}
-     [:span (if focus-mode?
-              (tr [:container.timeline/return-to-live])
-              (tr [:container.timeline/jump-to-bottom]))]]))
+(defn timeline-jump-button
+  ([do-jump! focus-mode?]
+   (timeline-jump-button do-jump! focus-mode? 0))
+  ([do-jump! focus-mode? new-count]
+   (let [tr        @(re-frame/subscribe [:i18n/tr])
+         n         (or new-count 0)
+         has-new?  (and (not focus-mode?) (pos? n))
+         badge-str (when has-new? (if (> n 99) "99+" (str n)))]
+     [:button.jump-to-bottom
+      {:class     (when has-new? "has-new-messages")
+       :aria-live "polite"
+       :on-click  do-jump!}
+      (when has-new?
+        [:span.jump-new-dot {:key n :aria-hidden "true"}])
+      [:span.jump-label
+       (cond
+         focus-mode? (tr [:container.timeline/return-to-live])
+         (= n 1)     (tr [:container.timeline/new-message-one])
+         has-new?    (tr [:container.timeline/new-messages-many] [badge-str])
+         :else       (tr [:container.timeline/jump-to-bottom]))]])))
 
 (defn timeline-loading-overlay []
   [:div.spinner-wrapper
