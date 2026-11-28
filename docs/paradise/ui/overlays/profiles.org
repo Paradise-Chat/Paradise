@@ -297,7 +297,7 @@ aspect.
         uid           (some-> (:user-id member) str not-empty)
         _             (ensure-member-profile-loaded! active-engine uid room-id)
         remote        (when uid
-                        (:data (get @!profile-cache [(or active-engine :default) uid])))
+                        (:value (mem-cache/get-entry !profile-cache [(or active-engine :default) uid])))
         self-p        (when (and uid active-uid (= uid (str active-uid)))
                         own-profile)
         st            (resolve-preview-state member remote self-p)
@@ -324,12 +324,19 @@ aspect.
             :class   "profile-preview-banner-img"
             :alt     ""}]))]
      [:div.profile-preview-content
-      [:div.profile-preview-avatar-wrap
-       [avatar {:id     (:uid st)
-                :name   (:disp-name st)
-                :url    (:av-url st)
-                :size   68
-                :status status}]]
+      [:div.profile-preview-header-row
+       [:div.profile-preview-avatar-wrap
+        [avatar {:id     (:uid st)
+                 :name   (:disp-name st)
+                 :url    (:av-url st)
+                 :size   68
+                 :status status}]]
+       (when (and uid (not= uid (str active-uid)))
+         [:button.profile-preview-dm-btn
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:dm/open-with-user uid])}
+          [icons/chat-bubble {:size "14px"}]
+          [:span (tr [:profile.mutuals/message-btn])]])]
       [:div.profile-preview-body
        [:div.profile-preview-id-block
         [:span.profile-preview-name
@@ -361,6 +368,10 @@ aspect.
           [:div.profile-preview-section-label
            (tr [:settings.profile/bio-label])]
           [:div.profile-preview-bio (:bio st)]])
+       (when (and uid (not= uid (str active-uid)))
+         [profile-mutuals-section {:uid       uid
+                                   :engine-kw active-engine
+                                   :tr        tr}])
        (when room-id
          [member-popover-roles-and-mod
           {:member  member
