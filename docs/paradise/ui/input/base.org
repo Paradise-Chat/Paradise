@@ -380,61 +380,113 @@ We'll need a way to generically upload to Matrix for anything from updating avat
                                    {:text payload-or-text :html maybe-html :ast nil})
          attachments    (get-in db [:drafts room-id :attachments])
          raw-context    (get-in db [:input-context room-id])
-         worker-context (when raw-context
-                          {:mode        (:mode raw-context)
-                           :target      (get-in raw-context [:target :id])
-                           :msg-tag     (get-in raw-context [:target :content :inner :tag])
-                           :ffi-content (get-in raw-context [:target :content :inner :content :ffi-content])})
-         pool           @state/!engine-pool]
-     (if (seq attachments)
-       (go
-         (try
-           (let [worker-atts
-                 (<p! (p/all (map (fn [att]
-                                    (p/let [f  (get-file (:file-id att))
-                                            ab (if f (file->array-buffer f) (js/Promise.resolve (js/ArrayBuffer. 0)))]
-                                      (assoc att :buffer ab)))
-                                  attachments)))]
-             (doseq [att attachments]
-               (when (:preview-url att) (js/URL.revokeObjectURL (:preview-url att)))
-               (when (:file-id att) (unregister-file! (:file-id att))))
-             (let [res (<! (main/do-with-pool! pool {:handler   :send-attachments
-                                                     :arguments {:room-id     room-id
-                                                                 :attachments worker-atts
-                                                                 :text        text
-                                                                 :html        html
-                                                                 :ast         ast}}))]
+         reply-ctx?     (= (:mode raw-context) :reply)
+         worker-context (build-reply-context raw-context)
+         pool           @state/!engine-pool
+         parsed-cmd     (when (and (empty? attachments)
+                                   (not (str/includes? (str html) "<img")))
+                          (parse-slash-command text))
+         cmd-outcome    (cond
+                          (:escape? parsed-cmd)
+                          {:send {:text (:text parsed-cmd)
+                                  :html (text->p-html (:text parsed-cmd))}}
+
+                          (:command parsed-cmd)
+                          (execute-slash-command db room-id parsed-cmd)
+
+                          :else nil)
+         send-text      (if (:send cmd-outcome) (:text (:send cmd-outcome)) text)
+         send-html      (if (:send cmd-outcome) (:html (:send cmd-outcome)) html)
+         send-ast       (if (:send cmd-outcome) nil ast)
+         send-msgtype   (get-in cmd-outcome [:send :msgtype])
+         should-send?   (or (seq attachments)
+                            (nil? cmd-outcome)
+                            (some? (:send cmd-outcome)))]
+     (when should-send?
+       (if (seq attachments)
+         (go
+           (try
+             (let [total (count attachments)]
+               (if (and (> total 1) (platform/ios-runtime?))
+                 (loop [idx 0]
+                   (when (< idx total)
+                     (let [att   (nth attachments idx)
+                           last? (= idx (dec total))
+                           f     (get-file (:file-id att))
+                           ab    (if f
+                                   (<p! (file->array-buffer f))
+                                   (js/ArrayBuffer. 0))]
+                       (revoke-object-url! (:preview-url att))
+                       (when (:file-id att) (unregister-file! (:file-id att)))
+                       (let [args (cond-> {:room-id     room-id
+                                           :attachments [(assoc att :buffer ab)]
+                                           :text        (if last? send-text "")
+                                           :html        (if last? send-html "")
+                                           :ast         (when last? send-ast)}
+                                    (and last? worker-context) (assoc :context worker-context))
+                             res  (<! (main/do-with-pool! pool {:handler   :send-attachments
+                                                                :arguments args}))]
+                         (when-not (#{"success" :success} (:status res))
+                           (log/error "Failed to send attachment:" (:msg res))))
+                       (recur (inc idx)))))
+                 (let [worker-atts (loop [remaining attachments
+                                          acc       []]
+                                     (if-let [att (first remaining)]
+                                       (let [f  (get-file (:file-id att))
+                                             ab (if f
+                                                  (<p! (file->array-buffer f))
+                                                  (js/ArrayBuffer. 0))]
+                                         (revoke-object-url! (:preview-url att))
+                                         (when (:file-id att) (unregister-file! (:file-id att)))
+                                         (recur (rest remaining)
+                                                (conj acc (assoc att :buffer ab))))
+                                       acc))
+                       args        (cond-> {:room-id     room-id
+                                            :attachments worker-atts
+                                            :text        send-text
+                                            :html        send-html
+                                            :ast         send-ast}
+                                     worker-context (assoc :context worker-context))
+                       res         (<! (main/do-with-pool! pool {:handler   :send-attachments
+                                                                 :arguments args}))]
+                   (when-not (#{"success" :success} (:status res))
+                     (log/error "Failed to send attachments:" (:msg res))))))
+             (catch :default e
+               (log/error "Exception in send-attachments Go block:" (str e)))))
+         (go
+           (try
+             (log/info "Dispatching standard :send-message to worker...")
+             (let [args (cond-> {:room-id room-id
+                                 :text    send-text
+                                 :html    send-html
+                                 :ast     send-ast
+                                 :context worker-context}
+                          send-msgtype (assoc :msgtype send-msgtype))
+                   res  (<! (main/do-with-pool! pool {:handler   :send-message
+                                                      :arguments args}))]
+               (log/info "Worker :send-message returned:" res)
                (when-not (#{"success" :success} (:status res))
-                 (log/error "Failed to send attachments:" (:msg res)))))
-           (catch :default e
-             (log/error "Exception in send-attachments Go block:" (str e)))))
-       (go
-         (try
-           (log/info "Dispatching standard :send-message to worker...")
-           (let [res (<! (main/do-with-pool! pool {:handler   :send-message
-                                                   :arguments {:room-id room-id
-                                                               :text    text
-                                                               :html    html
-                                                               :ast     ast
-                                                               :context worker-context}}))]
-             (log/info "Worker :send-message returned:" res)
-             (when-not (#{"success" :success} (:status res))
-               (log/error "Failed to send message:" (:msg res))))
-           (catch :default e
-             (log/error "Exception in send-message Go block:" (str e))))))
+                 (log/error "Failed to send message:" (:msg res))))
+             (catch :default e
+               (log/error "Exception in send-message Go block:" (str e)))))))
      (when-let [old-timer (get-in db [:composer room-id :save-timer])]
        (js/clearTimeout old-timer))
-     (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))]
-       {:db       (-> db
-                      (assoc-in [:composer room-id] {:text            ""
-                                                     :html            ""
-                                                     :loaded-text     nil
-                                                     :uploading?      false
-                                                     :draft-hydrated? true
-                                                     :edit-seq        next-seq})
-                      (assoc-in [:drafts room-id :attachments] [])
-                      (update :input-context dissoc room-id))
-        :dispatch [:composer/persist-draft room-id]}))))
+     (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))
+           extra-fx (vec (or (:fx cmd-outcome) []))]
+       {:db (cond-> (-> db
+                        (assoc-in [:composer room-id] {:text            ""
+                                                       :html            ""
+                                                       :loaded-text     nil
+                                                       :uploading?      false
+                                                       :draft-hydrated? true
+                                                       :edit-seq        next-seq})
+                        (assoc-in [:drafts room-id :attachments] []))
+              reply-ctx?
+              (update :input-context dissoc room-id)
+
+              (and should-send? (not (:fx cmd-outcome)))
+              (update :composer/notice dissoc room-id))
+        :fx (into [[:dispatch [:composer/persist-draft room-id]]] extra-fx)}))))
 #+end_src
 
 
