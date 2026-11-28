@@ -169,7 +169,8 @@ worry about the code itself.
                   target (io/file resource-dir f)]]
       (when (.exists source)
         (io/make-parents target)
-        (io/copy source target))))
+        (io/copy source target)))
+    (sync-static-config-sources!))
   build-state)
 #+end_src
 
@@ -240,8 +241,10 @@ worry about the code itself.
         config      (try (edn/read-string (slurp config-path))
                          (catch Exception _ {}))
         updated     (assoc config :version version)]
-    (spit config-path (pr-str updated))
-    (println (str "Stamped config.edn with version " version))
+    (when (not= config updated)
+      (spit config-path (pr-str updated))
+      (println (str "Stamped config.edn with version " version)))
+    (sync-static-config-sources!)
     build-state))
 #+end_src
 
