@@ -26,7 +26,8 @@ account in ~session-store~ and synchronized with the active protocol engine.
                                       modal-component]]
    [paradise.ui.overlays.rooms :refer [engine-room-option-items]]
    [re-frame.core :as re-frame]
-   [reagent.core :as r]))
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 #+end_src
 
 **** Space Group Helpers and Drag State
