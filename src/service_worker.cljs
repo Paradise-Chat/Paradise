@@ -1,32 +1,25 @@
 (ns service-worker
   (:require [clojure.string :as str]
+            [paradise.shared.utils.encoding :refer [array-buffer->data-url]]
             [promesa.core :as p]
-            ["workbox-precaching" :refer [precacheAndRoute cleanupOutdatedCaches]]
-            ["workbox-routing" :refer [registerRoute]]
-            ["workbox-strategies" :refer [CacheFirst]]
-            ["workbox-expiration" :refer [ExpirationPlugin]])
+            ["workbox-precaching" :refer [precacheAndRoute cleanupOutdatedCaches]])
   (:require-macros [paradise.shared.utils.macros :refer [load-static-config]]))
 
 (defonce active-sessions (atom {}))
+(defonce active-client-sessions (atom {}))
+(defonce active-user-id (atom nil))
 (defonce session-resolvers (atom []))
-(def MAX_CACHE_ITEMS 300)
-(def MAX_CACHE_BYTES 10485760)
 (def config (load-static-config "config.edn"))
-(def cache-name "paradise-media-v1")
+(def legacy-cache-name "paradise-media-v1")
 (def sw-session-file "paradise_sw_sessions.json")
+
+(declare persist-sw-sessions! remove-sw-sessions-file! purge-media-caches!)
 
 (cleanupOutdatedCaches)
 (let [manifest (or js/self.__WB_MANIFEST #js [])]
-  (precacheAndRoute manifest))
+  (when-not (= (.. js/self -location -protocol) "capacitor-electron:")
+    (precacheAndRoute manifest)))
 (set! (.-__WB_DISABLE_DEV_LOGS js/self) true)
-
-(registerRoute
- (fn [opts]
-   (let [url (.-url opts)]
-     (str/ends-with? (.-pathname url) ".wasm")))
- (new CacheFirst
-      #js {:cacheName "wasm-heavy-cache"
-           :plugins   #js [(new ExpirationPlugin #js {:maxEntries 10})]}))
 
 (.addEventListener js/self "message"
   (fn [event]
@@ -37,11 +30,48 @@
         (= msg-type "SKIP_WAITING")
         (.skipWaiting js/self)
 
+        (= msg-type "CLEAR_SESSION")
+        (let [payload    (when data (js->clj data :keywordize-keys true))
+              target-uid (some-> (:user-id payload) str not-empty)
+              all?       (or (:all? payload) (nil? target-uid))]
+          (if all?
+            (do
+              (reset! active-sessions {})
+              (reset! active-client-sessions {})
+              (reset! active-user-id nil)
+              (remove-sw-sessions-file!)
+              (purge-media-caches! nil))
+            (let [next-map (swap! active-sessions dissoc target-uid (keyword target-uid))]
+              (swap! active-client-sessions
+                     (fn [m]
+                       (into {} (remove (fn [[_ v]] (= (str (:user-id v)) target-uid)) m))))
+              (when (= (str @active-user-id) target-uid)
+                (reset! active-user-id nil))
+              (if (seq next-map)
+                (persist-sw-sessions! next-map)
+                (remove-sw-sessions-file!))
+              (purge-media-caches! target-uid))))
+
+        (= msg-type "CLEAR_ALL_SESSIONS")
+        (do
+          (reset! active-sessions {})
+          (reset! active-client-sessions {})
+          (reset! active-user-id nil)
+          (remove-sw-sessions-file!)
+          (purge-media-caches! nil))
+
         (= msg-type "SET_SESSION")
-        (let [session-data (:session (js->clj data :keywordize-keys true))
-              session-key  (or (:user-id session-data) source-id :default)
+        (let [raw-session  (:session (js->clj data :keywordize-keys true))
+              session-data (select-keys raw-session
+                                        [:user-id :base-url :origin :token
+                                         :auth-media? :media-paths :thumbnail-template])
+              uid          (some-> (:user-id session-data) str not-empty)
+              session-key  (or uid source-id "default")
               full-session (assoc session-data :client-id source-id)
               next-map     (swap! active-sessions assoc session-key full-session)]
+          (when source-id
+            (swap! active-client-sessions assoc source-id full-session))
+          (reset! active-user-id uid)
           (persist-sw-sessions! next-map)
           (doseq [resolve-fn @session-resolvers]
             (resolve-fn true))
@@ -57,88 +87,127 @@
       true)
     (fn [_] nil)))
 
+(defn- remove-sw-sessions-file! []
+  (p/catch
+    (p/let [dir (.. js/navigator -storage getDirectory)]
+      (.removeEntry dir sw-session-file))
+    (fn [_] nil)))
+
+(defn- purge-media-caches! [target-uid]
+  (p/catch
+    (p/let [keys (.keys js/caches)]
+      (let [prefix (if target-uid
+                     (str legacy-cache-name "::" (js/encodeURIComponent (str target-uid)))
+                     legacy-cache-name)]
+        (p/all
+         (for [k keys
+               :when (if target-uid
+                       (or (= k prefix) (= k legacy-cache-name))
+                       (str/starts-with? k legacy-cache-name))]
+           (.delete js/caches k)))))
+    (fn [_] nil)))
+
 (defn- load-sw-sessions []
   (p/catch
     (p/let [dir    (.. js/navigator -storage getDirectory)
             handle (.getFileHandle dir sw-session-file)
             file   (.getFile handle)
             text   (.text file)]
-      (js->clj (js/JSON.parse text) :keywordize-keys true))
+      (let [parsed (js/JSON.parse text)]
+        (reduce (fn [acc k]
+                  (assoc acc k (js->clj (aget parsed k) :keywordize-keys true)))
+                {}
+                (js/Object.keys parsed))))
     (fn [_] {})))
 
 
+(defn- find-session-by-uid [sessions-map uid]
+  (when (and (seq sessions-map) uid)
+    (let [uid-str (str uid)]
+      (or (get sessions-map uid-str)
+          (get sessions-map (keyword uid-str))
+          (first (filter #(= (str (:user-id %)) uid-str) (vals sessions-map)))))))
+
 (defn- resolve-session [client-id user-id]
-  (let [mem @active-sessions]
-    (if (seq mem)
+  (let [mem        @active-sessions
+        client-hit (when client-id (get @active-client-sessions client-id))]
+    (cond
+      user-id
+      (if-let [hit (find-session-by-uid mem user-id)]
+        (p/resolved hit)
+        (p/let [stored (load-sw-sessions)]
+          (when (seq stored)
+            (swap! active-sessions merge stored)
+            (find-session-by-uid stored user-id))))
+
+      client-hit
+      (p/resolved client-hit)
+
+      (and client-id (seq mem))
       (p/resolved
-       (or (when client-id (get mem client-id))
-           (when user-id (first (filter #(= (:user-id %) user-id) (vals mem))))
-           (first (vals mem))))
-      (p/let [stored (load-sw-sessions)]
-        (when (seq stored)
-          (reset! active-sessions stored)
-          (or (when user-id (get stored (keyword user-id)))
-              (when user-id (get stored user-id))
-              (first (vals stored))))))))
+       (or (first (filter #(= (:client-id %) client-id) (vals mem)))
+           (when-let [cur @active-user-id]
+             (find-session-by-uid mem cur))))
 
-(defn prune-cache! [name max-items]
-  (p/let [cache (js/caches.open name)
-          keys  (.keys cache)]
-    (when (> (.-length keys) max-items)
-      (p/let [_ (.delete cache (first keys))]
-        (prune-cache! name max-items)))))
+      @active-user-id
+      (p/resolved (find-session-by-uid mem @active-user-id))
 
-(defn- cacheable-media-response? [resp]
-  (when (and resp (.-ok resp))
-    (let [ct  (or (.get (.-headers resp) "content-type") "")
-          len (js/parseInt (or (.get (.-headers resp) "content-length") "0") 10)]
-      (and (or (str/starts-with? ct "image/")
-               (str/starts-with? ct "video/")
-               (str/starts-with? ct "audio/")
-               (str/starts-with? ct "application/octet-stream"))
-           (or (js/isNaN len) (zero? len) (< len MAX_CACHE_BYTES))))))
+      :else
+      (p/resolved nil))))
 
-(defn- matches-media-path? [path session]
-  (let [patterns (or (seq (:media-paths session)) ["/media/"])]
-    (boolean (some #(str/includes? path %) patterns))))
+(def default-auth-media-paths
+  ["/_matrix/client/v1/media/"
+   "/_matrix/media/"])
+
+(defn- matches-auth-media-path? [path session]
+  (when (and (string? path)
+             (not (false? (:auth-media? session)))
+             (not (str/starts-with? path "/_matrix/media/v3/preview_url"))
+             (not (str/starts-with? path "/_matrix/client/v1/media/preview_url")))
+    (let [patterns (if (contains? session :media-paths)
+                     (:media-paths session)
+                     default-auth-media-paths)]
+      (boolean (and (seq patterns)
+                    (some (fn [pat]
+                            (and (string? pat)
+                                 (str/starts-with? pat "/")
+                                 (str/starts-with? path pat)))
+                          patterns))))))
+
+(defn- likely-authenticated-path? [path]
+  (and (string? path)
+       (not (str/starts-with? path "/_matrix/media/v3/preview_url"))
+       (not (str/starts-with? path "/_matrix/client/v1/media/preview_url"))
+       (boolean (some #(str/starts-with? path %) default-auth-media-paths))))
 
 (js/self.addEventListener "fetch"
   (fn [event]
     (let [request     (.-request event)
           method      (.-method request)
           request-url (js/URL. (.-url request))
-          path        (.-pathname request-url)
-          dest        (.-destination request)]
+          protocol    (.-protocol request-url)
+          path        (.-pathname request-url)]
       (when (and (= method "GET")
-                 (or (#{"image" "video" "audio"} dest)
-                     (str/includes? path "/media/")))
+                 (#{"http:" "https:"} protocol)
+                 (likely-authenticated-path? path)
+                 (not (.has (.-headers request) "Authorization")))
         (.respondWith event
-          (p/let [cache-key (.-href request-url)
-                  cache     (js/caches.open cache-name)
-                  cached    (.match cache cache-key)]
-            (if cached
-              cached
-              (if (.has (.-headers request) "Authorization")
-                (p/let [resp (js/fetch request)]
-                  (when (cacheable-media-response? resp)
-                    (.put cache cache-key (.clone resp)))
-                  resp)
-                (p/let [session (resolve-session (.-clientId event) nil)
-                        token   (:token session)
-                        origin  (:origin session)
-                        headers (js/Headers. (.-headers request))]
-                  (if (or (#{"image" "video" "audio"} dest)
-                          (matches-media-path? path session))
-                    (do
-                      (when (and token (= (.-origin request-url) origin))
-                        (.set headers "Authorization" (str "Bearer " token)))
-                      (p/let [resp (js/fetch request-url #js {:headers     headers
-                                                              :mode        "cors"
-                                                              :credentials "omit"})]
-                        (when (cacheable-media-response? resp)
-                          (.put cache cache-key (.clone resp)))
-                        resp))
-                    (js/fetch request)))))))))))
+          (p/let [session    (resolve-session (.-clientId event) nil)
+                  token      (:token session)
+                  origin     (:origin session)
+                  need-auth? (and token
+                                  origin
+                                  (= (.-origin request-url) origin)
+                                  (matches-auth-media-path? path session))]
+            (if need-auth?
+              (let [headers (js/Headers. (.-headers request))]
+                (.set headers "Authorization" (str "Bearer " token))
+                (js/fetch request-url #js {:headers        headers
+                                           :mode           "cors"
+                                           :credentials    "omit"
+                                           :redirect       "error"
+                                           :referrerPolicy "no-referrer"}))
+              (js/fetch request))))))))
 
 (js/self.addEventListener "install"
   (fn [event]
@@ -148,57 +217,68 @@
   (fn [event]
     (.waitUntil event
       (p/all [(.clients.claim js/self)
-              (prune-cache! cache-name MAX_CACHE_ITEMS)]))))
+              (-> (.delete js/caches "wasm-heavy-cache")
+                  (p/catch (fn [_] false)))
+              (purge-media-caches! nil)]))))
 
 (def default-icon "/public/res/apple/apple-touch-icon-180x180.png")
 (def default-badge "/public/res/apple/apple-touch-icon-72x72.png")
-(def default-icon "/public/res/apple/apple-touch-icon-180x180.png")
-(def default-badge "/public/res/apple/apple-touch-icon-72x72.png")
-
-(defn- array-buffer->data-url [buf mime-type]
-  (let [bytes  (js/Uint8Array. buf)
-        len    (.-byteLength bytes)
-        chunks #js []]
-    (dotimes [i len]
-      (.push chunks (js/String.fromCharCode (aget bytes i))))
-    (str "data:" (or mime-type "image/png") ";base64," (js/btoa (.join chunks "")))))
 
 (defn- build-avatar-url [session raw-uri]
-  (cond
-    (str/blank? (str raw-uri))
-    nil
+  (let [s (str raw-uri)]
+    (cond
+      (str/blank? s)
+      nil
 
-    (or (str/starts-with? (str raw-uri) "http://")
-        (str/starts-with? (str raw-uri) "https://")
-        (str/starts-with? (str raw-uri) "data:"))
-    (str raw-uri)
+      (or (str/starts-with? s "http://")
+          (str/starts-with? s "https://")
+          (str/starts-with? s "data:"))
+      s
 
-    (and (:base-url session) (:thumbnail-template session))
-    (let [clean-id (-> (str raw-uri)
-                       (str/replace #"^[a-zA-Z0-9+.-]+://" ""))]
-      (-> (:thumbnail-template session)
-          (str/replace "{base-url}" (str/replace (:base-url session) #"/+$" ""))
-          (str/replace "{id}" clean-id)))
+      (and (:base-url session) (:thumbnail-template session))
+      (let [clean-id (str/replace s #"^[a-zA-Z0-9+.-]+://" "")]
+        (when (and (not (str/blank? clean-id))
+                   (not (str/includes? clean-id ".."))
+                   (not (str/includes? clean-id "\\"))
+                   (not (str/includes? clean-id "?"))
+                   (not (str/includes? clean-id "#"))
+                   (not (re-find #"\s" clean-id)))
+          (-> (:thumbnail-template session)
+              (str/replace "{base-url}" (str/replace (:base-url session) #"/+$" ""))
+              (str/replace "{id}" clean-id))))
 
-    :else nil))
+      :else nil)))
 
 (defn- fetch-avatar-data-url [session avatar-uri]
   (if-let [thumb-url (build-avatar-url session avatar-uri)]
     (if (str/starts-with? thumb-url "data:")
       (p/resolved thumb-url)
-      (let [token   (:token session)
-            headers (if token
-                      #js {:Authorization (str "Bearer " token)}
-                      #js {})]
-        (-> (js/fetch thumb-url #js {:headers     headers
-                                     :mode        "cors"
-                                     :credentials "omit"})
-            (p/then (fn [resp]
-                      (when (.-ok resp)
-                        (p/let [mime (.get (.-headers resp) "content-type")
-                                buf  (.arrayBuffer resp)]
-                          (array-buffer->data-url buf mime)))))
-            (p/catch (fn [_] nil)))))
+      (let [parsed     (try (js/URL. thumb-url) (catch :default _ nil))
+            valid-http (and parsed (#{"http:" "https:"} (.-protocol parsed)))]
+        (if-not valid-http
+          (p/resolved nil)
+          (let [token      (:token session)
+                origin     (:origin session)
+                need-auth? (and token
+                                origin
+                                (= (.-origin parsed) origin)
+                                (matches-auth-media-path? (.-pathname parsed) session))
+                fetch-opts (if need-auth?
+                             #js {:headers        #js {:Authorization (str "Bearer " token)}
+                                  :mode           "cors"
+                                  :credentials    "omit"
+                                  :redirect       "error"
+                                  :referrerPolicy "no-referrer"}
+                             #js {:mode           "cors"
+                                  :credentials    "omit"
+                                  :referrerPolicy "no-referrer"})]
+            (-> (js/fetch (.-href parsed) fetch-opts)
+                (p/then (fn [resp]
+                          (when (.-ok resp)
+                            (p/let [mime (.get (.-headers resp) "content-type")
+                                    buf  (.arrayBuffer resp)]
+                              (array-buffer->data-url buf mime)))))
+                (p/catch (fn [_] nil)))))))
     (p/resolved nil)))
 
 (defn- normalize-push-payload [raw-map]
@@ -288,6 +368,21 @@
              :tag   (or room-id "paradise-chat")
              :data  #js {:room_id room-id}}))))
 
+(defn- notify-open-clients-push! [notif raw-map]
+  (-> (.matchAll js/self.clients #js {:type "window" :includeUncontrolled true})
+      (.then (fn [clients]
+               (let [room-id  (or (:room-id notif) (:room_id notif) (:roomId notif)
+                                  (:room_id raw-map) (:room-id raw-map) (:channel_id raw-map))
+                     event-id (or (:event-id notif) (:event_id notif) (:eventId notif)
+                                  (:event_id raw-map) (:event-id raw-map))]
+                 (doseq [c clients]
+                   (try
+                     (.postMessage c #js {:type     "PUSH_NOTIFICATION_RECEIVED"
+                                          :room_id  room-id
+                                          :event_id event-id})
+                     (catch :default _ nil))))))
+      (.catch (fn [_] nil))))
+
 (js/self.addEventListener "push"
   (fn [event]
     (let [raw-js  (parse-push-event event)
@@ -302,6 +397,7 @@
                 notif    (if resolved
                            (js->clj resolved :keywordize-keys true)
                            (fallback-notification raw-map))]
+          (notify-open-clients-push! notif raw-map)
           (show-notification! notif session))))))
 
 (js/self.addEventListener "notificationclick"
