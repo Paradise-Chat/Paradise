@@ -86,10 +86,13 @@ bludgeoning devices...
        (let [sym (second x)]
          (if (:defer (meta sym))
            (let [clean-sym (with-meta sym (dissoc (meta sym) :defer))
-                 clean-x   (cons (first x) (cons clean-sym (drop 2 x)))]
+                 clean-x   (cons (first x) (cons clean-sym (drop 2 x)))
+                 local-sym (if (= (first x) 'defoverride)
+                             (symbol (name clean-sym))
+                             clean-sym)]
              (list 'do
                    clean-x
-                   (list 'clojure.core/aset clean-sym "$defer_boundary" true)))
+                   (list 'clojure.core/aset local-sym "$defer_boundary" true)))
            x))
        x))
    form))
