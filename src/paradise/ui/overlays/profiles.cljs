@@ -1,78 +1,494 @@
 (ns paradise.ui.overlays.profiles
   (:require
-   [paradise.ui.overlays.base :refer [popover-component context-menu-component]]
-   [taoensso.timbre :as log]
-   [re-frame.core :as re-frame]
-   [paradise.ui.global :refer [avatar]]
+   [cljs.core.async :refer [<! go]]
+   [cljs-workers.mesh :as mesh]
+   [clojure.string :as str]
    [paradise.media.component :refer [media]]
-   [paradise.shared.plugins :as plugins]))
+   [paradise.shared.plugins :as plugins]
+   [paradise.shared.utils.cache :as mem-cache]
+   [paradise.shared.utils.helpers :refer [decode-edn-field
+                                          first-non-blank
+                                          local-media-url?
+                                          ok-status?
+                                          safe-lower]]
+   [paradise.shared.utils.normalize :as norm]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.global :refer [avatar]]
+   [paradise.ui.overlays.base :refer [context-menu-component
+                                      engine-option-items
+                                      popover-component]]
+   [paradise.ui.overlays.permissions-roles :refer [member-popover-roles-and-mod]]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
+
+(def ^:private profile-ttl-ms 60000)
+
+(defonce ^:private !profile-cache
+  (mem-cache/make-ttl-cache {:ttl-ms         profile-ttl-ms
+                             :max-entries    250
+                             :atom-fn        r/atom
+                             :session-scoped? true}))
+
+(defonce ^:private !mutuals-cache
+  (mem-cache/make-ttl-cache {:ttl-ms         profile-ttl-ms
+                             :max-entries    250
+                             :atom-fn        r/atom
+                             :session-scoped? true}))
+
+(defn- normalize-mutual-room [raw]
+  (when-let [r (norm/normalize-room raw)]
+    {:id           (:id r)
+     :name         (:name r)
+     :avatar       (:avatar-url r)
+     :is-space?    (:is-space? r)
+     :member-count (:member-count r)
+     :parent-id    (:parent-id r)}))
+
+(defn- ensure-user-mutuals-loaded! [engine-kw user-id]
+  (when (and user-id (not (str/blank? (str user-id))))
+    (let [uid    (str user-id)
+          ckey   [(or engine-kw :default) uid]
+          cached (:value (mem-cache/get-entry !mutuals-cache ckey))]
+      (when-not (mem-cache/get-fresh !mutuals-cache ckey)
+        (when-not cached
+          (mem-cache/put! !mutuals-cache ckey {:loading?       true
+                                               :mutual-rooms   []
+                                               :mutual-friends []}))
+        (mem-cache/fetch-once!
+         !mutuals-cache
+         ckey
+         (fn []
+           (js/Promise.
+            (fn [resolve _]
+              (go
+                (try
+                  (let [res (<! (mesh/do-with-thread!
+                                 :engine-pool
+                                 {:handler   :fetch-user-mutuals
+                                  :arguments {:user-id uid}}))]
+                    (if (ok-status? res)
+                      (let [rooms   (into []
+                                          (keep normalize-mutual-room)
+                                          (concat (or (:mutual-spaces res) [])
+                                                  (or (:mutual-rooms res) [])))
+                            dedup-r (->> rooms
+                                         (reduce (fn [acc r]
+                                                   (if (contains? acc (:id r)) acc (assoc acc (:id r) r)))
+                                                 {})
+                                         vals
+                                         vec)
+                            friends (into []
+                                          (keep norm/normalize-user)
+                                          (or (:mutual-friends res) []))]
+                        (resolve {:loading?       false
+                                  :mutual-rooms   dedup-r
+                                  :mutual-friends friends}))
+                      (resolve {:loading?       false
+                                :mutual-rooms   (or (:mutual-rooms cached) [])
+                                :mutual-friends (or (:mutual-friends cached) [])})))
+                  (catch :default _
+                    (resolve {:loading?       false
+                              :mutual-rooms   (or (:mutual-rooms cached) [])
+                              :mutual-friends (or (:mutual-friends cached) [])})))))))
+         {:force? true})))))
+
+(re-frame/reg-sub
+ :profiles/client-mutual-rooms
+ (fn [db [_ user-id]]
+   (let [uid       (some-> user-id str not-empty)
+         rooms-map (:rooms-unfiltered-cache db {})
+         spaces    (:spaces db {})
+         members   (:room-members db {})]
+     (if-not uid
+       []
+       (->> members
+            (keep (fn [[rid entry]]
+                    (let [d    (:data entry)
+                          has? (cond
+                                 (map? d)        (contains? d uid)
+                                 (sequential? d) (boolean
+                                                  (some #(= (some-> (:user-id %) str) uid) d))
+                                 :else           false)]
+                      (when has?
+                        (let [r (or (get rooms-map rid) (get spaces rid))]
+                          (when-let [nr (norm/normalize-room (assoc r :id rid))]
+                            (when-not (:is-direct? nr)
+                              {:id        (:id nr)
+                               :name      (:name nr)
+                               :avatar    (:avatar-url nr)
+                               :is-space? (:is-space? nr)
+                               :parent-id (:parent-id nr)})))))))
+            vec)))))
+
+(defn ^:ui profile-mutuals-section [{:keys [uid engine-kw tr]}]
+  (r/with-let [!tab (r/atom :rooms)]
+    (let [_              (ensure-user-mutuals-loaded! engine-kw uid)
+          ckey           [(or engine-kw :default) uid]
+          cached         (:value (mem-cache/get-entry !mutuals-cache ckey))
+          client-rooms   @(re-frame/subscribe [:profiles/client-mutual-rooms uid])
+          remote-rooms   (or (:mutual-rooms cached) [])
+          mutual-rooms   (let [by-id (reduce (fn [acc r] (assoc acc (:id r) r)) {} remote-rooms)]
+                           (->> (reduce (fn [acc r]
+                                          (if (contains? acc (:id r)) acc (assoc acc (:id r) r)))
+                                        by-id
+                                        client-rooms)
+                                vals
+                                (sort-by (fn [r] [(if (:is-space? r) 0 1)
+                                                  (safe-lower (:name r))]))
+                                vec))
+          mutual-friends (or (:mutual-friends cached) [])
+          loading?       (boolean (:loading? cached))
+          active-tab     @!tab]
+      [:div.profile-mutuals-card
+       [:div.profile-mutuals-tabs
+        [:button.profile-mutuals-tab
+         {:type     "button"
+          :class    (when (= active-tab :rooms) "is-active")
+          :on-click #(reset! !tab :rooms)}
+         (tr [:profile.mutuals/rooms-tab] [(count mutual-rooms)])]
+        [:button.profile-mutuals-tab
+         {:type     "button"
+          :class    (when (= active-tab :friends) "is-active")
+          :on-click #(reset! !tab :friends)}
+         (tr [:profile.mutuals/friends-tab] [(count mutual-friends)])]]
+       [:div.profile-mutuals-list
+        (cond
+          (and loading?
+               (if (= active-tab :rooms) (empty? mutual-rooms) (empty? mutual-friends)))
+          [:div.profile-mutuals-empty (tr [:profile.mutuals/loading])]
+
+          (= active-tab :rooms)
+          (if (empty? mutual-rooms)
+            [:div.profile-mutuals-empty (tr [:profile.mutuals/no-rooms])]
+            (for [r mutual-rooms]
+              ^{:key (:id r)}
+              [:button.profile-mutual-row
+               {:type     "button"
+                :on-click (fn []
+                            (re-frame/dispatch [:ui/close-popover])
+                            (re-frame/dispatch [:container/set-main-focus :timeline])
+                            (if (:is-space? r)
+                              (re-frame/dispatch [:space/select (:id r)])
+                              (do
+                                (when (:parent-id r)
+                                  (re-frame/dispatch [:space/select (:parent-id r)]))
+                                (re-frame/dispatch [:rooms/select (:id r)]))))}
+               [avatar {:id    (:id r)
+                        :name  (:name r)
+                        :url   (:avatar r)
+                        :size  24
+                        :shape (if (:is-space? r) :squircle :rounded)}]
+               [:span.profile-mutual-name (:name r)]
+               (when (:is-space? r)
+                 [:span.profile-mutual-badge (tr [:profile.mutuals/space-badge])])]))
+
+          :else
+          (if (empty? mutual-friends)
+            [:div.profile-mutuals-empty (tr [:profile.mutuals/no-friends])]
+            (for [f mutual-friends
+                  :let [fid (:user-id f)
+                        st  @(re-frame/subscribe [:presence/user fid (:presence f)])]]
+              ^{:key fid}
+              [:button.profile-mutual-row
+               {:type     "button"
+                :on-click (fn [e]
+                            (let [rect (.getBoundingClientRect (.-currentTarget e))]
+                              (re-frame/dispatch
+                               [:ui/open-popover :profile-preview
+                                {:x         (.-left rect)
+                                 :y         (.-top rect)
+                                 :width     300
+                                 :height    380
+                                 :backdrop? true
+                                 :member    {:user-id      fid
+                                             :display-name (:display-name f)
+                                             :username     (:username f)
+                                             :avatar-url   (:avatar-url f)}
+                                 :tags      {}}])))}
+               [avatar {:id     fid
+                        :name   (:display-name f)
+                        :url    (:avatar-url f)
+                        :size   24
+                        :status st}]
+               [:div.profile-mutual-user-copy
+                [:span.profile-mutual-name (:display-name f)]
+                (when (and (:handle f) (not= (:handle f) (:display-name f)))
+                  [:span.profile-mutual-sub (:handle f)])]])))]])))
+
+(defn- ensure-member-profile-loaded! [engine-kw user-id room-id]
+  (when (and user-id (not (str/blank? (str user-id))))
+    (let [uid    (str user-id)
+          ckey   [(or engine-kw :default) uid]
+          cached (:value (mem-cache/get-entry !profile-cache ckey))]
+      (mem-cache/fetch-once!
+       !profile-cache
+       ckey
+       (fn []
+         (js/Promise.
+          (fn [resolve _]
+            (go
+              (try
+                (let [res (<! (mesh/do-with-thread!
+                               :engine-pool
+                               {:handler   :fetch-profile
+                                :arguments (cond-> {:user-id uid}
+                                             room-id (assoc :room-id (str room-id)))}))]
+                  (if (ok-status? res)
+                    (resolve (or (:profile res) {}))
+                    (resolve (or cached {}))))
+                (catch :default _
+                  (resolve (or cached {}))))))))))))
+
+(defn- resolve-preview-state [member remote self-p]
+  (let [uid      (first-non-blank (:user-id member))
+        pick     (fn [k] (first-non-blank (k self-p) (k remote) (k member)))
+        raw-m-nm (first-non-blank (:display-name member))
+        uname    (pick :username)
+        handle   (or (pick :handle)
+                     (when uname (str "@" uname))
+                     uid)]
+    {:uid       uid
+     :disp-name (or (when (and raw-m-nm (not= raw-m-nm uid)) raw-m-nm)
+                    (first-non-blank (:display-name self-p) (:display-name remote))
+                    raw-m-nm
+                    uid
+                    "?")
+     :av-url    (first-non-blank (:avatar-url self-p) (:avatar-url member) (:avatar-url remote))
+     :bn-url    (pick :banner-url)
+     :bn-color  (pick :banner-color)
+     :bio       (pick :bio)
+     :pronouns  (pick :pronouns)
+     :handle    handle
+     :sub-id    (or (pick :sub-id)
+                    (when (and handle uid (not= handle uid)) uid))}))
 
 (defn ^:ui profile-preview-content [args]
-  (let [{:keys [member tags]} args
-        pl         (:power-level member)
-        tag-data   (get tags (keyword (str pl)))
-        role-name  (:name tag-data)
-        role-color (or (:color tag-data) "var(--text-primary)")
-        icon-uri   (some-> tag-data :icon :key)]
+  (let [{:keys [member tags room-id]} args
+        tr            @(re-frame/subscribe [:i18n/tr])
+        active-engine @(re-frame/subscribe [:auth/active-engine])
+        active-uid    @(re-frame/subscribe [:auth/active-user-id])
+        own-profile   @(re-frame/subscribe [:sdk/profile])
+        uid           (some-> (:user-id member) str not-empty)
+        _             (ensure-member-profile-loaded! active-engine uid room-id)
+        remote        (when uid
+                        (:value (mem-cache/get-entry !profile-cache [(or active-engine :default) uid])))
+        self-p        (when (and uid active-uid (= uid (str active-uid)))
+                        own-profile)
+        st            (resolve-preview-state member remote self-p)
+        status        @(re-frame/subscribe [:presence/user (:uid st) (:presence remote)])
+        pl            (:power-level member)
+        tag-data      (get tags (keyword (str pl)))
+        role-name     (:name tag-data)
+        role-color    (:color tag-data)
+        icon-uri      (some-> tag-data :icon :key)
+        bn-url        (:bn-url st)
+        bn-color      (:bn-color st)]
     [:div.profile-preview-card
-     [:div.profile-preview-cover]
+     [:div.profile-preview-cover
+      {:style (when (and (nil? bn-url) bn-color)
+                {:background bn-color})}
+      (when bn-url
+        (if (local-media-url? bn-url)
+          [:img.profile-preview-banner-img
+           {:src bn-url
+            :alt ""}]
+          [media
+           {:uri     bn-url
+            :user-id active-uid
+            :class   "profile-preview-banner-img"
+            :alt     ""}]))]
      [:div.profile-preview-content
-      [:div.profile-preview-avatar-wrap
-       [avatar {:id   (:user-id member)
-                :name (:display-name member)
-                :url  (:avatar-url member)
-                :size 64}]]
-      [:div.profile-preview-id-block
-       [:span.profile-preview-name {:style {:color role-color}}
-        (:display-name member)]
-       [:span.profile-preview-id
-        (:user-id member)]]
-      (when role-name
-        [:div.profile-preview-role-row
-         (when icon-uri
-           [media {:uri   icon-uri
-                   :class "member-item-role-icon"
-                   :alt   role-name}])
-         [:span.profile-preview-role-text {:style {:color role-color}}
-          role-name]])
-      [plugins/plugin-slot :profile-actions {:member member}]]]))
-
+      [:div.profile-preview-header-row
+       [:div.profile-preview-avatar-wrap
+        [avatar {:id     (:uid st)
+                 :name   (:disp-name st)
+                 :url    (:av-url st)
+                 :size   68
+                 :status status}]]
+       (when (and uid (not= uid (str active-uid)))
+         [:button.profile-preview-dm-btn
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:dm/open-with-user uid])}
+          [icons/chat-bubble {:size "14px"}]
+          [:span (tr [:profile.mutuals/message-btn])]])]
+      [:div.profile-preview-body
+       [:div.profile-preview-id-block
+        [:span.profile-preview-name
+         (cond-> {}
+           role-color (assoc :style {:color role-color}))
+         (:disp-name st)]
+        (when (or (:handle st) (:pronouns st))
+          [:div.profile-preview-meta-row
+           (when (:handle st)
+             [:span.profile-preview-handle (:handle st)])
+           (when (and (:handle st) (:pronouns st))
+             [:span.profile-preview-dot "·"])
+           (when (:pronouns st)
+             [:span.profile-preview-pronouns (:pronouns st)])])
+        (when (:sub-id st)
+          [:span.profile-preview-id (:sub-id st)])]
+       (when (and role-name (nil? room-id))
+         [:div.profile-preview-role-row
+          (when icon-uri
+            [media {:uri   icon-uri
+                    :class "member-item-role-icon"
+                    :alt   role-name}])
+          [:span.profile-preview-role-text
+           (cond-> {}
+             role-color (assoc :style {:color role-color}))
+           role-name]])
+       (when (:bio st)
+         [:div.profile-preview-bio-card
+          [:div.profile-preview-section-label
+           (tr [:settings.profile/bio-label])]
+          [:div.profile-preview-bio (:bio st)]])
+       (when (and uid (not= uid (str active-uid)))
+         [profile-mutuals-section {:uid       uid
+                                   :engine-kw active-engine
+                                   :tr        tr}])
+       (when room-id
+         [member-popover-roles-and-mod
+          {:member  member
+           :room-id room-id
+           :tags    tags}])
+       [plugins/plugin-slot :profile-actions {:member (merge remote self-p member)}]]]]))
 
 (defmethod popover-component :profile-preview [_]
   profile-preview-content)
 
-(defn build-member-actions [{:keys [user-id display-name]} active-room]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    [{:id "view-profile"
-      :label (tr [:container.member-actions/view-profile])
-      :action #(log/info "View profile for:" user-id)}
-     {:id "mention"
-      :label (tr [:container.member-actions/mention] [display-name])
-      :action #(log/info "Mention:" user-id)}
-     {:id "message"
-      :label (tr [:container.member-actions/message])
-      :action #(log/info "DM:" user-id)}
-     {:id "kick"
-      :label (tr [:container.member-actions/kick])
-      :class-name "text-danger"
-      :action #(log/info "Kick:" user-id)}]))
+(defn- member-options-cache-key
+  [engine-id {:keys [user-id room-id context is-owner? is-self? power-level]}]
+  [(or engine-id :default)
+   (str user-id)
+   (some-> room-id str)
+   (keyword (or context :member-list))
+   (boolean is-owner?)
+   (boolean is-self?)
+   (int (or power-level 0))])
 
-(defn ^:ui member-context-menu-content [{:keys [member active-room x y close-fn]}]
-  (let [items (build-member-actions member active-room)]
-    [:<>
-     (for [{:keys [id label dispatch action class-name icon]} items]
-       ^{:key (or id label)}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
-                     (.stopPropagation e)
-                     (when dispatch
-                       (re-frame/dispatch dispatch))
-                     (when action
-                       (action))
-                     (re-frame/dispatch [:ui/close-context-menu]))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+(defn build-member-actions
+  ([member active-room]
+   (build-member-actions member active-room nil nil))
+  ([{:keys [user-id] :as member} active-room _x _y]
+   (let [active-uid @(re-frame/subscribe [:auth/active-user-id])
+         perms-data (when active-room @(re-frame/subscribe [:room-perms/data active-room]))
+         _          (when (and active-room (nil? perms-data))
+                      (re-frame/dispatch [:room-perms/fetch active-room]))
+         self?      (= (str user-id) (str active-uid))
+         can-roles? (boolean (or (:can-assign-roles? perms-data)
+                                 (:can-manage-roles? perms-data)))
+         can-kick?  (and (not self?) (not (:is-owner? member))
+                         (boolean (:can-kick? perms-data true)))
+         can-ban?   (and (not self?) (not (:is-owner? member))
+                         (boolean (:can-ban? perms-data true)))]
+     (cond-> [{:id        "view-profile"
+               :label-key :container.member-actions/view-profile
+               :icon      :members
+               :command   {:type :open-profile-preview}}]
+       (not self?)
+       (conj {:id        "direct-message"
+              :label-key :container.member-actions/message
+              :icon      :chat-bubble
+              :command   {:type  :dispatch
+                          :event [:dm/open-with-user (str user-id)]}})
+
+       true
+       (conj {:id        "copy-id"
+              :label-key :settings.context-menu/copy-id
+              :icon      :copy
+              :command   {:type :copy :text (str user-id)}})
+       (and active-room can-roles?)
+       (conj {:id        "manage-roles"
+              :label-key :room-settings.moderation/manage-roles
+              :icon      :shield
+              :command   {:type  :dispatch
+                          :event [:rooms/open-settings active-room :members]}})
+
+       (and active-room can-kick?)
+       (conj {:id         "kick"
+              :label-key  :container.member-actions/kick
+              :icon       :leave
+              :class-name "text-danger"
+              :command    {:type :moderate-member :mode :kick}})
+
+       (and active-room can-ban?)
+       (conj {:id         "ban"
+              :label-key  :room-settings.moderation/ban
+              :class-name "text-danger"
+              :command    {:type :moderate-member :mode :ban}})))))
+
+(re-frame/reg-event-db
+ :member-options/set
+ (fn [db [_ cache-key options]]
+   (assoc-in db [:member-options/by-key cache-key] (vec options))))
+
+(re-frame/reg-sub
+ :member-options/items
+ (fn [db [_ cache-key]]
+   (get-in db [:member-options/by-key cache-key])))
+
+(re-frame/reg-event-fx
+ :member-options/fetch
+ (fn [{:keys [db]} [_ req fallback-opts]]
+   (let [eng-id    (:active-engine db)
+         cache-key (member-options-cache-key eng-id req)
+         fallback! (fn [reason]
+                     (log/debug "Engine :get-member-options fallback:" reason)
+                     (re-frame/dispatch [:member-options/set cache-key (or fallback-opts [])]))]
+     (when (:user-id req)
+       (go
+         (try
+           (let [res  (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :get-member-options
+                            :arguments req}))
+                 opts (when (ok-status? res)
+                        (decode-edn-field res :options-edn :options))]
+             (if (sequential? opts)
+               (re-frame/dispatch [:member-options/set cache-key opts])
+               (fallback! res)))
+           (catch :default e
+             (fallback! e))))))
+   {}))
+
+(defn ^:ui engine-member-option-items
+  "Fetches and renders engine-supplied member option items for a context menu,
+  falling back to `build-member-actions` when the active engine does not supply them."
+  [{:keys [member active-room x y context close-fn on-item-click]}]
+  (r/with-let [!last-req (atom nil)]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          active-uid    @(re-frame/subscribe [:auth/active-user-id])
+          pl-tags       (when active-room
+                          @(re-frame/subscribe [:room/power-level-tags active-room]))
+          uid           (some-> (:user-id member) str not-empty)
+          req           (cond-> {:user-id      uid
+                                 :display-name (:display-name member)
+                                 :power-level  (int (or (:power-level member) 0))
+                                 :is-owner?    (boolean (:is-owner? member))
+                                 :is-self?     (= uid (str active-uid))
+                                 :context      (or context :member-list)}
+                          active-room (assoc :room-id (str active-room)))
+          fallback-opts (build-member-actions member active-room x y)
+          cache-key     (member-options-cache-key active-engine req)
+          _             (when (and uid (not= @!last-req cache-key))
+                          (reset! !last-req cache-key)
+                          (re-frame/dispatch [:member-options/fetch req fallback-opts]))
+          items         (or @(re-frame/subscribe [:member-options/items cache-key])
+                            fallback-opts)]
+      [engine-option-items {:tr            tr
+                            :items         items
+                            :ctx           {:member  member
+                                            :tags    (or pl-tags {})
+                                            :room-id active-room
+                                            :x       x
+                                            :y       y}
+                            :close-fn      close-fn
+                            :on-item-click on-item-click}])))
+
+(defn ^:ui member-context-menu-content [props]
+  [engine-member-option-items props])
 
 (defmethod context-menu-component :member-actions [_]
   member-context-menu-content)
