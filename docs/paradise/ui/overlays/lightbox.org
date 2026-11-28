@@ -18,11 +18,13 @@ Lightbox (or image previewer) is how we intend to provide a nice way to interact
                                         make-swipe-handlers]]))
 #+end_src
 
-**** Lightbox Component + CSS
+**** Lightbox Chrome Subcomponents
 
+Splits the top bar (counter, filename, options toggle, close button),
+previous/next navigation chevrons, and bottom options dock (filmstrip and
+action buttons) out of the gesture coordinator so the main component stays
+focused on pointer/zoom transforms.
 
-This is still a blob of math and such, but it does now rely on our global modal handling.
-So we define the component contents and then register in the modal multi-method.
 
 
 ***** Component
