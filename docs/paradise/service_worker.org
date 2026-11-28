@@ -23,11 +23,9 @@ cached and version-purged in IndexedDB by ~worker-loader~.
 #+begin_src clojurescript :tangle ../../src/service_worker.cljs
 (ns service-worker
   (:require [clojure.string :as str]
+            [paradise.shared.utils.encoding :refer [array-buffer->data-url]]
             [promesa.core :as p]
-            ["workbox-precaching" :refer [precacheAndRoute cleanupOutdatedCaches]]
-            ["workbox-routing" :refer [registerRoute]]
-            ["workbox-strategies" :refer [CacheFirst]]
-            ["workbox-expiration" :refer [ExpirationPlugin]])
+            ["workbox-precaching" :refer [precacheAndRoute cleanupOutdatedCaches]])
   (:require-macros [paradise.shared.utils.macros :refer [load-static-config]]))
 #+end_src
 
