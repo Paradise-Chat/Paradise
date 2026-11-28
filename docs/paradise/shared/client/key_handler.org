@@ -18,6 +18,7 @@ Later, we'll expand it to handle native input for features like push to talk.
   (:require
    [clojure.string :as str]
    [paradise.shared.utils.helpers :refer [normalize-id]]
+   [paradise.shared.utils.platform :as platform]
    [reagent.core :as r]
    [re-frame.core :as re-frame]
    [re-frame.db :as db]))
@@ -162,8 +163,7 @@ Interactions with storage and the IPC
 (defn format-accelerator [accelerator]
   (if (str/blank? accelerator)
     "Unbound"
-    (let [mac? (and (exists? js/navigator)
-                    (str/includes? (str/lower-case (or (.-platform js/navigator) "")) "mac"))]
+    (let [mac? (platform/mac-os?)]
       (-> accelerator
           (str/replace "CommandOrControl" (if mac? "Cmd" "Ctrl"))
           (str/replace "CmdOrCtrl" (if mac? "Cmd" "Ctrl"))
