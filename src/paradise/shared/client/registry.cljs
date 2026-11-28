@@ -9,6 +9,7 @@
 (def !active-overrides vreg/!active-overrides)
 (defonce !slots (r/atom {}))
 (defonce !live-callbacks (atom {}))
+(defonce !height-estimators (atom {}))
 
 (def resolve-anon-fn vreg/resolve-anon-fn)
 (def dehydrate vreg/dehydrate)
@@ -51,6 +52,17 @@
        (map (fn [{:keys [id component]}]
               ^{:key (or id (random-uuid))} [component]))))
 
+(defn reg-height-estimator!
+  "Registers a timeline height estimator fn for Virtualizer layout pre-measurement.
+   `estimator-fn` receives `{:msg :available-w :theme-metrics :db :base-preview-h :previews-enabled?}`
+   and returns nil, a numeric height delta, `{:delta-h n}`, or `{:replace-preview-h n}`."
+  ([id estimator-fn]
+   (reg-height-estimator! id estimator-fn nil))
+  ([id estimator-fn plugin-id]
+   (when (and id (fn? estimator-fn))
+     (swap! !height-estimators assoc id
+            {:id id :plugin-id plugin-id :fn estimator-fn}))))
+
 (defn remove-plugin-overrides! [target-plugin-id]
   (let [target-str (name target-plugin-id)]
     (swap! !active-overrides
@@ -59,7 +71,14 @@
                                 (and (map? override-data)
                                      (:plugin-id override-data)
                                      (= (name (:plugin-id override-data)) target-str)))
-                              overrides))))))
+                              overrides))))
+    (swap! !height-estimators
+           (fn [estimators]
+             (into {} (remove (fn [[_ entry]]
+                                (and (map? entry)
+                                     (:plugin-id entry)
+                                     (= (name (:plugin-id entry)) target-str)))
+                              estimators))))))
 
 (defn remove-plugin-slots! [target-plugin-id]
   (let [target-str (name target-plugin-id)]
