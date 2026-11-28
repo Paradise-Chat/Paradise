@@ -1104,30 +1104,44 @@ Ideally, we should break this apart more later.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
 (defn ^:ui timeline-send-button [{:keys [submit-message! active-id class]}]
   [:button.timeline-send-btn
-   {:type     "button"
-    :class    class
-    :on-click (fn [e]
-                (.preventDefault e)
-                (.stopPropagation e)
-                (submit-message!))}
+   {:type          "button"
+    :class         class
+    :on-mouse-down #(.preventDefault %)
+    :on-click      (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (submit-message!))}
    [plugins/plugin-slot :composer-send {:room-id active-id}]
    [icons/send]])
 
-(defn ^:ui timeline-emoji-button [{:keys [on-click active? room-id]}]
+(defn ^:ui timeline-emoji-button [{:keys [on-click active? room-id title]}]
   [:button.timeline-emoji-btn
    {:type     "button"
     :class    (when active? "is-active")
+    :title    title
     :on-click (fn [e]
                 (.stopPropagation e)
                 (when on-click (on-click)))}
    [icons/smiley]
    [plugins/plugin-slot :composer-emojis {:room-id room-id}]])
 
+(defn ^:ui timeline-sticker-button [{:keys [on-click active? title]}]
+  [:button.timeline-sticker-btn
+   {:type     "button"
+    :class    (when active? "is-active")
+    :title    title
+    :on-click (fn [e]
+                (.stopPropagation e)
+                (when on-click (on-click)))}
+   [icons/sticker]])
+
 (defn ^:ui message-input []
   (r/with-let [!editor              (r/atom nil)
                !sug-command         (r/atom nil)
                !recording-voice?    (r/atom false)
+               !voice-hold-gesture  (r/atom nil)
                !mobile-actions-open? (r/atom false)
+               !composer-tapping?   (atom false)
                !rec-room            (r/atom nil)]
     (fn []
       (let [active-id       @(re-frame/subscribe [:rooms/active-id])
@@ -1136,6 +1150,7 @@ Ideally, we should break this apart more later.
                               (when @!mobile-actions-open?
                                 (reset! !mobile-actions-open? false))
                               (when @!recording-voice?
+                                (reset! !voice-hold-gesture nil)
                                 (reset! !recording-voice? false)))
             is-mobile?      @(re-frame/subscribe [:ui/mobile?])
             recording?      @!recording-voice?
@@ -1147,8 +1162,27 @@ Ideally, we should break this apart more later.
             has-content?    @(re-frame/subscribe [:composer/has-content? active-id])
             submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
             context         @(re-frame/subscribe [:input/context active-id])
+            cmd-notice      @(re-frame/subscribe [:composer/notice active-id])
             picker-open?    (inline-emoji-open?)
+            picker-mode     (inline-emoji-mode)
+            picker-from-kb? (boolean (get-in @!active-popover [:props :from-keyboard?]))
+            kb-state        @!mobile-kb-state
+            _               (when is-mobile? (ensure-mobile-keyboard-tracker!))
             tr              @(re-frame/subscribe [:i18n/tr])
+            toggle-picker!  (fn [mode]
+                              (reset! !mobile-actions-open? false)
+                              (if (and picker-open? (= picker-mode mode))
+                                (do
+                                  (clear-kb-handoff!)
+                                  (re-frame/dispatch [:ui/close-popover]))
+                                (if is-mobile?
+                                  (if picker-open?
+                                    (re-frame/dispatch [:ui/open-popover :inline-emoji
+                                                        {:default-mode   mode
+                                                         :from-keyboard? true}])
+                                    (handoff-keyboard-to-emoji! @!editor mode))
+                                  (re-frame/dispatch [:ui/open-popover :inline-emoji
+                                                      {:default-mode mode}]))))
             on-pick-files!  (fn [e]
                               (let [files      (.. e -target -files)
                                     file-array (reduce (fn [acc i]
