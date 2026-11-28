@@ -13,12 +13,7 @@
         title             (or (when label-key (tr [label-key]))
                               fallback-label
                               id)]
-    [:div.settings-row
-     {:style {:display         "flex"
-              :align-items     "center"
-              :justify-content "space-between"
-              :gap             "16px"
-              :padding         "12px 0"}}
+    [:div.settings-card-row
      [:div.settings-row-text
       [:div.settings-row-title title]
       [:div.settings-row-description
@@ -27,13 +22,9 @@
          (tr [:settings.keybinds/scope-in-app]))]]
 
      [:div.settings-actions
-      {:style {:display     "flex"
-               :align-items "center"
-               :gap         "10px"}}
       (when global-supported?
         [:label.settings-toggle
-         {:title (tr [:settings.keybinds/global-toggle-tooltip])
-                     }
+         {:title (tr [:settings.keybinds/global-toggle-tooltip])}
          [:input
           {:type      "checkbox"
            :checked   (boolean global?)
@@ -43,22 +34,32 @@
          [:div.settings-toggle-track
           [:div.settings-toggle-knob]]])
 
-      [:button.settings-button
-       {:class    (when recording? "is-active")
+      [:button.settings-keybind-btn
+       {:type     "button"
+        :class    (when recording? "is-active")
         :on-click #(set-recording! (if recording? nil id))}
        (if recording?
-         (tr [:settings.keybinds/press-keys])
+        (tr [:settings.keybinds/press-keys])
          (kh/format-accelerator accelerator))]
 
-      [:button.settings-button
-       {:on-click #(re-frame/dispatch [:settings/reset-keybind id])}
-       (tr [:settings.keybinds/reset]) ]]]))
+      [:button.settings-button.secondary.is-compact
+       {:type     "button"
+        :on-click #(re-frame/dispatch [:settings/reset-keybind id])}
+       (tr [:settings.keybinds/reset])]]]))
+
+(defn- mark-recording-keybind! [recording?]
+  (unchecked-set js/globalThis "paradiseRecordingKeybind" (boolean recording?)))
+
+(defn- attach-keybind-listener! [handler]
+  (.addEventListener js/globalThis "keydown" handler true))
+
+(defn- detach-keybind-listener! [handler]
+  (.removeEventListener js/globalThis "keydown" handler true))
 
 (defn ^:ui keybinds-tab []
-  (r/with-let [!recording-id (r/atom nil)
+  (r/with-let [!recording-id  (r/atom nil)
                set-recording! (fn [next-id]
-                                (when (exists? js/window)
-                                  (set! (.-paradiseRecordingKeybind js/window) (some? next-id)))
+                                (mark-recording-keybind! (some? next-id))
                                 (reset! !recording-id next-id))
                on-key-down    (fn [^js e]
                                 (when-let [active-id @!recording-id]
@@ -70,40 +71,52 @@
                                       (re-frame/dispatch
                                        [:settings/set-keybind active-id {:accelerator acc}])
                                       (set-recording! nil)))))
-               _              (.addEventListener js/window "keydown" on-key-down true)]
+               _              (attach-keybind-listener! on-key-down)]
     (let [tr                @(re-frame/subscribe [:i18n/tr])
           keybinds          @(re-frame/subscribe [:settings/resolved-keybinds])
+          submit-enter?     @(re-frame/subscribe [:settings/submit-on-enter?])
           global-supported? (kh/global-shortcuts-supported?)]
       [:div.settings-tab-content
-       [:div.settings-page-header
-        [:h2.settings-heading
-         (tr [:settings.keybinds/title])]
-        [:p.settings-description
-         (tr [:settings.keybinds/description])
-             ]]
+       [:p.settings-subview-lead
+        (tr [:settings.keybinds/description])]
 
-       [:div.settings-section
-        [:div
-         {:style {:display         "flex"
-                  :align-items     "center"
-                  :justify-content "space-between"
-                  :margin-bottom   "12px"}}
-         [:h3.settings-subheading
+       (when global-supported?
+         [:p.settings-subview-lead
+          (tr [:settings.keybinds/global-hint])])
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr [:settings.advanced/prefs-subheading])]
+        [:div.settings-hub-group-card
+         [:div.settings-card-row.is-toggle
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/submit-on-enter-title])]
+           [:div.settings-row-description
+            (tr [:settings.advanced/submit-on-enter-description])]]
+          [:label.settings-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   (boolean submit-enter?)
+             :on-change #(re-frame/dispatch
+                          [:settings/set-submit-on-enter
+                           (.. % -target -checked)])}]
+           [:div.settings-toggle-track
+            [:div.settings-toggle-knob]]]]]]
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-header
+         [:span.settings-hub-group-label
           (tr [:settings.keybinds/shortcuts-subheading])]
-         [:button.settings-button
-          {:on-click #(re-frame/dispatch [:settings/reset-all-keybinds])}
+         [:button.settings-button.secondary.is-compact
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:settings/reset-all-keybinds])}
           (tr [:settings.keybinds/reset-all])]]
 
-        (when global-supported?
-          [:p.settings-description
-           {:style {:margin-bottom "12px"}}
-           (tr [:settings.keybinds/global-hint])
-               ])
-
-        (for [item keybinds]
-          ^{:key (:id item)}
-          [keybind-row item @!recording-id set-recording!])]])
+        [:div.settings-hub-group-card
+         (for [item keybinds]
+           ^{:key (:id item)}
+           [keybind-row item @!recording-id set-recording!])]]])
     (finally
-      (when (exists? js/window)
-        (set! (.-paradiseRecordingKeybind js/window) false))
-      (.removeEventListener js/window "keydown" on-key-down true))))
+      (mark-recording-keybind! false)
+      (detach-keybind-listener! on-key-down))))
