@@ -522,7 +522,7 @@ when a drop is committed.
        (let [updated-cache (assoc-in (:space-hierarchies-cache db {})
                                      [user-id space-id]
                                      fresh-rooms)]
-         (store/set-setting! "space_hierarchies" (pr-str updated-cache))
+         (store/set-setting! "space_hierarchies" updated-cache)
          {:db (assoc db :space-hierarchies-cache updated-cache)})))))
 
 (re-frame/reg-event-db
