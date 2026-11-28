@@ -1,16 +1,17 @@
 (ns paradise.engine.core
-  (:require
-   [clojure.string :as str]
-   [cljs.core.async :refer [go <!]]
-   [cljs-workers.worker :as worker]
-   [goog.object :as gobj]
-   [cljs.core.async.interop :refer-macros [<p!]]
-   [shadow.esm :refer [dynamic-import]]
-   [paradise.shared.registry :as registry]
-   [paradise.shared.sci-runner.engine :as sci]
-   ))
+  (:require [cljs-workers.worker :as worker]
+            [cljs.core.async :refer [<! go]]
+            [cljs.core.async.interop :refer-macros [<p!]]
+            [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.client.session-store :as session-store]
+            [paradise.shared.registry :as registry]
+            [paradise.shared.sci-runner.engine :as sci]
+            [paradise.shared.worker-loader :as worker-loader]))
 
 (defonce !loaded-engines (atom {}))
+(defonce !protocol-handlers (atom {}))
+(defonce !current-protocol (atom nil))
 
 (defn register-engine! [id handler-map]
   (swap! !loaded-engines assoc (keyword id) (js->clj handler-map :keywordize-keys true)))
@@ -19,22 +20,37 @@
   (let [prop-name (str (str/capitalize protocol) "EngineBootstrap")]
     (gobj/get js/globalThis prop-name)))
 
+(defn- suspend-previous-protocol! [next-kw]
+  (let [prev-kw @!current-protocol]
+    (when (and prev-kw (not= prev-kw next-kw))
+      (when-let [suspend-fn (get-in @!protocol-handlers [prev-kw :suspend-session])]
+        (try
+          (suspend-fn {})
+          (catch :default _ nil))))))
+
 (defn load-protocol-engine! [protocol]
   (go
-    (<! (registry/ensure-environment!))
-    (try
-      (let [url (registry/get-engine-url protocol)]
-        (if-not url
-          {:status "error" :msg (str "Unknown protocol or missing registry URL: " protocol)}
-          (let [_            (<p! (dynamic-import url))
-                bootstrap-fn (get-fallback-bootstrap protocol)]
-            (if bootstrap-fn
-              (do
+    (let [{:keys [status protocol-name proto-kw url manifest] :as res}
+          (<! (worker-loader/ensure-protocol-handlers!
+               !protocol-handlers
+               protocol
+               {:on-before-switch suspend-previous-protocol!}))]
+      (if (= "error" status)
+        res
+        (try
+          (if-let [bootstrap-fn (get-fallback-bootstrap protocol-name)]
+            (let [restore-fetch! (worker-loader/wrap-bootstrap-asset-fetch! protocol-name manifest)]
+              (try
                 (<! (bootstrap-fn register-engine! url))
-                {:status "success"})
-              {:status "error" :msg (str "Engine module did not export a bootstrap function: " protocol)}))))
-      (catch :default e
-        {:status "error" :msg (or (.-message e) (str e))}))))
+                (reset! !current-protocol proto-kw)
+                {:status "success"}
+                (finally
+                  (restore-fetch!))))
+            {:status "error"
+             :msg    (str "Engine module did not export a bootstrap function: "
+                          protocol-name)})
+          (catch :default e
+            {:status "error" :msg (or (.-message e) (str e))}))))))
 
 (worker/register :register-engine
                  (fn [payload]
@@ -54,6 +70,19 @@
                            {:status "error" :msg "No engine provided."}))
                        (catch :default e
                          {:status "error" :msg (.-message e)})))))
+
+(worker/register :list-all-stored-accounts
+                 (fn [_]
+                   (go
+                     (try
+                       (<! (registry/ensure-environment!))
+                       (let [seed-engines (keys (registry/resolve-engines))
+                             accounts     (<p! (session-store/list-all-stored-accounts seed-engines))]
+                         {:status   "success"
+                          :accounts accounts})
+                       (catch :default e
+                         {:status "error"
+                          :msg    (or (.-message e) (str e))})))))
 
 (worker/register :evaluate-worker-form
                 (fn [{:keys [plugin-id code]}]
