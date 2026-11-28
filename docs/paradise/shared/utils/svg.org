@@ -1034,6 +1034,14 @@ Some more room icons
 
 (defn map-pin [props]
   (build-icon-hiccup props map-pin-shapes))
+
+(def clock-shapes
+  [:g
+   [:circle {:cx "12" :cy "12" :r "10"}]
+   [:polyline {:points "12 6 12 12 16 14"}]])
+
+(defn clock [props]
+  (build-icon-hiccup props clock-shapes))
 #+end_src
 
 
