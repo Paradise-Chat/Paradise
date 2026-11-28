@@ -119,9 +119,16 @@ and the tab completion.
     :desc-key :composer.commands/desc-help
     :category :ui}])
 
+(def known-slash-commands
+  (into #{}
+        (mapcat (fn [{:keys [name aliases]}]
+                  (cons (safe-lower name) (map safe-lower aliases))))
+        slash-commands))
+
 (defn parse-slash-command
-  "If trimmed `text` begins with a single `/`, returns `{:command <lower-name> :args <str>}`.
-   Returns `:escape` if `text` starts with `//`, or `nil` for normal messages."
+  "If trimmed `text` begins with a single `/` matching a registered command,
+   returns `{:command <lower-name> :args <str>}`. Returns `{:escape? true :text ...}`
+   if `text` starts with `//`, or `nil` for normal messages and unknown `/...` tokens."
   [text]
   (let [trimmed (str/trim (str (or text "")))]
     (cond
@@ -131,15 +138,31 @@ and the tab completion.
 
       (str/starts-with? trimmed "/")
       (let [without-slash (subs trimmed 1)
-            [_ raw-cmd raw-args] (re-matches #"^([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$" without-slash)]
-        (when (seq raw-cmd)
-          {:command (str/lower-case raw-cmd)
+            [_ raw-cmd raw-args] (re-matches #"^([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$" without-slash)
+            cmd           (when (seq raw-cmd) (safe-lower raw-cmd))]
+        (when (and cmd (contains? known-slash-commands cmd))
+          {:command cmd
            :args    (str/trim (str (or raw-args "")))}))
 
       :else nil)))
 
+(defn- active-suggestion-items []
+  (let [state (get @rf-db/app-db :suggestion/menu)]
+    (when (:active? state)
+      (let [room-id (:active-room-id @rf-db/app-db)]
+        (case (:type state)
+          :emoji   @(re-frame/subscribe [:emoji/filtered-suggestions])
+          :command @(re-frame/subscribe [:command/filtered-suggestions])
+          @(re-frame/subscribe [:mention/filtered-users room-id]))))))
+
 (defn suggestion-active? []
-  (boolean (get-in @rf-db/app-db [:suggestion/menu :active?])))
+  (boolean (seq (active-suggestion-items))))
+
+(defn suggestion-claims-enter? []
+  (let [state (get @rf-db/app-db :suggestion/menu)]
+    (and (boolean (seq (active-suggestion-items)))
+         (or (not= (:type state) :command)
+             (boolean (:navigated? state))))))
 #+end_src
 
 
@@ -154,11 +177,11 @@ and the tab completion.
    [(re-frame/subscribe [:room/members-map room-id])
     (re-frame/subscribe [:suggestion/state])])
  (fn [[members state] _]
-   (let [query (str/lower-case (or (:query state) ""))]
+   (let [query (safe-lower (:query state))]
      (->> (vals members)
           (filter (fn [u]
-                    (let [dname (str/lower-case (or (:display-name u) (:name u) ""))
-                          uid   (str/lower-case (or (:id u) (:user-id u) ""))]
+                    (let [dname (safe-lower (or (:display-name u) (:name u)))
+                          uid   (safe-lower (or (:id u) (:user-id u)))]
                       (or (str/includes? dname query)
                           (str/includes? uid query)))))
           (take 8)))))
@@ -168,12 +191,12 @@ and the tab completion.
  :<- [:suggestion/state]
  :<- [:i18n/tr]
  (fn [[state tr] _]
-   (let [query (str/lower-case (str/trim (str (or (:query state) ""))))]
+   (let [query (safe-lower-trim (:query state))]
      (->> slash-commands
           (keep (fn [cmd]
                   (let [cname   (:name cmd)
                         aliases (or (:aliases cmd) [])
-                        desc    (str/lower-case (str (or (when (:desc-key cmd) (tr [(:desc-key cmd)])) "")))]
+                        desc    (safe-lower (when (:desc-key cmd) (tr [(:desc-key cmd)])))]
                     (cond
                       (str/blank? query)
                       [0 cmd]
@@ -205,14 +228,14 @@ and the tab completion.
  :<- [:emoji/usage]
  :<- [:suggestion/state]
  (fn [[packs usage state] _]
-   (let [query        (str/lower-case (str/trim (str (or (:query state) ""))))
+   (let [query        (safe-lower-trim (:query state))
          now          (js/Date.now)
          custom-items (for [pack (vals packs)
                             :let [pname (:name pack)]
                             [raw-sc item] (:images pack)
                             :let [sc  (clean-shortcode (or (:shortcode item) raw-sc))
                                   uri (or (:uri item) (:url item))]
-                            :when (and (seq sc) uri)]
+                            :when (and (seq sc) uri (not= (:can-emoji? item) false))]
                         [sc (assoc item
                                    :shortcode   sc
                                    :uri         uri
@@ -236,50 +259,50 @@ and the tab completion.
                             sc])))
               (take 12)
               vec))
-       (let [search-tags?   (>= (count query) 2)
-             score-custom   (keep (fn [[sc item]]
-                                    (let [sc-l (str/lower-case sc)
-                                          tier (cond
-                                                 (= sc-l query)                0
-                                                 (str/starts-with? sc-l query) 1
-                                                 (str/includes? sc-l query)    3
-                                                 (and search-tags?
-                                                      (:search-text item)
-                                                      (str/includes? (str/lower-case (:search-text item)) query))
-                                                 4
-                                                 :else nil)]
-                                      (when tier
-                                        [[tier (- (frec-of item)) 0 sc-l] [sc item]])))
-                                  custom-items)
-             score-unicode  (keep (fn [item]
-                                    (let [sc   (:shortcode item)
-                                          sc-l (str/lower-case sc)
-                                          scs  (:shortcodes item)
-                                          tier (cond
-                                                 (= sc-l query)
-                                                 0
-                                                 (some #(= (str/lower-case %) query) scs)
-                                                 0
-                                                 (str/starts-with? sc-l query)
-                                                 1
-                                                 (some #(str/starts-with? (str/lower-case %) query) scs)
-                                                 2
-                                                 (str/includes? sc-l query)
-                                                 3
-                                                 (some #(str/includes? (str/lower-case %) query) scs)
-                                                 3
-                                                 (and search-tags?
-                                                      (:search-text item)
-                                                      (str/includes? (:search-text item) query))
-                                                 4
-                                                 :else nil)]
-                                      (when tier
-                                        (let [matched-sc (or (first (filter #(str/starts-with? (str/lower-case %) query) scs))
-                                                             (first (filter #(str/includes? (str/lower-case %) query) scs))
-                                                             sc)]
-                                          [[tier (- (frec-of item)) 1 (str/lower-case matched-sc)]
-                                           [matched-sc (assoc item :shortcode matched-sc)]]))))
-                                  emotes/all-unicode-emojis)]
+       (let [search-tags?  (>= (count query) 2)
+             score-custom  (keep (fn [[sc item]]
+                                   (let [sc-l (safe-lower sc)
+                                         tier (cond
+                                                (= sc-l query)                0
+                                                (str/starts-with? sc-l query) 1
+                                                (str/includes? sc-l query)    3
+                                                (and search-tags?
+                                                     (:search-text item)
+                                                     (str/includes? (safe-lower (:search-text item)) query))
+                                                4
+                                                :else nil)]
+                                     (when tier
+                                       [[tier (- (frec-of item)) 0 sc-l] [sc item]])))
+                                 custom-items)
+             score-unicode (keep (fn [item]
+                                   (let [sc   (str (or (:shortcode item) ""))
+                                         sc-l (safe-lower sc)
+                                         scs  (:shortcodes item)
+                                         tier (cond
+                                                (= sc-l query)
+                                                0
+                                                (some #(= (safe-lower %) query) scs)
+                                                0
+                                                (str/starts-with? sc-l query)
+                                                1
+                                                (some #(str/starts-with? (safe-lower %) query) scs)
+                                                2
+                                                (str/includes? sc-l query)
+                                                3
+                                                (some #(str/includes? (safe-lower %) query) scs)
+                                                3
+                                                (and search-tags?
+                                                     (:search-text item)
+                                                     (str/includes? (safe-lower (:search-text item)) query))
+                                                4
+                                                :else nil)]
+                                     (when tier
+                                       (let [matched-sc (or (first (filter #(str/starts-with? (safe-lower %) query) scs))
+                                                            (first (filter #(str/includes? (safe-lower %) query) scs))
+                                                            sc)]
+                                         [[tier (- (frec-of item)) 1 (safe-lower matched-sc)]
+                                          [matched-sc (assoc item :shortcode matched-sc)]]))))
+                                 emotes/all-unicode-emojis)]
          (->> (concat score-custom score-unicode)
               (sort-by first)
               (map second)
@@ -296,36 +319,42 @@ and the tab completion.
          left   (when rect (.-left rect))
          height (when rect (.-height rect))]
      (assoc db :suggestion/menu
-            {:active? true
-             :type    type
-             :rect    (when (and (number? top) (number? left))
-                        {:top    top
-                         :left   left
-                         :height (or height 20)})
-             :query   ""
-             :index   0}))))
+            {:active?    true
+             :type       type
+             :rect       (when (and (number? top) (number? left))
+                           {:top    top
+                            :left   left
+                            :height (or height 20)})
+             :query      ""
+             :index      0
+             :navigated? false}))))
 
 (re-frame/reg-event-db
  :suggestion/filter-menu
  (fn [db [_ query]]
    (-> db
        (assoc-in [:suggestion/menu :query] query)
-       (assoc-in [:suggestion/menu :index] 0))))
+       (assoc-in [:suggestion/menu :index] 0)
+       (assoc-in [:suggestion/menu :navigated?] false))))
 
 (re-frame/reg-event-db
  :suggestion/close-menu
  (fn [db _]
-   (assoc-in db [:suggestion/menu :active?] false)))
+   (-> db
+       (assoc-in [:suggestion/menu :active?] false)
+       (assoc-in [:suggestion/menu :navigated?] false))))
 
 (re-frame/reg-event-db
  :suggestion/nav
  (fn [db [_ direction max-items]]
-   (update-in db [:suggestion/menu :index]
-              (fn [idx]
-                (let [current (or idx 0)]
-                  (if (= direction :next)
-                    (mod (inc current) max-items)
-                    (mod (dec current) max-items)))))))
+   (-> db
+       (assoc-in [:suggestion/menu :navigated?] true)
+       (update-in [:suggestion/menu :index]
+                  (fn [idx]
+                    (let [current (or idx 0)]
+                      (if (= direction :next)
+                        (mod (inc current) max-items)
+                        (mod (dec current) max-items))))))))
 
 (re-frame/reg-sub
  :suggestion/state
@@ -334,8 +363,9 @@ and the tab completion.
 
 (re-frame/reg-event-db
  :suggestion/set-index
- (fn [db [_ idx]]
-   (assoc-in db [:suggestion/menu :index] idx)))
+ (fn [db [_ idx navigated?]]
+   (cond-> (assoc-in db [:suggestion/menu :index] idx)
+     navigated? (assoc-in [:suggestion/menu :navigated?] true))))
 
 #+end_src
 
@@ -348,6 +378,7 @@ and the tab completion.
 
 (defn handle-suggestion-keydown [^js props type]
   (let [e       (.-event props)
+        k       (.-key e)
         room-id @(re-frame/subscribe [:rooms/active-id])
         state   @(re-frame/subscribe [:suggestion/state])
         items   (case type
@@ -356,13 +387,19 @@ and the tab completion.
                   @(re-frame/subscribe [:mention/filtered-users room-id]))
         idx     (let [raw (or (:index state) 0)]
                   (if (and (pos? (count items)) (< raw (count items))) raw 0))]
-    (if (= (.-key e) "Escape")
+    (cond
+      (= k "Escape")
       (do
         (re-frame/dispatch [:suggestion/close-menu])
         true)
+
+      (and (= type :command) (= k "Enter") (not (:navigated? state)))
+      false
+
+      :else
       (handle-list-navigation
        e items idx
-       #(re-frame/dispatch [:suggestion/set-index %])
+       #(re-frame/dispatch [:suggestion/set-index % true])
        (fn [raw-item]
          (when-let [cmd @!active-command]
            (let [selected-item (if (= type :emoji)
