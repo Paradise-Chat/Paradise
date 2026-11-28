@@ -1,14 +1,11 @@
 (ns paradise.shared.client.key-handler
   (:require
    [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [normalize-id]]
+   [paradise.shared.utils.platform :as platform]
    [reagent.core :as r]
    [re-frame.core :as re-frame]
    [re-frame.db :as db]))
-
-(defn- normalize-id [id]
-  (if (keyword? id)
-    (subs (str id) 1)
-    (str id)))
 
 (defmulti keybind-spec identity)
 
@@ -128,8 +125,7 @@
 (defn format-accelerator [accelerator]
   (if (str/blank? accelerator)
     "Unbound"
-    (let [mac? (and (exists? js/navigator)
-                    (str/includes? (str/lower-case (or (.-platform js/navigator) "")) "mac"))]
+    (let [mac? (platform/mac-os?)]
       (-> accelerator
           (str/replace "CommandOrControl" (if mac? "Cmd" "Ctrl"))
           (str/replace "CmdOrCtrl" (if mac? "Cmd" "Ctrl"))
@@ -142,20 +138,6 @@
           (= tag "textarea")
           (= tag "select")
           (boolean (.-isContentEditable el))))))
-
-(defn effective-keybind [entry overrides]
-  (let [ov (get overrides (:id entry))]
-    (cond
-      (map? ov)
-      (merge entry
-             {:accelerator (get ov "accelerator" (:accelerator ov (:accelerator entry)))
-              :global?     (boolean (get ov "global?" (:global? ov (:global? entry))))})
-
-      (string? ov)
-      (assoc entry :accelerator ov)
-
-      :else
-      entry)))
 
 (defn trigger-action! [action-id]
   (let [norm-id (normalize-id action-id)]
