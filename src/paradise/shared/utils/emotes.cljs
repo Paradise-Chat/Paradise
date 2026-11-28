@@ -1,0 +1,89 @@
+(ns ^:virtualizer/skip paradise.shared.utils.emotes
+  (:require
+   [paradise.shared.utils.helpers :refer [clean-shortcode]]))
+
+(defn normalize-emote-item
+  "Normalizes a single raw emote entry `[raw-key raw-val]` within a pack."
+  [{:keys [pack-id pack-name pack-usage pack-sticker?]} raw-k v]
+  (let [sc  (clean-shortcode (or (:shortcode v) raw-k))
+        uri (or (:uri v) (:url v))]
+    (when (and (seq sc) uri)
+      (let [raw-usage    (vec (or (seq (:usage v)) []))
+            img-usage    (set raw-usage)
+            has-usage?   (boolean (seq img-usage))
+            eff-usage    (if has-usage? raw-usage ["emoticon"])
+            can-sticker? (cond
+                           has-usage?       (contains? img-usage "sticker")
+                           (seq pack-usage) (contains? pack-usage "sticker")
+                           :else            true)
+            can-emoji?   (cond
+                           has-usage?       (or (contains? img-usage "emoticon")
+                                                (contains? img-usage "emoji"))
+                           (seq pack-usage) (or (contains? pack-usage "emoticon")
+                                                (contains? pack-usage "emoji")
+                                                (not pack-sticker?))
+                           :else            true)]
+        {:id               (or (:id v) (:emote-id v) (:sticker-id v) (str pack-id ":" sc))
+         :emote-id         (or (:emote-id v) (:id v))
+         :sticker-id       (:sticker-id v)
+         :shortcode        sc
+         :body             (or (:body v) sc)
+         :pack-name        pack-name
+         :uri              uri
+         :url              uri
+         :info             (:info v)
+         :search-text      (:search-text v)
+         :usage            eff-usage
+         :is-sticker       (contains? (set eff-usage) "sticker")
+         :is-unicode?      false
+         :can-emoji?       can-emoji?
+         :can-sticker?     can-sticker?
+         :is-sticker-pack? (boolean pack-sticker?)}))))
+
+(defn normalize-emote-pack
+  "Normalizes a single engine `{:pack-id :data}` pack map. Supports options:
+  - `:keep-empty?` (default `false`): retain packs with zero valid images
+  - `:sort-images?` (default `false`): emit `:images` as a shortcode-sorted
+    vector instead of a `{shortcode item}` map"
+  [{:keys [pack-id data]} & [{:keys [keep-empty? sort-images?]}]]
+  (let [clj-data      (if (map? data) data (js->clj data :keywordize-keys true))
+        raw-images    (or (:images clj-data) (:items clj-data) {})
+        pack-info     (or (:pack clj-data) clj-data)
+        pack-usage    (set (:usage pack-info []))
+        pack-sticker? (boolean (or (:is-sticker-pack? pack-info)
+                                   (contains? pack-usage "sticker")))
+        pid-str       (str pack-id)
+        pack-name     (or (:name pack-info) (:display_name pack-info) pid-str)
+        editable?     (if (contains? pack-info :editable?)
+                        (boolean (:editable? pack-info))
+                        true)
+        ctx           {:pack-id       pack-id
+                       :pack-name     pack-name
+                       :pack-usage    pack-usage
+                       :pack-sticker? pack-sticker?}
+        items         (keep (fn [[raw-k v]] (normalize-emote-item ctx raw-k v))
+                            raw-images)
+        images        (if sort-images?
+                        (vec (sort-by :shortcode items))
+                        (into {} (map (fn [item] [(:shortcode item) item])) items))]
+    (when (or keep-empty? (seq items))
+      {:id               pid-str
+       :pack-id          pack-id
+       :name             pack-name
+       :avatar           (or (:avatar pack-info) (:avatar_url pack-info))
+       :guild-id         (or (:guild-id pack-info) (:guild_id pack-info))
+       :editable?        editable?
+       :is-sticker-pack? pack-sticker?
+       :images           images})))
+
+(defn normalize-emote-packs
+  "Normalizes a sequence of engine `{:pack-id :data}` maps.
+  Options:
+  - `:as-map?` (default `false`): return `{pack-id pack}` instead of a vector
+  - `:keep-empty?` (default `false`): include empty packs
+  - `:sort-images?` (default `false`): sort each pack's `:images` into a vector"
+  [raw-packs & [{:keys [as-map? keep-empty? sort-images?] :as opts}]]
+  (let [normalized (keep #(normalize-emote-pack % opts) (remove nil? raw-packs))]
+    (if as-map?
+      (into {} (map (fn [p] [(:pack-id p) p])) normalized)
+      (vec normalized))))
