@@ -657,7 +657,13 @@ read receipts. This prevents any sort of spamming to the home server.
      :on-click (fn [e]
                  (let [live-blob-url (.-src (.-currentTarget e))]
                    (re-frame/dispatch [:ui/open-modal :image-lightbox
-                                       {:url live-blob-url
+                                       {:url            live-blob-url
+                                        :source         (:source content)
+                                        :source-map     (:source-map content)
+                                        :filename       (or (:filename content) (:caption content))
+                                        :mime-type      (get-in content [:info :mimetype])
+                                        :room-id        (or (:room-id event) (:room_id event))
+                                        :event-id       (:id event)
                                         :backdrop-props {:class "lightbox-backdrop"}
                                         :window-props   {:style {:background "transparent"
                                                                  :box-shadow "none"}}}])))}]
@@ -959,6 +965,9 @@ read receipts. This prevents any sort of spamming to the home server.
                                 0)))
         total-votes  (int (or (:total-votes poll-inner)
                               (reduce + 0 (map #(opt-count (str (:id %))) answers))))
+        max-votes    (if (and ended? (pos? total-votes) (seq answers))
+                       (apply max 0 (map #(opt-count (str (:id %))) answers))
+                       0)
         subtitle     (cond
                        ended?
                        (tr [:container.timeline.status.poll/ended])
@@ -991,6 +1000,7 @@ read receipts. This prevents any sort of spamming to the home server.
          (let [oid       (str id)
                selected? (contains? my-votes-set oid)
                cnt       (opt-count oid)
+               winner?   (and ended? (pos? max-votes) (= cnt max-votes))
                pct       (if (and show-res? (pos? total-votes))
                            (int (js/Math.round (* 100.0 (/ (double cnt) (double total-votes)))))
                            0)]
@@ -999,6 +1009,7 @@ read receipts. This prevents any sort of spamming to the home server.
             {:type     "button"
              :disabled ended?
              :class    (str (when selected? "is-selected ")
+                            (when winner? "is-winner ")
                             (when ended? "is-ended"))
              :on-click (fn [e]
                          (.preventDefault e)
@@ -1020,8 +1031,9 @@ read receipts. This prevents any sort of spamming to the home server.
                {:style {:width (str pct "%")}}])
             [:span.poll-option-check
              {:class (str (if multi? "is-checkbox " "is-radio ")
-                          (when selected? "is-checked"))}
-             (when selected?
+                          (when selected? "is-checked ")
+                          (when winner? "is-winner"))}
+             (when (or selected? winner?)
                [icons/check {:width "11px" :height "11px"}])]
             [:span.poll-option-label text]
             (when show-res?
@@ -1040,6 +1052,87 @@ read receipts. This prevents any sort of spamming to the home server.
                       (.stopPropagation e)
                       (re-frame/dispatch [:sdk/end-poll active-room poll-id]))}
          (tr [:container.timeline.status.poll/end-poll])])]]))
+
+(defn ^:ui poll-result-message [item result-inner active-room]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        room-id     (or (:room-id item) active-room)
+        question    (or (not-empty (str/trim (str (:question result-inner))))
+                        (tr [:container.timeline.status.poll/result-fallback]))
+        poll-id     (some-> (:poll-id result-inner) str not-empty)
+        total-votes (max 0 (int (or (:total-votes result-inner) 0)))
+        winners     (vec (or (:winners result-inner) []))
+        is-tie?     (or (boolean (:is-tie? result-inner))
+                        (> (count winners) 1))
+        vote-label  (if (= total-votes 1)
+                      (tr [:container.timeline.status.poll/one-vote])
+                      (tr [:container.timeline.status.poll/many-votes] [total-votes]))
+        badge-label (cond
+                      (and is-tie? (pos? total-votes))
+                      (str (tr [:container.timeline.status.poll/ended-badge])
+                           " · "
+                           (tr [:container.timeline.status.poll/winners-tie]))
+
+                      (seq winners)
+                      (str (tr [:container.timeline.status.poll/ended-badge])
+                           " · "
+                           (tr [:container.timeline.status.poll/winner]))
+
+                      :else
+                      (tr [:container.timeline.status.poll/ended-badge]))]
+    [:div.poll-card.poll-result-card.is-ended
+     [:div.poll-card-header
+      [:div.poll-question-row
+       [:span.poll-icon-badge [icons/poll {:width "16px" :height "16px"}]]
+       [:span.poll-question-text question]]
+      [:div.poll-subtitle badge-label]]
+
+     (cond
+       (seq winners)
+       (into
+        [:div.poll-options-list]
+        (map-indexed
+         (fn [idx {:keys [id text votes emoji-name emoji-url]}]
+           (let [cnt (max 0 (int (or votes 0)))
+                 pct (if (pos? total-votes)
+                       (int (js/Math.round (* 100.0 (/ (double cnt) (double total-votes)))))
+                       0)]
+             ^{:key (str (or id idx))}
+             [:div.poll-option-row.is-ended.is-winner.poll-result-winner-row
+              [:span.poll-option-fill
+               {:style {:width (str pct "%")}}]
+              [:span.poll-option-check.is-radio.is-winner
+               [icons/check {:width "11px" :height "11px"}]]
+              (cond
+                (not-empty emoji-url)
+                [:img.poll-result-emoji {:src emoji-url :alt (or emoji-name "")}]
+
+                (not-empty emoji-name)
+                [:span.poll-result-emoji-text emoji-name])
+              [:span.poll-option-label (or (not-empty text) (tr [:container.timeline.status.poll/winner]))]
+              (when (pos? total-votes)
+                [:span.poll-option-stats
+                 [:span.poll-option-pct (str pct "%")]
+                 [:span.poll-option-cnt (str "(" cnt ")")]])]))
+         winners))
+
+       (and is-tie? (pos? total-votes))
+       [:div.poll-result-empty
+        (tr [:container.timeline.status.poll/winners-tie])]
+
+       :else
+       [:div.poll-result-empty
+        (tr [:container.timeline.status.poll/no-votes])])
+
+     [:div.poll-card-footer
+      [:span.poll-total-votes vote-label]
+      (when (and poll-id room-id)
+        [:button.poll-end-btn.poll-view-btn
+         {:type     "button"
+          :on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch [:room/pretty-jump room-id {:event-id poll-id}]))}
+         (tr [:container.timeline.status.poll/view-poll])])]]))
 #+end_src
 
 
