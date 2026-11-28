@@ -526,23 +526,29 @@ forward.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
 (re-frame/reg-event-fx
  :sdk/send-sticker
- (fn [_ [_ room-id sticker-or-uri & [alt-text info]]]
+ (fn [{:keys [db]} [_ room-id sticker-or-uri & [alt-text info]]]
    (let [{:keys [id uri shortcode] :as sticker-map}
          (if (map? sticker-or-uri)
            sticker-or-uri
-           {:uri sticker-or-uri :shortcode alt-text :info info})]
+           {:uri sticker-or-uri :shortcode alt-text :info info})
+         raw-ctx   (get-in db [:input-context room-id])
+         reply-ctx (build-reply-context raw-ctx)]
      (go
-       (let [res (<! (mesh/do-with-thread! :engine-pool
-                                           {:handler   :send-raw-sticker
-                                            :arguments {:room-id    room-id
-                                                        :sticker-id id
-                                                        :uri        uri
-                                                        :alt-text   shortcode
-                                                        :info       (:info sticker-map)}}))]
+       (let [args (cond-> {:room-id    room-id
+                           :sticker-id id
+                           :uri        uri
+                           :alt-text   shortcode
+                           :info       (:info sticker-map)}
+                    reply-ctx (assoc :context reply-ctx))
+             res  (<! (mesh/do-with-thread! :engine-pool
+                                            {:handler   :send-raw-sticker
+                                             :arguments args}))]
          (if (= (:status res) "success")
            (log/info "Sticker sent!")
-           (log/error "Sticker failed:" (:msg res))))))
-   {}))
+           (log/error "Sticker failed:" (:msg res)))))
+     (if reply-ctx
+       {:db (update db :input-context dissoc room-id)}
+       {}))))
 #+end_src
 
 
@@ -567,12 +573,22 @@ forward.
      (and (= (:mode ctx) :edit)
           (= (-> ctx :target :id) event-id)))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :input/set-context
- (fn [db [_ room-id mode target-item]]
-   (when (= mode :edit)
-     (request-item-redraw! room-id (:id target-item)))
-   (assoc-in db [:input-context room-id] {:mode mode :target target-item})))
+ (fn [{:keys [db]} [_ room-id mode target-item]]
+   (let [prev-ctx (get-in db [:input-context room-id])
+         prev-id  (when (= (:mode prev-ctx) :edit)
+                    (get-in prev-ctx [:target :id]))
+         next-id  (:id target-item)
+         mobile?  (get-in db [:ui :mobile?])]
+     (when (and prev-id (not= prev-id next-id))
+       (request-item-redraw! room-id prev-id))
+     (when (= mode :edit)
+       (request-item-redraw! room-id next-id))
+     (cond-> {:db (assoc-in db [:input-context room-id] {:mode mode :target target-item})}
+       (= mode :reply)
+       (assoc :input/focus-composer {:focus?    (not mobile?)
+                                     :draft-key room-id})))))
 
 (re-frame/reg-event-db
  :input/clear-context
