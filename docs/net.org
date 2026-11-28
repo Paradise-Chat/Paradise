@@ -1,14 +1,13 @@
-
 ** Net
 
 **** Preface
 
-We need a convenient way to pass functionality around between native and web. We can easily do this by
-making wrapper functions to catch the specific calls needed.
-
-Now, because we want this to more or less be as easy to use as js/fetch we are going to make the
-namespace exist at the top-level.
-
+Provides a convenient top-level ~net/fetch~ facade that works uniformly across
+web, Electron, Capacitor mobile runtimes, and Web Workers. Authentication
+context and URL validation live in ~paradise.shared.net.auth~ and host-proxy
+plumbing lives in ~paradise.shared.net.proxy~; this facade re-exports their
+public API (mirroring ~paradise.shared.utils.encoding~) so callers, protocol
+engines, and SCI plugins keep a single ~net~ import.
 
 **** Imports
 
