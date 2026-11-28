@@ -16,6 +16,7 @@ Most of the call re-frame events and subscriptions are listed here
    [cljs.core.async.interop :refer [p->c]]
    [promesa.core :as p]
    [taoensso.timbre :as log]
+   [paradise.shared.client.session-store :as store]
    [paradise.ui.container.call.runtime :as rtc]
    [paradise.ui.container.call.native :as native]
    [paradise.ui.overlays.tray :as tray]))
@@ -202,6 +203,9 @@ Most of the call re-frame events and subscriptions are listed here
  (fn [{:keys [db]} [_ room-id opts]]
    (let [video-enabled? (boolean (or (:has-video? opts)
                                      (get-in db [:call :video-enabled?] false)))
+         deafened?      (boolean (get-in db [:call :deafened?] false))
+         audio-enabled? (and (not deafened?)
+                             (boolean (get-in db [:call :audio-enabled?] true)))
          native-ans?    (boolean (:is-native-answered? opts))
          room-name      (resolve-room-display-name db room-id)
          active-engine  (:active-engine db)]
@@ -213,7 +217,10 @@ Most of the call re-frame events and subscriptions are listed here
        (let [res (<! (mesh/do-with-thread!
                       :engine-pool
                       {:handler   :call/request-session
-                       :arguments {:room-id room-id}}))]
+                       :arguments {:room-id    room-id
+                                   :self-mute  (not audio-enabled?)
+                                   :self-deaf  deafened?
+                                   :self-video video-enabled?}}))]
          (if (or (= (:status res) :success) (= (:status res) "success"))
            (rf/dispatch [:call/session-negotiated res])
            (do
@@ -223,6 +230,7 @@ Most of the call re-frame events and subscriptions are listed here
      {:db (-> db
               (assoc-in [:call :active-room-id] room-id)
               (assoc-in [:call :is-active?] true)
+              (assoc-in [:call :audio-enabled?] audio-enabled?)
               (assoc-in [:call :video-enabled?] video-enabled?)
               (assoc-in [:call :status] :negotiating))})))
 
@@ -305,21 +313,73 @@ Most of the call re-frame events and subscriptions are listed here
 ****** Media Controls
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/call/events.cljs
+(defn- sync-engine-voice-state! [db]
+  (when (= (get-in db [:call :status]) :connected)
+    (when-let [room-id (get-in db [:call :active-room-id])]
+      (let [deafened?      (boolean (get-in db [:call :deafened?] false))
+            audio-enabled? (and (not deafened?)
+                                (boolean (get-in db [:call :audio-enabled?] true)))
+            video-enabled? (boolean (get-in db [:call :video-enabled?] false))]
+        (mesh/do-with-thread! :engine-pool
+                              {:handler   :call/driver-signal
+                               :arguments {:room-id room-id
+                                           :payload {:type       "voice-state"
+                                                     :self-mute  (not audio-enabled?)
+                                                     :self-deaf  deafened?
+                                                     :self-video video-enabled?}}})))))
+
+(rf/reg-event-db
+ :call/hydrate-audio-enabled
+ (fn [db [_ enabled?]]
+   (let [deafened? (boolean (get-in db [:call :deafened?] false))
+         val       (if (nil? enabled?) true (boolean enabled?))]
+     (assoc-in db [:call :audio-enabled?] (if deafened? false val)))))
+
+(rf/reg-event-db
+ :call/hydrate-deafened
+ (fn [db [_ deafened?]]
+   (let [deaf? (boolean deafened?)]
+     (cond-> (assoc-in db [:call :deafened?] deaf?)
+       deaf? (assoc-in [:call :audio-enabled?] false)))))
+
 (rf/reg-event-fx
  :call/set-microphone
  (fn [{:keys [db]} [_ enabled?]]
-   (let [enabled? (boolean enabled?)]
-     (if (= (get-in db [:call :status]) :connected)
-       {:call.driver/set-microphone enabled?}
-       {:db (assoc-in db [:call :audio-enabled?] enabled?)}))))
+   (let [enabled?   (boolean enabled?)
+         deafened?  (boolean (get-in db [:call :deafened?] false))
+         undeaf?    (and enabled? deafened?)
+         connected? (= (get-in db [:call :status]) :connected)
+         next-db    (cond-> (assoc-in db [:call :audio-enabled?] enabled?)
+                      undeaf? (assoc-in [:call :deafened?] false)
+                      undeaf? (assoc-in [:call :pre-deafen-audio-enabled?] nil))]
+     (store/set-setting! "call_audio_enabled" enabled?)
+     (when undeaf?
+       (store/set-setting! "call_deafened" false))
+     (when connected?
+       (sync-engine-voice-state! next-db))
+     (sync-call-tray
+      (cond-> {:db next-db}
+        connected? (assoc :call.driver/set-microphone enabled?))))))
 
 (rf/reg-event-fx
  :call/toggle-audio
  (fn [{:keys [db]} _]
-   (let [next-state (not (get-in db [:call :audio-enabled?] true))]
-     (if (= (get-in db [:call :status]) :connected)
-       {:call.driver/set-microphone next-state}
-       {:db (assoc-in db [:call :audio-enabled?] next-state)}))))
+   (let [deafened?  (boolean (get-in db [:call :deafened?] false))
+         cur-audio? (boolean (get-in db [:call :audio-enabled?] true))
+         next-state (if deafened? true (not cur-audio?))
+         undeaf?    (and next-state deafened?)
+         connected? (= (get-in db [:call :status]) :connected)
+         next-db    (cond-> (assoc-in db [:call :audio-enabled?] next-state)
+                      undeaf? (assoc-in [:call :deafened?] false)
+                      undeaf? (assoc-in [:call :pre-deafen-audio-enabled?] nil))]
+     (store/set-setting! "call_audio_enabled" next-state)
+     (when undeaf?
+       (store/set-setting! "call_deafened" false))
+     (when connected?
+       (sync-engine-voice-state! next-db))
+     (sync-call-tray
+      (cond-> {:db next-db}
+        connected? (assoc :call.driver/set-microphone next-state))))))
 
 (rf/reg-event-fx
  :call/toggle-video
@@ -338,7 +398,26 @@ Most of the call re-frame events and subscriptions are listed here
 (rf/reg-event-fx
  :call/toggle-deafen
  (fn [{:keys [db]} _]
-   (sync-call-tray {:db (update-in db [:call :deafened?] not)})))
+   (let [cur-deaf?  (boolean (get-in db [:call :deafened?] false))
+         next-deaf? (not cur-deaf?)
+         cur-audio? (boolean (get-in db [:call :audio-enabled?] true))
+         next-audio (if next-deaf?
+                      false
+                      (let [prev (get-in db [:call :pre-deafen-audio-enabled?])]
+                        (if (some? prev) (boolean prev) true)))
+         connected? (= (get-in db [:call :status]) :connected)
+         next-db    (-> db
+                        (assoc-in [:call :deafened?] next-deaf?)
+                        (assoc-in [:call :audio-enabled?] next-audio)
+                        (assoc-in [:call :pre-deafen-audio-enabled?]
+                                  (when next-deaf? cur-audio?)))]
+     (store/set-setting! "call_deafened" next-deaf?)
+     (store/set-setting! "call_audio_enabled" next-audio)
+     (when connected?
+       (sync-engine-voice-state! next-db))
+     (sync-call-tray
+      (cond-> {:db next-db}
+        connected? (assoc :call.driver/set-microphone next-audio))))))
 #+end_src
 
 
@@ -360,6 +439,8 @@ Most of the call re-frame events and subscriptions are listed here
          :audio (native/set-muted! room-id (not enabled?))
          :video (native/set-video-enabled! room-id enabled?)
          nil))
+     (when (#{:audio :video} kind)
+       (sync-engine-voice-state! next-db))
      (sync-call-tray {:db next-db}))))
 
 (rf/reg-event-fx
