@@ -217,15 +217,40 @@ when a drop is committed.
 **** Reframe Events
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/navigation/spaces/bar.cljs
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :sdk/set-spaces-list-sync
- (fn [db [_ spaces-vec]]
-   (if (= (:spaces-list db) spaces-vec)
-     db
-     (let [spaces-map (into {} (for [s spaces-vec :when (:id s)] [(:id s) s]))]
-       (-> db
-           (assoc :spaces-list spaces-vec)
-           (assoc :spaces spaces-map))))))
+ (fn [{:keys [db]} [_ spaces-vec]]
+   (let [spaces-map     (into {} (for [s spaces-vec :when (:id s)] [(:id s) s]))
+         cur-space      (:active-space-id db)
+         stale-space?   (and (some? cur-space)
+                             (seq spaces-vec)
+                             (not (contains? spaces-map cur-space)))
+         same-spaces?   (= (:spaces-list db) spaces-vec)]
+     (cond
+       stale-space?
+       (let [cur-room   (:active-room-id db)
+             cur-user   (:active-user-id db)
+             cur-engine (:active-engine db)]
+         (log/warn "Active space" cur-space "is missing from synced spaces; falling back to Home.")
+         (store/save-nav-state! cur-engine cur-user
+                                {:space-id nil :room-id cur-room :filter-id "people"})
+         {:db (-> db
+                  (assoc :spaces-list spaces-vec
+                         :spaces spaces-map
+                         :active-space-id nil
+                         :active-filter-id "people"))
+          :fx [[:dispatch [:room-list/apply-filter "people" {:force? true :persist? false}]]
+               [:dispatch [:session/reconcile-restored-room]]]})
+
+       same-spaces?
+       {}
+
+       :else
+       {:db (-> db
+                (assoc :spaces-list spaces-vec)
+                (assoc :spaces spaces-map))
+        :fx (when (get-in db [:session/pending-restore :applied?])
+              [[:dispatch [:session/reconcile-restored-room]]])}))))
 
 (re-frame/reg-event-db
  :sdk/update-space-view
@@ -287,6 +312,23 @@ when a drop is committed.
        (persist-user-layout db
                             (update-in layout [:groups group-id :collapsed?] not)
                             {:sync-remote? false})
+       {}))))
+
+(re-frame/reg-event-fx
+ :space-groups/set-all-collapsed
+ (fn [{:keys [db]} [_ collapsed?]]
+   (let [ukey   (active-layout-key db)
+         layout (materialize-layout db (get-in db [:space-layouts ukey]))
+         groups (:groups layout)]
+     (if (seq groups)
+       (let [next-groups (reduce-kv
+                          (fn [acc gid g]
+                            (assoc acc gid (assoc g :collapsed? (boolean collapsed?))))
+                          {}
+                          groups)]
+         (persist-user-layout db
+                              (assoc layout :groups next-groups)
+                              {:sync-remote? false}))
        {}))))
 
 (re-frame/reg-event-fx
@@ -565,18 +607,35 @@ when a drop is committed.
  :space/select
  (fn [{:keys [db]} [_ space-id]]
    (let [current-space (:active-space-id db)
-         current-user  (:active-user-id db)]
-     (store/set-setting! (str "last_space_" current-user) space-id)
-     (if (= current-space space-id)
-       {}
-       {:db         (-> db
-                        (assoc :active-space-id space-id)
-                        (assoc :active-room-id nil))
-        :dispatch-n (if space-id
-                      [[:sdk/paginate-space space-id]
-                       [:sdk/fetch-room-emotes :space space-id]
-                       [:sdk/fetch-space-hierarchy space-id]]
-                      [[:room-list/apply-filter "people"]])}))))
+         current-user  (:active-user-id db)
+         current-eng   (:active-engine db)
+         norm-space    (some-> space-id str not-empty)
+         next-filter   (if norm-space (:active-filter-id db "people") "people")]
+     (when (and current-eng current-user)
+       (store/save-nav-state! current-eng current-user
+                              {:space-id  norm-space
+                               :room-id   nil
+                               :filter-id next-filter}))
+     (if (= current-space norm-space)
+       (let [next-db (cond-> (assoc db :session/pending-restore nil)
+                       (= (:main-focus db) :discovery)
+                       (assoc :main-focus :timeline))]
+         (if (nil? norm-space)
+           {:db next-db
+            :fx [[:dispatch [:room-list/apply-filter "people" {:force? true :persist? false}]]]}
+           {:db next-db}))
+       {:db         (cond-> (-> db
+                                (assoc :active-space-id norm-space
+                                       :active-room-id nil
+                                       :session/pending-restore nil
+                                       :session/pending-room-select nil))
+                      (= (:main-focus db) :discovery)
+                      (assoc :main-focus :timeline))
+        :dispatch-n (if norm-space
+                      [[:sdk/paginate-space norm-space]
+                       [:sdk/fetch-room-emotes :space norm-space]
+                       [:sdk/fetch-space-hierarchy norm-space]]
+                      [[:room-list/apply-filter "people" {:force? true :persist? false}]])}))))
 #+end_src
 
 **** Reframe Subscriptions
@@ -1237,6 +1296,24 @@ folder, top/bottom halves reorder within that folder.
             :window-props   {:class "space-group-modal-window"}}
            props)]))
 
+(defn- open-create-space-modal! []
+  (re-frame/dispatch
+   [:ui/open-modal :create-space
+    {:backdrop-props {:class "lightbox-backdrop"}
+     :window-props   {:class "settings-window"
+                      :style {:display         "flex"
+                              :flex-direction  "column"
+                              :align-items     "center"
+                              :justify-content "center"
+                              :gap             "16px"}}}]))
+
+(defn- open-quick-switcher-modal! []
+  (re-frame/dispatch
+   [:ui/open-modal :quick-switcher
+    {:backdrop-props {:class "lightbox-backdrop"}
+     :window-props   {:style {:background "transparent"
+                              :box-shadow "none"}}}]))
+
 (defn ^:ui space-bar-context-menu [{:keys [space-id space-name group-id close-fn]}]
   (let [tr          @(re-frame/subscribe [:i18n/tr])
         groups      @(re-frame/subscribe [:spaces/groups-list])
@@ -1247,6 +1324,15 @@ folder, top/bottom halves reorder within that folder.
                         (close-fn)
                         (re-frame/dispatch [:ui/close-context-menu])))]
     [:<>
+     [engine-room-option-items
+      {:room-id       space-id
+       :room-name     space-name
+       :is-space?     true
+       :is-dm?        false
+       :context       :list
+       :membership    "joined"
+       :on-item-click finish!}]
+     [:div.context-menu-divider]
      [context-menu-submenu
       {:id              (str "move-to-" space-id)
        :icon            [icons/folder {:size "16px"}]
@@ -1284,19 +1370,129 @@ folder, top/bottom halves reorder within that folder.
                                                     {:mode              :create
                                                      :initial-space-ids [space-id]})))}
                             [:span.item-icon [icons/folder-plus {:size "16px"}]]
-                            [:span.item-label (tr [:navigation.spaces.bar/create-group])]]])}]
-     [:div.context-menu-divider]
-     [engine-room-option-items
-      {:room-id       space-id
-       :room-name     space-name
-       :is-space?     true
-       :is-dm?        false
-       :context       :list
-       :membership    "joined"
-       :on-item-click finish!}]]))
+                            [:span.item-label (tr [:navigation.spaces.bar/create-group])]]])}]]))
 
 (defmethod context-menu-component :space-bar-actions [_]
   space-bar-context-menu)
+
+(defn ^:ui spaces-home-context-menu [{:keys [close-fn]}]
+  (let [tr         @(re-frame/subscribe [:i18n/tr])
+        active-dms @(re-frame/subscribe [:rooms/active-dm-pops])
+        all-rooms  @(re-frame/subscribe [:rooms/all])
+        dm-ids     (->> (concat active-dms
+                                (filter #(or (:is-dm? %) (:is_direct %)) all-rooms))
+                        (keep :id)
+                        distinct
+                        vec)
+        finish!    (fn [f]
+                     (when f (f))
+                     (if close-fn
+                       (close-fn)
+                       (re-frame/dispatch [:ui/close-context-menu])))]
+    [:<>
+     (when (seq dm-ids)
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(doseq [rid dm-ids]
+                                 (re-frame/dispatch [:rooms/mark-read rid]))))}
+        [:span.item-icon [icons/check {:size "16px"}]]
+        [:span.item-label (tr [:navigation.spaces.bar/mark-all-dms-read])]])
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! #(re-frame/dispatch [:dm/open-create-modal])))}
+      [:span.item-icon [icons/chat-bubble {:size "16px"}]]
+      [:span.item-label (tr [:navigation.spaces.bar/new-dm])]]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! open-quick-switcher-modal!))}
+      [:span.item-icon [icons/search {:size "16px"}]]
+      [:span.item-label (tr [:navigation.spaces.bar/quick-switcher])]]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! #(re-frame/dispatch [:discovery/open])))}
+      [:span.item-icon [icons/compass {:size "16px"}]]
+      [:span.item-label (tr [:navigation.spaces.bar/discover])]]
+     [:div.context-menu-divider]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! open-create-space-modal!))}
+      [:span.item-icon [icons/plus-circle {:size "16px"}]]
+      [:span.item-label (tr [:navigation.actions/create-space])]]
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! #(re-frame/dispatch [:settings/open])))}
+      [:span.item-icon [icons/settings {:size "16px"}]]
+      [:span.item-label (tr [:navigation.actions/settings])]]]))
+
+(defmethod context-menu-component :spaces-home-actions [_]
+  spaces-home-context-menu)
+
+(defn ^:ui spaces-rail-context-menu [{:keys [close-fn]}]
+  (let [tr              @(re-frame/subscribe [:i18n/tr])
+        all-spaces      @(re-frame/subscribe [:spaces/all])
+        groups          @(re-frame/subscribe [:spaces/groups-list])
+        space-ids       (into [] (keep :id) all-spaces)
+        any-collapsed?  (boolean (some :collapsed? groups))
+        any-expanded?   (boolean (some (complement :collapsed?) groups))
+        has-bulk-items? (or any-collapsed? any-expanded? (seq space-ids))
+        finish!         (fn [f]
+                          (when f (f))
+                          (if close-fn
+                            (close-fn)
+                            (re-frame/dispatch [:ui/close-context-menu])))]
+    [:<>
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! open-create-space-modal!))}
+      [:span.item-icon [icons/plus-circle {:size "16px"}]]
+      [:span.item-label (tr [:navigation.actions/create-space])]]
+     (when (seq space-ids)
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(open-space-group-modal! {:mode :create})))}
+        [:span.item-icon [icons/folder-plus {:size "16px"}]]
+        [:span.item-label (tr [:navigation.spaces.bar/create-group])]])
+     [:div.context-menu-item
+      {:on-click (fn [e]
+                   (.stopPropagation e)
+                   (finish! #(re-frame/dispatch [:discovery/open])))}
+      [:span.item-icon [icons/compass {:size "16px"}]]
+      [:span.item-label (tr [:navigation.spaces.bar/discover])]]
+     (when has-bulk-items?
+       [:div.context-menu-divider])
+     (when any-collapsed?
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(re-frame/dispatch [:space-groups/set-all-collapsed false])))}
+        [:span.item-icon [icons/folder-open {:size "16px"}]]
+        [:span.item-label (tr [:navigation.spaces.bar/expand-all-groups])]])
+     (when any-expanded?
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(re-frame/dispatch [:space-groups/set-all-collapsed true])))}
+        [:span.item-icon [icons/folder {:size "16px"}]]
+        [:span.item-label (tr [:navigation.spaces.bar/collapse-all-groups])]])
+     (when (seq space-ids)
+       [:div.context-menu-item
+        {:on-click (fn [e]
+                     (.stopPropagation e)
+                     (finish! #(doseq [sid space-ids]
+                                 (re-frame/dispatch [:rooms/mark-read sid]))))}
+        [:span.item-icon [icons/check {:size "16px"}]]
+        [:span.item-label (tr [:navigation.spaces.bar/mark-all-spaces-read])]])]))
+
+(defmethod context-menu-component :spaces-rail-actions [_]
+  spaces-rail-context-menu)
 
 (defn ^:ui space-group-context-menu [{:keys [group-id space-ids collapsed? close-fn]}]
   (let [tr      @(re-frame/subscribe [:i18n/tr])
