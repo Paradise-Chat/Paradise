@@ -350,6 +350,28 @@ This is the interface that handles plugin installations.
   padding: 4px;
 }
 
+.settings-badge.destructive {
+  background: rgba(242, 63, 67, 0.16);
+  color: #f87171;
+  border: 1px solid rgba(242, 63, 67, 0.32);
+}
+
+.plugin-install-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(242, 63, 67, 0.14);
+  border: 1px solid rgba(242, 63, 67, 0.35);
+  color: #fca5a5;
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 #+end_src
 
 
@@ -366,28 +388,33 @@ We'll likely repurpose this at some point.
   (let [pending-plugin @(re-frame/subscribe [:plugins/pending-security-approval])
         tr             @(re-frame/subscribe [:i18n/tr])]
     (when pending-plugin
-      [:div.security-modal-card
-       [:h2.security-modal-title
-        (tr [:settings.plugins/security-title])]
-       [:p.security-modal-text
-        (tr [:settings.plugins/plugin-request
-             [:strong (:name (:plugin-map pending-plugin))]])]
-
-       [:div.security-script-list
-        (for [script (:external-scripts (:plugin-map pending-plugin))]
-          ^{:key script} [:div script])]
-
-       [:p.security-modal-warning
-        (tr [:settings.plugins/warning-message])]
-       [:div.security-modal-actions
-        [:button.settings-button.secondary
+      (let [plugin-name (or (get-in pending-plugin [:plugin-map :name])
+                            (:url pending-plugin)
+                            (tr [:settings.plugins/unknown-plugin]))
+            base-url    (:url pending-plugin)]
+        [:div.security-modal-overlay
          {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
-         (tr [:settings.plugins/cancel])]
-        [:button.settings-button.destructive
-         {:on-click #(re-frame/dispatch [:plugins/execute-boot-sequence
-                                         (:url pending-plugin)
-                                         (:plugin-map pending-plugin)])}
-         (tr [:settings.plugins/warning-confirmation])]]])))
+         [:div.security-modal-card
+          {:on-click #(.stopPropagation %)}
+          [:h2.security-modal-title
+           (tr [:settings.plugins/security-title])]
+          [:p.security-modal-text
+           (tr [:settings.plugins/plugin-request] [plugin-name])]
+
+          [:div.security-script-list
+           (for [script (get-in pending-plugin [:plugin-map :external-scripts])]
+             (let [resolved (reg/resolve-relative-url base-url script)]
+               ^{:key resolved} [:div resolved]))]
+
+          [:p.security-modal-warning
+           (tr [:settings.plugins/warning-message])]
+          [:div.security-modal-actions
+           [:button.settings-button.secondary
+            {:on-click #(re-frame/dispatch [:plugins/cancel-install])}
+            (tr [:settings.plugins/cancel])]
+           [:button.settings-button.destructive
+            {:on-click #(re-frame/dispatch [:plugins/approve-security-warning])}
+            (tr [:settings.plugins/warning-confirmation])]]]]))))
 #+end_src
 
 
@@ -404,7 +431,8 @@ We'll likely repurpose this at some point.
   display: flex;
   justify-content: center;
   align-items: center;
-  z-index: 9999;
+  padding: 16px;
+  z-index: 12500;
 }
 
 .security-modal-card {
