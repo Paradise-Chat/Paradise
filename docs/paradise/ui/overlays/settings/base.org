@@ -29,6 +29,7 @@ Not entirely important to read, but certainly interesting.
    [clojure.string :as str]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
+   [paradise.shared.utils.helpers :refer [mobile-runtime?]]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [modal-component]]
