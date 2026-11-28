@@ -7,7 +7,8 @@
             [taoensso.timbre :as log]))
 
 (def ^:const idb-version 1)
-(def ^:const max-candidate-decrypts 500)
+(def ^:const max-candidate-decrypts 2500)
+(def ^:const candidate-decrypt-batch-size 150)
 (def ^:const default-search-limit 50)
 (def ^:const debounce-flush-ms 250)
 
@@ -478,84 +479,25 @@
                  (flush-queue! engine-id))
                debounce-flush-ms)))))
 
-(defn extract-timeline-item [default-room-id item]
-  (when (and (map? item)
-             (not= (:type item) :virtual))
-    (let [rid (str (or (:room-id item) (:room_id item) default-room-id ""))
-          eid (str (or (:id item) ""))]
-      (when (and (not (str/blank? rid))
-                 (not (str/blank? eid))
-                 (not (str/starts-with? eid "virt-"))
-                 (not (str/starts-with? eid "gallery-")))
-        (let [ctag    (:content-tag item)
-              ktag    (get-in item [:content :tag])
-              mtag    (get-in item [:content :inner :tag])
-              mcont   (get-in item [:content :inner :content])]
-          (cond
-            (or (= ktag "Redacted") (= ctag "Redacted"))
-            {:action  :remove
-             :room-id rid
-             :id      eid}
+(defn- canonical-search-hit [rec]
+  {:id            (:id rec)
+   :room-id       (:room-id rec)
+   :sender-id     (:sender-id rec)
+   :sender-name   (:sender-name rec)
+   :sender-avatar (:sender-avatar rec)
+   :ts            (:ts rec)
+   :body          (or (:body rec) "")
+   :html          (:html rec)
+   :msg-tag       (or (:msg-tag rec) "Text")
+   :is-edited?    (boolean (:is-edited? rec))})
 
-            (and (= ctag "MsgLike") (= ktag "Message"))
-            (let [body (str/trim (str (or (:body mcont)
-                                          (:caption mcont)
-                                          (:filename mcont)
-                                          "")))]
-              (when-not (str/blank? body)
-                {:action  :upsert
-                 :event   {:id            eid
-                           :room-id       rid
-                           :sender-id     (:sender-id item)
-                           :sender-name   (:sender-name item)
-                           :sender-avatar (:sender-avatar item)
-                           :ts            (or (:ts item) (:timestamp item) 0)
-                           :body          body
-                           :html          (:html mcont)
-                           :msg-tag       (or mtag "Text")
-                           :is-edited?    (boolean (or (:is-edited? item)
-                                                       (:is-edited? mcont)))}}))
-
-            :else nil))))))
-
-(defn ingest-timeline-items! [engine-id room-id items]
-  (when (active-session engine-id)
-    (let [extracted (keep #(extract-timeline-item room-id %) items)
-          upserts   (keep #(when (= (:action %) :upsert) (:event %)) extracted)
-          removals  (filter #(= (:action %) :remove) extracted)]
-      (when (seq upserts)
-        (enqueue-events! engine-id upserts))
-      (doseq [{:keys [room-id id]} removals]
-        (remove-event! engine-id room-id id)))))
-
-(defn record->timeline-hit [rec]
-  (let [edited? (boolean (:is-edited? rec))
-        body    (or (:body rec) "")
-        mtag    (or (:msg-tag rec) "Text")]
-    {:id            (:id rec)
-     :internal-id   (:id rec)
-     :room-id       (:room-id rec)
-     :room_id       (:room-id rec)
-     :sender-id     (:sender-id rec)
-     :sender-name   (:sender-name rec)
-     :sender-avatar (:sender-avatar rec)
-     :ts            (:ts rec)
-     :timestamp     (:ts rec)
-     :is-edited?    edited?
-     :content-tag   "MsgLike"
-     :content       {:tag   "Message"
-                     :inner {:tag     mtag
-                             :content (cond-> {:body       body
-                                               :is-edited? edited?}
-                                        (:html rec) (assoc :html (:html rec)))}}
-     :type          :timeline}))
-
-(defn search! [engine-id {:keys [room-id query scope limit]}]
+(defn search! [engine-id {:keys [room-id query scope limit format-hit-fn]}]
   (if-let [sess (active-session engine-id)]
-    (let [parsed (crypto/parse-search-query query)
-          lim    (or limit default-search-limit)
-          all?   (= (keyword (or scope :room)) :all)
-          rid    (str (or room-id ""))]
+    (let [parsed    (crypto/parse-search-query query)
+          lim       (or limit default-search-limit)
+          all?      (= (keyword (or scope :room)) :all)
+          rid       (str (or room-id ""))
+          format-fn (or format-hit-fn canonical-search-hit)]
       (if (or (:empty? parsed)
               (empty? (:lookup-tokens parsed))
               (and (not all?) (str/blank? rid)))
@@ -581,20 +523,32 @@
                 (p/let [rows-map (backend-get-events backend intersected)
                         ordered  (->> (vals rows-map)
                                       (sort-by :ts >)
-                                      (take max-candidate-decrypts))
-                        recs     (p/all
-                                  (map (fn [{dk :doc-key :keys [iv ct]}]
-                                         (-> (crypto/decrypt-record aes-key dk iv ct)
-                                             (p/catch (fn [_] nil))))
-                                       ordered))]
-                  (->> recs
-                       (remove nil?)
-                       (filter (fn [rec]
-                                 (and (or all? (= (:room-id rec) rid))
-                                      (crypto/matches-parsed-query? parsed (:body rec)))))
-                       (sort-by :ts >)
-                       (take lim)
-                       (mapv record->timeline-hit)))))))))
+                                      (take max-candidate-decrypts)
+                                      vec)]
+                  (p/loop [offset  0
+                           matched []]
+                    (if (or (>= (count matched) lim)
+                            (>= offset (count ordered)))
+                      (->> matched
+                           (sort-by :ts >)
+                           (take lim)
+                           (mapv (comp format-fn canonical-search-hit)))
+                      (let [end-idx (min (count ordered)
+                                         (+ offset candidate-decrypt-batch-size))
+                            chunk   (subvec ordered offset end-idx)]
+                        (p/let [recs (p/all
+                                      (map (fn [{dk :doc-key :keys [iv ct]}]
+                                             (-> (crypto/decrypt-record aes-key dk iv ct)
+                                                 (p/catch (fn [_] nil))))
+                                           chunk))
+                                hits (->> recs
+                                          (remove nil?)
+                                          (filter (fn [rec]
+                                                    (and (or all? (= (:room-id rec) rid))
+                                                         (crypto/matches-parsed-query?
+                                                          parsed
+                                                          (:body rec))))))]
+                          (p/recur end-idx (into matched hits)))))))))))))
     (p/resolved [])))
 
 (defn load-checkpoint! [engine-id room-id]
