@@ -47,6 +47,7 @@ side-effects like too long of a name squishing the SVG (icon).
   cursor: pointer;
   position: relative;
   min-height: 32px;
+  overflow: hidden;
   transition: background 0.1s ease;
 }
 
@@ -165,6 +166,7 @@ actions, and such. Generally they'll only be visible when hovered.
     gap: 8px;
     height: 100%;
     padding-left: 20px;
+    padding-right: 8px;
     background: linear-gradient(to right, transparent, var(--surface-1) 20px);
 }
 
@@ -172,11 +174,17 @@ actions, and such. Generally they'll only be visible when hovered.
       opacity: 1;
 }
 
+.room-hover-actions .action-icon:hover .animate-spin {
+    animation: spin 2s linear infinite;
+    transform-origin: center;
+}
+
 @media (hover: hover) and (pointer: fine) {
     .room-item:hover .room-hover-actions {
         display: flex;
     }
     .room-item:hover .notification-badge,
+    .room-item:hover .unread-dot,
     .room-item:hover .room-typing-indicator {
         display: none;
     }
