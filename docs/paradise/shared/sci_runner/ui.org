@@ -37,10 +37,14 @@ ingest them all at once.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/sci_runner/ui.cljs
 (defonce !current-eval-plugin (atom nil))
 
+(declare evaluate-ui-form)
+
 (def ui-namespaces
   (ui-common/build-ui-namespaces
    !current-eval-plugin
-   {'paradise.shared.sci-runner.ui (expose-ns paradise.shared.sci-runner.ui)
+   {'paradise.shared.sci-runner.ui {'!current-eval-plugin !current-eval-plugin
+                                    'evaluate-ui-form     (fn [plugin-id form-str]
+                                                            (evaluate-ui-form plugin-id form-str))}
     'paradise.shared.client.state  {'!config      state/!config
                                     '!engine-pool state/!engine-pool}}))
 
@@ -54,12 +58,18 @@ ingest them all at once.
     :!virtualizer-pool state/!virtualizer-pool}
    ui-namespaces))
 
+(ctx-store/reset-ctx! ui-context)
+
 (defn evaluate-ui-form [plugin-id form-str]
-  (reset! !current-eval-plugin plugin-id)
-  (let [result (sci/eval-string* ui-context form-str)]
-    (mesh/do-with-thread! :virtualizer-pool
-                          {:handler   :eval-virtualizer-plugin
-                           :arguments {:plugin-id plugin-id
-                                       :code      form-str}})
-    result))
+  (let [prev-plugin @!current-eval-plugin]
+    (reset! !current-eval-plugin plugin-id)
+    (try
+      (let [result (sci/eval-string* ui-context form-str)]
+        (mesh/do-with-thread! :virtualizer-pool
+                              {:handler   :eval-virtualizer-plugin
+                               :arguments {:plugin-id plugin-id
+                                           :code      form-str}})
+        result)
+      (finally
+        (reset! !current-eval-plugin prev-plugin)))))
 #+end_src
