@@ -139,6 +139,73 @@ that is currently on screen.
 ***** Reframe Events and Subscriptions
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
+(defonce ^:private !receipt-debounce-timer (atom nil))
+(defonce ^:private !hidden-visible-queue (atom []))
+
+(defn- page-visible? []
+  (or (not (exists? js/document))
+      (not= (.-visibilityState js/document) "hidden")))
+
+(defn- trackable-event-id? [id]
+  (and (string? id)
+       (not (str/blank? id))
+       (not= id "read-marker")
+       (not (str/starts-with? id "virtual-"))
+       (not (str/starts-with? id "virt-"))
+       (not (str/starts-with? id "date-divider-"))
+       (not (str/starts-with? id "local-"))
+       (not (str/starts-with? id "optimistic-"))
+       (not (str/starts-with? id "tx-"))
+       (not (str/starts-with? id "pending-"))))
+
+(defn- schedule-receipt-flush! []
+  (when-let [t @!receipt-debounce-timer]
+    (js/clearTimeout t))
+  (reset! !receipt-debounce-timer
+          (js/setTimeout
+           (fn []
+             (reset! !receipt-debounce-timer nil)
+             (when (page-visible?)
+               (re-frame/dispatch [:msg/flush-receipts])))
+           350)))
+
+(defn- normalize-receipt-entry [entry]
+  (cond
+    (map? entry)    entry
+    (string? entry) {:event-id entry :ts 0}
+    :else           nil))
+
+(defn- build-live-index-map [room-id]
+  (let [live-items (vhydrator/get-stream room-id :live)]
+    (when (seq live-items)
+      (loop [i   0
+             n   (count live-items)
+             acc (transient {})]
+        (if (< i n)
+          (let [it (nth live-items i)
+                id (:id it)]
+            (recur (inc i) n (if id (assoc! acc id i) acc)))
+          (persistent! acc))))))
+
+(defn- candidate-newer? [idx-map cand prev]
+  (let [prev-norm (normalize-receipt-entry prev)]
+    (cond
+      (nil? cand) false
+      (nil? prev-norm) true
+      (= (:event-id cand) (:event-id prev-norm)) false
+      :else
+      (let [c-idx (when idx-map (get idx-map (:event-id cand)))
+            p-idx (when idx-map (get idx-map (:event-id prev-norm)))]
+        (if (and (some? c-idx) (some? p-idx))
+          (> c-idx p-idx)
+          (> (or (:ts cand) 0) (or (:ts prev-norm) 0)))))))
+
+(defn- pick-newest-candidate [idx-map candidates]
+  (reduce (fn [best cand]
+            (if (candidate-newer? idx-map cand best) cand best))
+          nil
+          candidates))
+
 (re-frame/reg-event-fx
  :room/mark-read
  (fn [_ [_ room-id event-id]]
