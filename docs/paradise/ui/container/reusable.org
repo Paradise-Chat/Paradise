@@ -459,6 +459,37 @@ as often times these on-off events are useful to be used as a jump-to.
       [:button.jump-btn
        {:on-click #(re-frame/dispatch [:room/pretty-jump target-room-id (:id event)])}
        (tr [:container/jump-to-message])]])))
+
+(defn ^:ui message-preview-list
+  ([active-room events]
+   [message-preview-list active-room events nil])
+  ([active-room events {:keys [show-room-badge? sort-by-ts-desc? class]}]
+   (let [ordered (if sort-by-ts-desc?
+                   (sort-by #(or (event-ts-ms %) 0) > events)
+                   events)
+         nodes   (first
+                  (reduce
+                   (fn [[acc prev-day idx] ev]
+                     (let [ts       (event-ts-ms ev)
+                           day-key  (date-day-key ts)
+                           hit-room (or (:room-id ev) (:room_id ev) active-room)
+                           row-key  (str hit-room "::" (or (:id ev) idx))
+                           acc'     (if (and day-key (not= day-key prev-day))
+                                      (conj acc
+                                            ^{:key (str "date-" idx "-" day-key)}
+                                            [date-divider {:ts ts :variant :preview}])
+                                      acc)]
+                       [(conj acc'
+                              ^{:key row-key}
+                              [message-preview-item
+                               active-room
+                               ev
+                               {:show-room-badge? show-room-badge?}])
+                        (or day-key prev-day)
+                        (inc idx)]))
+                   [[] nil 0]
+                   ordered))]
+     (into [:div {:class class}] nodes))))
 #+end_src
 
 
