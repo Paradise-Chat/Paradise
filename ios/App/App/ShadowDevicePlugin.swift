@@ -3,6 +3,74 @@ import Capacitor
 import JavaScriptCore
 import Security
 
+private final class ShadowHttpRedirectGuard: NSObject, URLSessionTaskDelegate {
+    private static let safeHeaders: Set<String> = [
+        "accept",
+        "accept-language",
+        "accept-encoding",
+        "user-agent",
+        "range",
+        "if-range"
+    ]
+
+    private static func exactOrigin(of url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = url.host?.lowercased(), !host.isEmpty else {
+            return nil
+        }
+        let defaultPort = (scheme == "https") ? 443 : 80
+        let port = url.port ?? defaultPort
+        return (port == defaultPort) ? "\(scheme)://\(host)" : "\(scheme)://\(host):\(port)"
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let nextUrl = request.url,
+              let nextScheme = nextUrl.scheme?.lowercased(),
+              nextScheme == "http" || nextScheme == "https" else {
+            completionHandler(nil)
+            return
+        }
+
+        let currentUrl = response.url ?? task.currentRequest?.url ?? task.originalRequest?.url
+        let sameOrigin = (currentUrl.flatMap(Self.exactOrigin(of:)) == Self.exactOrigin(of: nextUrl))
+        let existingHeaders = request.allHTTPHeaderFields ?? [:]
+        let hasSensitiveHeaders = existingHeaders.keys.contains { key in
+            let lower = key.lowercased()
+            return !Self.safeHeaders.contains(lower) && lower != "content-type"
+        }
+
+        if currentUrl?.scheme?.lowercased() == "https",
+           nextScheme == "http",
+           hasSensitiveHeaders {
+            completionHandler(nil)
+            return
+        }
+
+        var sanitized = request
+        sanitized.httpShouldHandleCookies = false
+        if !sameOrigin {
+            if (response.statusCode == 307 || response.statusCode == 308) &&
+                (sanitized.httpBody != nil || sanitized.httpBodyStream != nil) {
+                completionHandler(nil)
+                return
+            }
+            for key in existingHeaders.keys {
+                if !Self.safeHeaders.contains(key.lowercased()) {
+                    sanitized.setValue(nil, forHTTPHeaderField: key)
+                }
+            }
+        }
+        completionHandler(sanitized)
+    }
+}
+
 @objc(ShadowDevicePlugin)
 public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
 
@@ -22,6 +90,17 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
 
     let appGroupId = "group.com.gigiaj.paradise"
     private let stateLock = NSLock()
+    private let shadowRedirectGuard = ShadowHttpRedirectGuard()
+    private lazy var shadowUrlSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.urlCache = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.timeoutIntervalForRequest = 10
+        cfg.timeoutIntervalForResource = 15
+        return URLSession(configuration: cfg, delegate: shadowRedirectGuard, delegateQueue: nil)
+    }()
 
     private func extractOptions(_ call: CAPPluginCall) -> [String: Any] {
         var out: [String: Any] = [:]
@@ -77,7 +156,7 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
               let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted]) else {
             return
         }
-        try? data.write(to: url, options: [.atomic])
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     private func getShadowSession(userId: String) -> [String: String]? {
@@ -165,12 +244,16 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
             return bytes
         }
 
+        let sessionForHttp = self.shadowUrlSession
         let httpSync: @convention(block) (String, String, [String: String], String?) -> [String: Any] = { method, urlStr, headers, body in
-            guard let url = URL(string: urlStr) else {
-                return ["ok": false, "status": 0, "body": "Invalid URL: \(urlStr)"]
+            guard let url = URL(string: urlStr),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return ["ok": false, "status": 0, "body": "Invalid or unsupported URL"]
             }
             var req = URLRequest(url: url, timeoutInterval: 10.0)
             req.httpMethod = method
+            req.httpShouldHandleCookies = false
             for (k, v) in headers {
                 req.setValue(v, forHTTPHeaderField: k)
             }
@@ -182,7 +265,7 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
             let sem = DispatchSemaphore(value: 0)
             var responseDict: [String: Any] = ["ok": false, "status": 0, "body": "Timeout"]
 
-            URLSession.shared.dataTask(with: req) { data, response, error in
+            sessionForHttp.dataTask(with: req) { data, response, error in
                 if let httpResp = response as? HTTPURLResponse {
                     let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                     responseDict = [
@@ -215,7 +298,10 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
             let url = storeDir.appendingPathComponent(clean)
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             do {
-                try content.write(to: url, atomically: true, encoding: .utf8)
+                try Data(content.utf8).write(
+                    to: url,
+                    options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+                )
                 return true
             } catch {
                 return false
@@ -476,6 +562,105 @@ public class ShadowDevicePlugin: CAPPlugin, CAPBridgedPlugin {
         state["show_previews"] = isEnabled
         writeSharedState(state)
         call.resolve()
+    }
+
+    public static func evaluatePushNotification(payload: [String: Any]) -> [String: Any]? {
+        let appGroup = "group.com.gigiaj.paradise"
+        guard let containerUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) else {
+            return nil
+        }
+        let stateUrl = containerUrl.appendingPathComponent("shadow_state.json")
+        guard let stateData = try? Data(contentsOf: stateUrl),
+              let state = try? JSONSerialization.jsonObject(with: stateData) as? [String: Any],
+              let rawSessions = state["shadow_sessions"] as? [String: Any] else {
+            return nil
+        }
+
+        if (state["show_previews"] as? Bool) == false {
+            return ["title": "Incoming Call", "is_call": true, "call_action": "invite"]
+        }
+
+        func toStringMap(_ dict: [String: Any]) -> [String: String] {
+            var out: [String: String] = [:]
+            for (k, v) in dict {
+                out[k] = "\(v)"
+            }
+            return out
+        }
+
+        func cleanScript(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+                return nil
+            }
+            let last = (trimmed as NSString).lastPathComponent
+            return (last.isEmpty || !last.hasSuffix(".js")) ? nil : last
+        }
+
+        let accountHint = ((payload["account_id"] as? String) ?? (payload["user_id"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingScript = cleanScript(payload["script"] as? String)
+        let incomingEngine = (payload["engine"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeUser = state["active_push_user"] as? String
+
+        var matchedUser: String?
+        var matchedSession: [String: String]?
+
+        if let acc = accountHint, !acc.isEmpty {
+            if let exact = rawSessions[acc] as? [String: Any] {
+                matchedUser = acc
+                matchedSession = toStringMap(exact)
+            } else {
+                for (k, v) in rawSessions {
+                    if (k.hasPrefix("@\(acc):") || acc.hasPrefix("@\(k):")),
+                       let dict = v as? [String: Any] {
+                        matchedUser = k
+                        matchedSession = toStringMap(dict)
+                        break
+                    }
+                }
+            }
+            if matchedSession == nil {
+                return nil
+            }
+        } else if let active = activeUser, !active.isEmpty, let activeRaw = rawSessions[active] as? [String: Any] {
+            let candidate = toStringMap(activeRaw)
+            let sessEngine = candidate["engine"] ?? ""
+            let sessScript = cleanScript(candidate["notification_script"])
+            let scriptMatches = (incomingScript == nil || incomingScript == sessScript)
+            let engineMatches = (incomingEngine == nil || incomingEngine!.isEmpty || sessEngine.isEmpty || incomingEngine == sessEngine)
+            if scriptMatches && engineMatches {
+                matchedUser = active
+                matchedSession = candidate
+            }
+        }
+
+        if matchedSession == nil, (incomingScript != nil || (incomingEngine != nil && !incomingEngine!.isEmpty)) {
+            for (k, v) in rawSessions {
+                guard let dict = v as? [String: Any] else { continue }
+                let candidate = toStringMap(dict)
+                let sessScript = cleanScript(candidate["notification_script"])
+                if (incomingScript != nil && incomingScript == sessScript) ||
+                   (incomingEngine != nil && !incomingEngine!.isEmpty && candidate["engine"] == incomingEngine) {
+                    matchedUser = k
+                    matchedSession = candidate
+                    break
+                }
+            }
+        }
+
+        guard let resolvedUser = matchedUser,
+              let sessionData = matchedSession,
+              let scriptName = incomingScript ?? cleanScript(sessionData["notification_script"]) else {
+            return nil
+        }
+
+        let helper = ShadowDevicePlugin()
+        return try? helper.invokeWorkerFunction(
+            userId: resolvedUser,
+            scriptName: scriptName,
+            functionName: "resolvePushNotification",
+            arguments: [payload, sessionData]
+        )
     }
 }
 
