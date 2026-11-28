@@ -1,11 +1,144 @@
 (ns paradise.ui.input.autocomplete
   (:require
    [re-frame.core :as re-frame]
+   [re-frame.db :as rf-db]
    [taoensso.timbre :as log]
    [clojure.string :as str]
-   [paradise.shared.utils.helpers :refer [clean-shortcode]]
+   [paradise.shared.utils.helpers :refer [clean-shortcode safe-lower safe-lower-trim]]
+   [paradise.ui.input.emotes :as emotes]
    [paradise.media.component :refer [media]]
    [paradise.ui.global :refer [avatar handle-list-navigation selectable-list]]))
+
+(def slash-commands
+  [{:name     "me"
+    :args-key :composer.commands/args-action
+    :desc-key :composer.commands/desc-me
+    :category :message}
+   {:name     "shrug"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-shrug
+    :category :message}
+   {:name     "tableflip"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-tableflip
+    :category :message}
+   {:name     "unflip"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-unflip
+    :category :message}
+   {:name     "lenny"
+    :args-key :composer.commands/args-message
+    :desc-key :composer.commands/desc-lenny
+    :category :message}
+   {:name     "spoiler"
+    :args-key :composer.commands/args-text
+    :desc-key :composer.commands/desc-spoiler
+    :category :message}
+   {:name     "plain"
+    :args-key :composer.commands/args-text
+    :desc-key :composer.commands/desc-plain
+    :category :message}
+   {:name     "nick"
+    :args-key :composer.commands/args-name
+    :desc-key :composer.commands/desc-nick
+    :category :account}
+   {:name     "topic"
+    :args-key :composer.commands/args-topic
+    :desc-key :composer.commands/desc-topic
+    :category :room}
+   {:name     "roomname"
+    :args-key :composer.commands/args-name
+    :desc-key :composer.commands/desc-roomname
+    :category :room}
+   {:name     "join"
+    :args-key :composer.commands/args-room
+    :desc-key :composer.commands/desc-join
+    :category :room}
+   {:name     "leave"
+    :aliases  ["part"]
+    :desc-key :composer.commands/desc-leave
+    :category :room}
+   {:name     "invite"
+    :args-key :composer.commands/args-user-optional
+    :desc-key :composer.commands/desc-invite
+    :category :room}
+   {:name     "kick"
+    :args-key :composer.commands/args-user-reason
+    :desc-key :composer.commands/desc-kick
+    :category :moderation}
+   {:name     "ban"
+    :args-key :composer.commands/args-user-reason
+    :desc-key :composer.commands/desc-ban
+    :category :moderation}
+   {:name     "unban"
+    :args-key :composer.commands/args-user
+    :desc-key :composer.commands/desc-unban
+    :category :moderation}
+   {:name     "poll"
+    :desc-key :composer.commands/desc-poll
+    :category :ui}
+   {:name     "search"
+    :args-key :composer.commands/args-query
+    :desc-key :composer.commands/desc-search
+    :category :ui}
+   {:name     "pins"
+    :desc-key :composer.commands/desc-pins
+    :category :ui}
+   {:name     "members"
+    :desc-key :composer.commands/desc-members
+    :category :ui}
+   {:name     "settings"
+    :args-key :composer.commands/args-settings
+    :desc-key :composer.commands/desc-settings
+    :category :ui}
+   {:name     "help"
+    :desc-key :composer.commands/desc-help
+    :category :ui}])
+
+(def known-slash-commands
+  (into #{}
+        (mapcat (fn [{:keys [name aliases]}]
+                  (cons (safe-lower name) (map safe-lower aliases))))
+        slash-commands))
+
+(defn parse-slash-command
+  "If trimmed `text` begins with a single `/` matching a registered command,
+   returns `{:command <lower-name> :args <str>}`. Returns `{:escape? true :text ...}`
+   if `text` starts with `//`, or `nil` for normal messages and unknown `/...` tokens."
+  [text]
+  (let [trimmed (str/trim (str (or text "")))]
+    (cond
+      (str/starts-with? trimmed "//")
+      {:escape? true
+       :text    (subs trimmed 1)}
+
+      (str/starts-with? trimmed "/")
+      (let [without-slash (subs trimmed 1)
+            [_ raw-cmd raw-args] (re-matches #"^([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$" without-slash)
+            cmd           (when (seq raw-cmd) (safe-lower raw-cmd))]
+        (when (and cmd (contains? known-slash-commands cmd))
+          {:command cmd
+           :args    (str/trim (str (or raw-args "")))}))
+
+      :else nil)))
+
+(defn- active-suggestion-items []
+  (let [state (get @rf-db/app-db :suggestion/menu)]
+    (when (:active? state)
+      (let [room-id (:active-room-id @rf-db/app-db)]
+        (case (:type state)
+          :emoji   @(re-frame/subscribe [:emoji/filtered-suggestions])
+          :command @(re-frame/subscribe [:command/filtered-suggestions])
+          @(re-frame/subscribe [:mention/filtered-users room-id]))))))
+
+(defn suggestion-active? []
+  (boolean (seq (active-suggestion-items))))
+
+(defn suggestion-claims-enter? []
+  (let [state (get @rf-db/app-db :suggestion/menu)]
+    (and (boolean (seq (active-suggestion-items)))
+         (or (not= (:type state) :command)
+             (boolean (:navigated? state))))))
 
 (re-frame/reg-sub
  :mention/filtered-users
@@ -13,66 +146,184 @@
    [(re-frame/subscribe [:room/members-map room-id])
     (re-frame/subscribe [:suggestion/state])])
  (fn [[members state] _]
-   (let [query (str/lower-case (or (:query state) ""))]
+   (let [query (safe-lower (:query state))]
      (->> (vals members)
           (filter (fn [u]
-                    (let [dname (str/lower-case (or (:display-name u) (:name u) ""))
-                          uid   (str/lower-case (or (:id u) (:user-id u) ""))]
+                    (let [dname (safe-lower (or (:display-name u) (:name u)))
+                          uid   (safe-lower (or (:id u) (:user-id u)))]
                       (or (str/includes? dname query)
                           (str/includes? uid query)))))
           (take 8)))))
 
 (re-frame/reg-sub
+ :command/filtered-suggestions
+ :<- [:suggestion/state]
+ :<- [:i18n/tr]
+ (fn [[state tr] _]
+   (let [query (safe-lower-trim (:query state))]
+     (->> slash-commands
+          (keep (fn [cmd]
+                  (let [cname   (:name cmd)
+                        aliases (or (:aliases cmd) [])
+                        desc    (safe-lower (when (:desc-key cmd) (tr [(:desc-key cmd)])))]
+                    (cond
+                      (str/blank? query)
+                      [0 cmd]
+
+                      (= cname query)
+                      [0 cmd]
+
+                      (str/starts-with? cname query)
+                      [1 cmd]
+
+                      (some #(str/starts-with? % query) aliases)
+                      [2 cmd]
+
+                      (str/includes? cname query)
+                      [3 cmd]
+
+                      (str/includes? desc query)
+                      [4 cmd]
+
+                      :else nil))))
+          (sort-by (fn [[tier cmd]] [tier (:name cmd)]))
+          (map second)
+          (take 12)
+          vec))))
+
+(re-frame/reg-sub
  :emoji/filtered-suggestions
  :<- [:emoji/active-set]
+ :<- [:emoji/usage]
  :<- [:suggestion/state]
- (fn [[packs state] _]
-   (let [query (str/lower-case (str (or (:query state) "")))]
-     (->> (vals packs)
-          (mapcat (fn [pack]
-                    (for [[raw-sc item] (:images pack)
-                          :let [sc  (clean-shortcode (or (:shortcode item) raw-sc))
-                                uri (or (:uri item) (:url item))]
-                          :when (and (seq sc) uri)]
-                      [sc (assoc item
-                                 :shortcode sc
-                                 :uri       uri
-                                 :url       uri)])))
-          (filter (fn [[sc _]]
-                    (str/includes? (str/lower-case sc) query)))
-          (take 10)))))
+ (fn [[packs usage state] _]
+   (let [query        (safe-lower-trim (:query state))
+         now          (js/Date.now)
+         custom-items (for [pack (vals packs)
+                            :let [pname (:name pack)]
+                            [raw-sc item] (:images pack)
+                            :let [sc  (clean-shortcode (or (:shortcode item) raw-sc))
+                                  uri (or (:uri item) (:url item))]
+                            :when (and (seq sc) uri (not= (:can-emoji? item) false))]
+                        [sc (assoc item
+                                   :shortcode   sc
+                                   :uri         uri
+                                   :url         uri
+                                   :pack-name   pname
+                                   :is-unicode? false)])
+         frec-of      (fn [item]
+                        (if-let [entry (get usage (emotes/emoji-usage-key item))]
+                          (emotes/frecency-score entry now)
+                          0.0))]
+     (if (str/blank? query)
+       (let [all-candidates (concat custom-items
+                                    (map (fn [u] [(:shortcode u) u])
+                                         (take 60 emotes/all-unicode-emojis)))]
+         (->> all-candidates
+              (sort-by (fn [[sc item]]
+                         (let [frec (frec-of item)]
+                           [(if (pos? frec) 0 1)
+                            (- frec)
+                            (if (:is-unicode? item) 1 0)
+                            sc])))
+              (take 12)
+              vec))
+       (let [search-tags?  (>= (count query) 2)
+             score-custom  (keep (fn [[sc item]]
+                                   (let [sc-l (safe-lower sc)
+                                         tier (cond
+                                                (= sc-l query)                0
+                                                (str/starts-with? sc-l query) 1
+                                                (str/includes? sc-l query)    3
+                                                (and search-tags?
+                                                     (:search-text item)
+                                                     (str/includes? (safe-lower (:search-text item)) query))
+                                                4
+                                                :else nil)]
+                                     (when tier
+                                       [[tier (- (frec-of item)) 0 sc-l] [sc item]])))
+                                 custom-items)
+             score-unicode (keep (fn [item]
+                                   (let [sc   (str (or (:shortcode item) ""))
+                                         sc-l (safe-lower sc)
+                                         scs  (:shortcodes item)
+                                         tier (cond
+                                                (= sc-l query)
+                                                0
+                                                (some #(= (safe-lower %) query) scs)
+                                                0
+                                                (str/starts-with? sc-l query)
+                                                1
+                                                (some #(str/starts-with? (safe-lower %) query) scs)
+                                                2
+                                                (str/includes? sc-l query)
+                                                3
+                                                (some #(str/includes? (safe-lower %) query) scs)
+                                                3
+                                                (and search-tags?
+                                                     (:search-text item)
+                                                     (str/includes? (safe-lower (:search-text item)) query))
+                                                4
+                                                :else nil)]
+                                     (when tier
+                                       (let [matched-sc (or (first (filter #(str/starts-with? (safe-lower %) query) scs))
+                                                            (first (filter #(str/includes? (safe-lower %) query) scs))
+                                                            sc)]
+                                         [[tier (- (frec-of item)) 1 (safe-lower matched-sc)]
+                                          [matched-sc (assoc item :shortcode matched-sc)]]))))
+                                 emotes/all-unicode-emojis)]
+         (->> (concat score-custom score-unicode)
+              (sort-by first)
+              (map second)
+              (take 12)
+              vec))))))
 
 (re-frame/reg-event-db
  :suggestion/open-menu
- (fn [db [_ type rect]]
-   (assoc db :suggestion/menu
-          {:active? true
-           :type    type
-           :rect    {:top    (.-top rect)
-                     :left   (.-left rect)
-                     :height (.-height rect)}
-           :query   ""
-           :index   0})))
+ (fn [db [_ type raw-rect]]
+   (let [rect   (try
+                  (if (fn? raw-rect) (raw-rect) raw-rect)
+                  (catch :default _ nil))
+         top    (when rect (.-top rect))
+         left   (when rect (.-left rect))
+         height (when rect (.-height rect))]
+     (assoc db :suggestion/menu
+            {:active?    true
+             :type       type
+             :rect       (when (and (number? top) (number? left))
+                           {:top    top
+                            :left   left
+                            :height (or height 20)})
+             :query      ""
+             :index      0
+             :navigated? false}))))
 
 (re-frame/reg-event-db
  :suggestion/filter-menu
  (fn [db [_ query]]
-   (assoc-in db [:suggestion/menu :query] query)))
+   (-> db
+       (assoc-in [:suggestion/menu :query] query)
+       (assoc-in [:suggestion/menu :index] 0)
+       (assoc-in [:suggestion/menu :navigated?] false))))
 
 (re-frame/reg-event-db
  :suggestion/close-menu
  (fn [db _]
-   (assoc-in db [:suggestion/menu :active?] false)))
+   (-> db
+       (assoc-in [:suggestion/menu :active?] false)
+       (assoc-in [:suggestion/menu :navigated?] false))))
 
 (re-frame/reg-event-db
  :suggestion/nav
  (fn [db [_ direction max-items]]
-   (update-in db [:suggestion/menu :index]
-              (fn [idx]
-                (let [current (or idx 0)]
-                  (if (= direction :next)
-                    (mod (inc current) max-items)
-                    (mod (dec current) max-items)))))))
+   (-> db
+       (assoc-in [:suggestion/menu :navigated?] true)
+       (update-in [:suggestion/menu :index]
+                  (fn [idx]
+                    (let [current (or idx 0)]
+                      (if (= direction :next)
+                        (mod (inc current) max-items)
+                        (mod (dec current) max-items))))))))
 
 (re-frame/reg-sub
  :suggestion/state
@@ -81,48 +332,44 @@
 
 (re-frame/reg-event-db
  :suggestion/set-index
- (fn [db [_ idx]]
-   (assoc-in db [:suggestion/menu :index] idx)))
+ (fn [db [_ idx navigated?]]
+   (cond-> (assoc-in db [:suggestion/menu :index] idx)
+     navigated? (assoc-in [:suggestion/menu :navigated?] true))))
 
 
 (defonce !active-command (atom nil))
 
 (defn handle-suggestion-keydown [^js props type]
   (let [e       (.-event props)
+        k       (.-key e)
         room-id @(re-frame/subscribe [:rooms/active-id])
         state   @(re-frame/subscribe [:suggestion/state])
-        items   (if (= type :emoji)
-                  @(re-frame/subscribe [:emoji/filtered-suggestions])
+        items   (case type
+                  :emoji   @(re-frame/subscribe [:emoji/filtered-suggestions])
+                  :command @(re-frame/subscribe [:command/filtered-suggestions])
                   @(re-frame/subscribe [:mention/filtered-users room-id]))
-        idx     (or (:index state) 0)]
-    (handle-list-navigation
-     e items idx
-     #(re-frame/dispatch [:suggestion/set-index %])
-     (fn [raw-item]
-       (when-let [cmd @!active-command]
-         (let [selected-item (if (= type :emoji) (second raw-item) raw-item)]
-           (cmd #js {:props selected-item})))))))
+        idx     (let [raw (or (:index state) 0)]
+                  (if (and (pos? (count items)) (< raw (count items))) raw 0))]
+    (cond
+      (= k "Escape")
+      (do
+        (re-frame/dispatch [:suggestion/close-menu])
+        true)
 
-(defonce !active-command (atom nil))
+      (and (= type :command) (= k "Enter") (not (:navigated? state)))
+      false
 
-(defn handle-suggestion-keydown [^js props type]
-  (let [e       (.-event props)
-        room-id @(re-frame/subscribe [:rooms/active-id])
-        state   @(re-frame/subscribe [:suggestion/state])
-        items   (if (= type :emoji)
-                  @(re-frame/subscribe [:emoji/filtered-suggestions])
-                  @(re-frame/subscribe [:mention/filtered-users room-id]))
-        idx     (or (:index state) 0)]
-    (handle-list-navigation
-     e items idx
-     #(re-frame/dispatch [:suggestion/set-index %])
-     (fn [raw-item]
-       (when-let [cmd @!active-command]
-         (let [selected-item (if (= type :emoji)
-                               (let [[sc item] raw-item]
-                                 (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
-                               raw-item)]
-           (cmd #js {:props selected-item})))))))
+      :else
+      (handle-list-navigation
+       e items idx
+       #(re-frame/dispatch [:suggestion/set-index % true])
+       (fn [raw-item]
+         (when-let [cmd @!active-command]
+           (let [selected-item (if (= type :emoji)
+                                 (let [[sc item] raw-item]
+                                   (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
+                                 raw-item)]
+             (cmd #js {:props selected-item}))))))))
 
 (defn emoji-suggestion-options []
   #js {:char    ":"
@@ -130,27 +377,62 @@
                   (let [ed        (.-editor props)
                         range     (.-range props)
                         item      (.-props (.-props props))
-                        uri       (or (:uri item) (:url item))
                         shortcode (clean-shortcode (:shortcode item))]
-                    (-> ed .chain .focus
-                        (.deleteRange range)
-                        (.insertContent #js {:type  "customEmote"
-                                             :attrs #js {:id        (:id item)
-                                                         :shortcode shortcode
-                                                         :uri       uri
-                                                         :src       uri}})
-                        .run)))
+                    (re-frame/dispatch [:emoji/record-usage item])
+                    (if (:is-unicode? item)
+                      (-> ed .chain .focus
+                          (.deleteRange range)
+                          (.insertContent (str (:unicode item)))
+                          .run)
+                      (let [uri (or (:uri item) (:url item))]
+                        (-> ed .chain .focus
+                            (.deleteRange range)
+                            (.insertContent #js {:type  "customEmote"
+                                                 :attrs #js {:id        (:id item)
+                                                             :shortcode shortcode
+                                                             :uri       uri
+                                                             :src       uri}})
+                            .run)))))
        :render  (fn []
                   #js {:onStart   (fn [props]
                                     (reset! !active-command (.-command props))
-                                    (re-frame/dispatch [:suggestion/open-menu :emoji (.-clientRect props)]))
+                                    (re-frame/dispatch [:suggestion/open-menu :emoji (.-clientRect props)])
+                                    (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
                        :onUpdate  (fn [props]
                                     (reset! !active-command (.-command props))
-                                    (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
+                                    (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
                        :onKeyDown #(handle-suggestion-keydown % :emoji)
                        :onExit    (fn []
                                     (reset! !active-command nil)
                                     (re-frame/dispatch [:suggestion/close-menu]))})})
+
+(defn slash-command-options []
+  #js {:char        "/"
+       :startOfLine true
+       :allow       (fn [^js props]
+                      (let [range (.-range props)]
+                        (and range (= (.-from range) 1))))
+       :command     (fn [^js props]
+                      (let [ed    (.-editor props)
+                            range (.-range props)
+                            cmd   (.-props (.-props props))
+                            cname (:name cmd)]
+                        (-> ed .chain .focus
+                            (.deleteRange range)
+                            (.insertContent (str "/" cname " "))
+                            .run)))
+       :render      (fn []
+                      #js {:onStart   (fn [props]
+                                        (reset! !active-command (.-command props))
+                                        (re-frame/dispatch [:suggestion/open-menu :command (.-clientRect props)])
+                                        (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
+                           :onUpdate  (fn [props]
+                                        (reset! !active-command (.-command props))
+                                        (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
+                           :onKeyDown #(handle-suggestion-keydown % :command)
+                           :onExit    (fn []
+                                        (reset! !active-command nil)
+                                        (re-frame/dispatch [:suggestion/close-menu]))})})
 
 (defn user-mention-options [& [on-start on-exit]]
   #js {:char    "@"
@@ -174,10 +456,11 @@
                                     (when on-start (on-start (.-command props)))
                                     (let [active-id @(re-frame/subscribe [:rooms/active-id])]
                                       (re-frame/dispatch [:room/fetch-members active-id]))
-                                    (re-frame/dispatch [:suggestion/open-menu :mention (.-clientRect props)]))
+                                    (re-frame/dispatch [:suggestion/open-menu :mention (.-clientRect props)])
+                                    (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
                        :onUpdate  (fn [props]
                                     (reset! !active-command (.-command props))
-                                    (re-frame/dispatch [:suggestion/filter-menu (.-query props)]))
+                                    (re-frame/dispatch [:suggestion/filter-menu (or (.-query props) "")]))
                        :onKeyDown #(handle-suggestion-keydown % :mention)
                        :onExit    (fn []
                                     (reset! !active-command nil)
@@ -185,49 +468,66 @@
                                     (re-frame/dispatch [:suggestion/close-menu]))})})
 
 (defn suggestion-menu [& _]
-  (let [{:keys [active? type rect index]} @(re-frame/subscribe [:suggestion/state])
-        room-id @(re-frame/subscribe [:rooms/active-id])
-        emojis  @(re-frame/subscribe [:emoji/filtered-suggestions])
-        members @(re-frame/subscribe [:mention/filtered-users room-id])
-        tr      @(re-frame/subscribe [:i18n/tr])]
-    (when (and active? rect)
-      (let [is-emoji?     (= type :emoji)
-            items         (if is-emoji? emojis members)
-            max-items     (count items)
-            safe-idx      (if (>= index max-items) 0 index)
-            render-above? (> (:top rect) 250)]
-        [:div.suggestion-popup
-         {:class (when render-above? "is-above")
-          :style (if render-above?
-                   {:bottom (str (+ (- (.-innerHeight js/window) (:top rect)) 5) "px")
-                    :left   (str (:left rect) "px")}
-                   {:top    (str (+ (:top rect) (:height rect) 5) "px")
-                    :left   (str (:left rect) "px")})}
+  (let [{:keys [active? type index]} @(re-frame/subscribe [:suggestion/state])
+        room-id  @(re-frame/subscribe [:rooms/active-id])
+        emojis   @(re-frame/subscribe [:emoji/filtered-suggestions])
+        commands @(re-frame/subscribe [:command/filtered-suggestions])
+        members  @(re-frame/subscribe [:mention/filtered-users room-id])
+        tr       @(re-frame/subscribe [:i18n/tr])]
+    (when active?
+      (let [items     (case type
+                        :emoji   emojis
+                        :command commands
+                        members)
+            max-items (count items)
+            safe-idx  (if (>= index max-items) 0 index)]
+        [:div.suggestion-popup.is-above
          [selectable-list
           {:items          items
            :selected-index safe-idx
            :empty-text     (tr [:composer.suggestions/no-results])
            :item-class     "suggestion-item"
+           :on-highlight   #(re-frame/dispatch [:suggestion/set-index %])
            :key-fn         (fn [item]
-                             (if is-emoji?
-                               (first item)
+                             (case type
+                               :emoji   (let [[sc data] item]
+                                          (str (if (:is-unicode? data) "u-" "c-")
+                                               (or (:id data) sc) "-" sc))
+                               :command (str "cmd-" (:name item))
                                (or (:id item) (:user-id item))))
            :on-select      (fn [raw-item]
                              (when-let [cmd @!active-command]
-                               (let [selected (if is-emoji?
+                               (let [selected (if (= type :emoji)
                                                 (let [[sc item] raw-item]
                                                   (assoc item :shortcode (clean-shortcode (or (:shortcode item) sc))))
                                                 raw-item)]
                                  (cmd #js {:props selected}))))
            :render-item    (fn [item _selected?]
-                             (if is-emoji?
+                             (case type
+                               :emoji
                                (let [[shortcode emote-data] item
-                                     uri (or (:uri emote-data) (:url emote-data))]
+                                     unicode? (:is-unicode? emote-data)
+                                     uri      (or (:uri emote-data) (:url emote-data))]
                                  [:<>
-                                  [media {:uri   uri
-                                          :class "suggestion-img"
-                                          :alt   shortcode}]
-                                  [:span.suggestion-text ":" shortcode ":"]])
+                                  (if unicode?
+                                    [:span.suggestion-unicode (:unicode emote-data)]
+                                    [media {:uri   uri
+                                            :class "suggestion-img"
+                                            :alt   shortcode}])
+                                  [:div.suggestion-details
+                                   [:span.suggestion-text ":" shortcode ":"]
+                                   (when-let [sub (or (:label emote-data) (:pack-name emote-data))]
+                                     [:span.suggestion-id sub])]])
+
+                               :command
+                               [:div.suggestion-cmd-row
+                                [:div.suggestion-cmd-top
+                                 [:span.suggestion-cmd-name (str "/" (:name item))]
+                                 (when-let [ak (:args-key item)]
+                                   [:span.suggestion-cmd-args (tr [ak])])]
+                                (when-let [dk (:desc-key item)]
+                                  [:span.suggestion-cmd-desc (tr [dk])])]
+
                                (let [uid   (or (:id item) (:user-id item))
                                      dname (or (:display-name item) (:name item) uid "?")]
                                  [:<>
