@@ -208,22 +208,93 @@ easily done. It'll be something that needs to be revisited.
            (:macro (meta macro-var))
            (= (ns-name (:ns (meta macro-var))) 'paradise.shared.utils.macros)))))
 
+(defn extract-promesa-aliases [form]
+  (let [aliases (atom #{"promesa.core"})
+        refers  (atom #{})]
+    (walk/prewalk
+     (fn [x]
+       (when (and (vector? x) (= (first x) 'promesa.core))
+         (let [opts (apply hash-map (rest x))]
+           (when-let [a (:as opts)]
+             (swap! aliases conj (name a)))
+           (when-let [rs (:refer opts)]
+             (doseq [r rs]
+               (swap! refers conj (name r))))))
+       x)
+     form)
+    {:aliases @aliases :refers @refers}))
+
+(defn- wrap-body [body]
+  (if (= 1 (count body))
+    (first body)
+    (cons 'do body)))
+
+(defn- expand-promesa-let [bindings body]
+  (let [pairs (partition 2 bindings)
+        inner (reduce (fn [acc [lhs rhs]]
+                        (list 'promesa.core/then
+                              (list 'promesa.core/promise rhs)
+                              (list 'fn [lhs] acc)))
+                      (wrap-body body)
+                      (reverse pairs))]
+    (list 'promesa.core/then
+          (list 'promesa.core/promise nil)
+          (list 'fn ['_] inner))))
+
+(defn- expand-promesa-do [exprs]
+  (if (empty? exprs)
+    (list 'promesa.core/promise nil)
+    (let [inner (reduce (fn [acc expr]
+                          (list 'promesa.core/then
+                                (list 'promesa.core/promise expr)
+                                (list 'fn ['_] acc)))
+                        (last exprs)
+                        (reverse (butlast exprs)))]
+      (list 'promesa.core/then
+            (list 'promesa.core/promise nil)
+            (list 'fn ['_] inner)))))
+
+(defn- expand-promesa-plet [bindings body]
+  (let [pairs (vec (partition 2 bindings))]
+    (if (empty? pairs)
+      (list 'promesa.core/then
+            (list 'promesa.core/promise nil)
+            (list 'fn ['_] (wrap-body body)))
+      (list 'promesa.core/then
+            (list 'promesa.core/all
+                  (mapv (fn [[_ rhs]] (list 'promesa.core/promise rhs)) pairs))
+            (list 'fn [(mapv first pairs)] (wrap-body body))))))
+
+(defn- match-promesa-macro [sym {:keys [aliases refers]}]
+  (when (symbol? sym)
+    (let [ns-part (namespace sym)
+          nm-part (name sym)]
+      (cond
+        (and ns-part (contains? aliases ns-part) (#{"let" "do" "plet"} nm-part))
+        nm-part
+
+        (and (nil? ns-part) (contains? refers nm-part) (#{"let" "do" "plet"} nm-part))
+        nm-part
+
+        :else nil))))
+
 
 (defn expand-macros [form]
-  (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
-    (walk/prewalk
-      (fn [x]
-        (if (seq? x)
-          (let [sym (first x)]
-            (cond
-              (#{'go 'cljs.core.async/go} sym)
-              (let [unrolled-promises (walk/prewalk
+  (let [promesa-info (extract-promesa-aliases form)]
+    (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
+      (walk/prewalk
+       (fn [x]
+         (if (seq? x)
+           (let [sym (first x)]
+             (cond
+               (#{'go 'cljs.core.async/go} sym)
+               (let [unrolled-promises (walk/prewalk
                                         (fn [node]
                                           (if (and (seq? node) (= (first node) '<p!))
                                             (list '<! (list 'cljs.core.async.interop/p->c (second node)))
                                             node))
                                         (rest x))
-                    qualified         (walk/prewalk
+                     qualified         (walk/prewalk
                                         #(case %
                                            <! 'clojure.core.async/<!
                                            cljs.core.async/<! 'clojure.core.async/<!
