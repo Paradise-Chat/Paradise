@@ -1,5 +1,13 @@
 (ns paradise.ui.overlays.base
-(:require))
+  (:require
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
+   [paradise.shared.utils.helpers :refer [copy-to-clipboard! ok-status? resolve-item-label]]
+   [paradise.shared.utils.platform :as platform]
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 
 (defmulti modal-component identity)
 
@@ -34,3 +42,246 @@
 (defmethod context-menu-component :plugin-portal [_]
   (fn [{:keys [render-fn] :as props}]
     [render-fn props]))
+
+(defonce !context-submenus (r/atom []))
+(defonce ^:private !submenu-close-timer (atom nil))
+
+(defn cancel-submenu-close! []
+  (when-let [t @!submenu-close-timer]
+    (js/clearTimeout t)
+    (reset! !submenu-close-timer nil)))
+
+(defn clear-context-submenus! []
+  (cancel-submenu-close!)
+  (reset! !context-submenus []))
+
+(defn open-context-submenu!
+  "Opens a child submenu overlay owned by the active context menu at `level`
+  (default 0). Truncates any deeper or sibling submenus at or above `level`."
+  [{:keys [id level anchor-rect render-fn]}]
+  (cancel-submenu-close!)
+  (let [lvl (or level 0)]
+    (swap! !context-submenus
+           (fn [stack]
+             (conj (vec (take lvl stack))
+                   {:id          id
+                    :level       lvl
+                    :anchor-rect anchor-rect
+                    :render-fn   render-fn})))))
+
+(defn schedule-close-submenus-from!
+  "Closes child submenus at or above `level` after a brief hover grace period."
+  [level]
+  (cancel-submenu-close!)
+  (let [lvl (or level 0)]
+    (reset! !submenu-close-timer
+            (js/setTimeout
+             (fn []
+               (reset! !submenu-close-timer nil)
+               (swap! !context-submenus (fn [stack] (vec (take lvl stack)))))
+             160))))
+
+(defn ^:ui context-menu-submenu
+  "Renders a context menu item that opens a parent-managed child submenu panel
+  on desktop (hover or click) or expands inline inside the mobile sheet.
+  When `:on-click` is supplied, clicking the parent row on desktop invokes it
+  while hovering still opens the submenu."
+  [{:keys [id icon label subtitle class-name level close-fn on-click render-children]}]
+  (r/with-let [!mobile-open? (r/atom false)]
+    (let [lvl         (or level 0)
+          is-mobile?  (platform/mobile-viewport?)
+          sub-stack   @!context-submenus
+          desktop-on? (= id (:id (get sub-stack lvl)))
+          open?       (if is-mobile? @!mobile-open? desktop-on?)
+          open-sub!   (fn [e]
+                        (when-let [el (.-currentTarget e)]
+                          (let [rect (.getBoundingClientRect el)]
+                            (open-context-submenu!
+                             {:id          id
+                              :level       lvl
+                              :anchor-rect {:left   (.-left rect)
+                                            :right  (.-right rect)
+                                            :top    (.-top rect)
+                                            :bottom (.-bottom rect)
+                                            :width  (.-width rect)
+                                            :height (.-height rect)}
+                              :render-fn   render-children}))))]
+      [:<>
+       [:div.context-menu-item.has-submenu
+        {:class          [class-name (when open? "is-submenu-open")]
+         :on-mouse-enter (when-not is-mobile?
+                           (fn [e] (open-sub! e)))
+         :on-mouse-leave (when-not is-mobile?
+                           (fn [_] (schedule-close-submenus-from! lvl)))
+         :on-click       (fn [e]
+                           (.stopPropagation e)
+                           (cond
+                             is-mobile? (swap! !mobile-open? not)
+                             on-click   (on-click e)
+                             :else      (open-sub! e)))}
+        (when icon [:span.item-icon icon])
+        [:span.context-menu-item-copy
+         [:span.item-label label]
+         (when (seq subtitle)
+           [:span.item-sublabel subtitle])]
+        [:span.context-menu-submenu-chevron
+         {:class (when open? "is-open")}
+         [icons/chevron-down {:size "14px"}]]]
+       (when (and is-mobile? @!mobile-open?)
+         [:div.context-menu-inline-submenu
+          [render-children close-fn]])])))
+
+(defn ^:ui context-menu-items
+  "Renders a list of `{:keys [id label dispatch action class-name icon]}` context menu entries."
+  [items]
+  [:<>
+   (for [{:keys [id label dispatch action class-name icon]} items]
+     ^{:key (or id label)}
+     [:div.context-menu-item
+      {:class    class-name
+       :on-click (fn [e]
+                   (.stopPropagation e)
+                   (when dispatch
+                     (re-frame/dispatch dispatch))
+                   (when action
+                     (action))
+                   (re-frame/dispatch [:ui/close-context-menu]))}
+      (when icon [:span.item-icon icon])
+      [:span.item-label label]])])
+
+(defn normalize-dispatch-event
+  "Coerces a string event ID at index 0 of a re-frame dispatch vector into a keyword."
+  [ev]
+  (if (and (sequential? ev) (seq ev))
+    (let [v (vec ev)]
+      (if (string? (first v))
+        (assoc v 0 (keyword (first v)))
+        v))
+    ev))
+
+(defn execute-option-command!
+  "Executes an engine-supplied option item's `:action`, `:dispatch`, or `:command` map.
+  Optional `ctx` supplies UI-local context (such as `:x`, `:y`, `:member`, `:tags`, `:room-id`)
+  for commands like `:open-profile-preview` and `:moderate-member`."
+  ([item]
+   (execute-option-command! item nil))
+  ([{:keys [action dispatch command]} ctx]
+   (cond
+     (fn? action)
+     (action)
+
+     dispatch
+     (when-let [ev (normalize-dispatch-event dispatch)]
+       (re-frame/dispatch ev))
+
+     (map? command)
+     (case (keyword (:type command))
+       :dispatch
+       (when-let [ev (normalize-dispatch-event (:event command))]
+         (re-frame/dispatch ev))
+
+       :dispatch-many
+       (doseq [ev (:events command)]
+         (when-let [norm (normalize-dispatch-event ev)]
+           (re-frame/dispatch norm)))
+
+       :copy
+       (when-let [txt (or (:text command) (:value command))]
+         (copy-to-clipboard! txt))
+
+       :open-profile-preview
+       (let [{:keys [member tags room-id x y]} ctx]
+         (re-frame/dispatch
+          [:ui/open-popover :profile-preview
+           {:x         (or (:x command) x 100)
+            :y         (or (:y command) y 100)
+            :width     300
+            :height    300
+            :backdrop? true
+            :member    (or (:member command) member)
+            :tags      (or (:tags command) tags {})
+            :room-id   (or (:room-id command) room-id)}]))
+
+       :moderate-member
+       (let [{:keys [member room-id]} ctx]
+         (re-frame/dispatch
+          [:ui/open-modal :moderate-member
+           {:room-id (or (:room-id command) room-id)
+            :member  (or (:member command) member)
+            :mode    (keyword (or (:mode command) :kick))}]))
+
+       :engine-rpc
+       (let [{:keys [handler arguments on-success-dispatch]} command]
+         (go
+           (try
+             (let [res (<! (mesh/do-with-thread!
+                            :engine-pool
+                            {:handler   (keyword handler)
+                             :arguments (or arguments {})}))]
+               (when (and on-success-dispatch (ok-status? res))
+                 (re-frame/dispatch (normalize-dispatch-event on-success-dispatch))))
+             (catch :default e
+               (log/error "Option command RPC failed:" handler e)))))
+
+       nil)
+
+     :else nil)))
+
+(defn ^:ui engine-option-items
+  "Renders a list of declarative engine option maps (including dividers, icons,
+  i18n labels, and commands) inside a context menu. Optional
+  `:render-submenu-by-id` maps option `:id` strings to `(fn [item close-fn] ...)`
+  submenu renderers, and `:subtitle-by-id` maps option `:id` strings to
+  secondary subtitle text."
+  [{:keys [tr items ctx close-fn on-item-click render-submenu-by-id subtitle-by-id]}]
+  [:<>
+   (for [{:keys [id class-name icon divider?] :as item} items]
+     (if divider?
+       ^{:key (or id (str (random-uuid)))}
+       [:div.context-menu-divider]
+       (let [lbl        (resolve-item-label tr item)
+             subtitle   (or (:subtitle item) (get subtitle-by-id id))
+             icon-el    (icons/resolve-icon icon)
+             run-item!  (fn [_]
+                          (if on-item-click
+                            (on-item-click #(execute-option-command! item ctx))
+                            (do
+                              (execute-option-command! item ctx)
+                              (if close-fn
+                                (close-fn)
+                                (re-frame/dispatch [:ui/close-context-menu])))))
+             sub-render (or (:submenu-render-fn item)
+                            (get render-submenu-by-id id))]
+         (if sub-render
+           ^{:key (or id lbl)}
+           [context-menu-submenu
+            {:id              (str "opt-" (or id lbl))
+             :icon            icon-el
+             :label           lbl
+             :subtitle        subtitle
+             :class-name      class-name
+             :close-fn        close-fn
+             :on-click        run-item!
+             :render-children (fn [cfn] (sub-render item cfn))}]
+           ^{:key (or id lbl)}
+           [:div.context-menu-item
+            {:class    class-name
+             :on-click (fn [e]
+                         (.stopPropagation e)
+                         (run-item! e))}
+            (when icon-el [:span.item-icon icon-el])
+            (if (seq subtitle)
+              [:span.context-menu-item-copy
+               [:span.item-label lbl]
+               [:span.item-sublabel subtitle]]
+              [:span.item-label lbl])]))))])
+
+(defn ^:ui feedback-banners
+  "Renders standard error and/or success feedback banners inside overlay tabs."
+  [{:keys [error success style]}]
+  (let [attrs (when style {:style style})]
+    [:<>
+     (when error
+       [:div.emotes-mgr-banner.is-error attrs error])
+     (when success
+       [:div.emotes-mgr-banner.is-success attrs success])]))
