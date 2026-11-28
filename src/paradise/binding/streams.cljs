@@ -1,23 +1,164 @@
 (ns paradise.binding.streams
-  (:require [paradise.binding.matrix :as matrix]
-            [paradise.binding.nostr :as nostr]
-            ))
+  (:require
+   [paradise.binding.core :as binding]
+   [re-frame.core :as re-frame]
+   [re-frame.db :as db]
+   [virtualizer.client.hydrator :as vhydrator]))
 
-;; Should move this to core and place a method inside core
-;; to enable the engine to call the main thread and
-;; adjust the registration of components.
-;; Removal is easy as it is through the registry
-;; Addition would need to be treated as a plugin
-;; Most runtime plugins won't carry heavy weight
-;; as the timeline handling is offloaded from the
-;; main thread
-;; As such it can further be broken up to scale
-;; cleaner as well
-
-
-(defn init-engine-streams! [engine-id]
-  (case (keyword engine-id)
-    :matrix (matrix/init!)
-    :nostr  (nostr/init!)
-    nil))
-
+(defn init-engine-streams!
+  ([engine-id]
+   (binding/register-handlers!
+    (keyword engine-id)
+    {"home-rooms-diff"
+     (fn [_ get-val]
+       (re-frame/dispatch [:room-list/set-home-rooms-sync (get-val "rooms" :rooms)]))
+     "bg-rooms-diff"
+     (fn [_ get-val]
+       (re-frame/dispatch [:room-list/set-bg-rooms-sync (get-val "rooms" :rooms)]))
+     "bg-rooms-patch"
+     (fn [_ get-val]
+       (re-frame/dispatch [:room-list/patch-bg-rooms-sync
+                           (get-val "upserts" :upserts)
+                           (get-val "removals" :removals)]))
+     "global-spaces-diff"
+     (fn [_ get-val]
+       (re-frame/dispatch [:sdk/set-spaces-list-sync (get-val "spaces" :spaces)]))
+     "space-layout-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:space-groups/apply-remote-sync
+                           (get-val "layout" :layout)]))
+     "space-rooms-diff"
+     (fn [_ get-val]
+       (re-frame/dispatch [:sdk/update-space-view
+                           (get-val "space-id" :space-id)
+                           (get-val "rooms" :rooms)]))
+     "space-unreads-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:spaces/set-unreads-sync
+                           {:space-unreads (get-val "space-unreads" :space-unreads)
+                            :patch?        (boolean (get-val "patch?" :patch?))
+                            :removals      (get-val "removals" :removals)}]))
+     "dm-pops-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:rooms/set-dm-pops-sync
+                           (get-val "dms" :dms)]))
+     "in-app-notification"
+     (fn [_ get-val]
+       (re-frame/dispatch [:notif/incoming
+                           {:room-id     (get-val "room-id" :room-id)
+                            :event-id    (get-val "event-id" :event-id)
+                            :room-name   (get-val "room-name" :room-name)
+                            :sender-name (get-val "sender-name" :sender-name)
+                            :avatar-url  (get-val "avatar-url" :avatar-url)
+                            :body        (get-val "body" :body)
+                            :is-dm?      (boolean (get-val "is-dm?" :is-dm?))
+                            :is-mention? (boolean (get-val "is-mention?" :is-mention?))
+                            :ts          (get-val "ts" :ts)}]))
+     "room-parent-resolved"
+     (fn [_ get-val]
+       (re-frame/dispatch [:rooms/apply-parent-resolution
+                           (get-val "room-id" :room-id)
+                           (get-val "first-parent-id" :first-parent-id)]))
+     "room-preview-resolved"
+     (fn [_ get-val]
+       (re-frame/dispatch [:rooms/set-preview
+                           (get-val "room-id" :room-id)
+                           (get-val "preview" :preview)]))
+     "timeline-ready"
+     (fn [_ get-val]
+       (let [source-str (get-val "source" :source)
+             source-kw  (keyword (if (keyword? source-str) (name source-str) (str source-str)))
+             room-id    (get-val "room-id" :room-id)
+             ast-nodes  (get-val "ast-nodes" :ast-nodes)
+             paths      (get-val "lambda-paths" :lambda-paths)
+             stale-src? (and (contains? #{:live :focused} source-kw)
+                             (not (get-in @db/app-db [:timeline-subs room-id source-kw])))]
+         (when-not stale-src?
+           (try
+             (vhydrator/ingest-stream-batch! room-id source-str ast-nodes paths)
+             (catch :default e
+               (js/console.error "Error hydrating timeline batch:" e)))
+           (re-frame/dispatch [:app/worker-redraw-ping]))))
+     "widget-message"
+     (fn [_ get-val]
+       (re-frame/dispatch [:call/recv-widget-message (get-val "data" :data)]))
+     "recovery-state-update"
+     (fn [_ get-val]
+       (re-frame/dispatch [:sdk/handle-recovery-stream
+                           (keyword (get-val "state" :state))]))
+     "timeline-loading"
+     (fn [_ get-val]
+       (re-frame/dispatch [:timeline/set-loading
+                           (get-val "room-id" :room-id)
+                           (get-val "loading?" :loading?)]))
+     "typing-update"
+     (fn [_ get-val]
+       (re-frame/dispatch [:sdk/update-typing-users
+                           (get-val "room-id" :room-id)
+                           (get-val "users" :users)]))
+     "presence-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:presence/sync-batch
+                           (get-val "presences" :presences)]))
+     "own-presence-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:presence/receive-own-status
+                           (get-val "status" :status)
+                           (get-val "status-msg" :status-msg)]))
+     "pagination-status"
+     (fn [_ get-val]
+       (re-frame/dispatch [:sdk/update-pagination-status
+                           (get-val "room-id" :room-id)
+                           (get-val "status" :status)]))
+     "media-preview-config"
+     (fn [_ get-val]
+       (re-frame/dispatch [:settings/receive-media-preview-config
+                           (keyword (get-val "policy" :policy))]))
+     "pins-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:room/sync-pinned-ids
+                           (get-val "room-id" :room-id)
+                           (get-val "pinned-ids" :pinned-ids)]))
+     "pin-update"
+     (fn [_ get-val]
+       (re-frame/dispatch [:room/update-pinned-event
+                           (get-val "room-id" :room-id)
+                           (get-val "event" :event)]))
+     "call-keys-update"
+     (fn [_ get-val]
+       (re-frame/dispatch [:call/e2ee-key-received
+                           {:participant-id (get-val "participant-id" :participant-id)
+                            :key-index      (get-val "key-index" :key-index)
+                            :key-array      (get-val "key-array" :key-array)}]))
+     "call-engine-signal"
+     (fn [_ get-val]
+       (re-frame/dispatch [:call/engine-signal-received
+                           (get-val "payload" :payload)]))
+     "search-index-progress"
+     (fn [_ get-val]
+       (re-frame/dispatch [:search/receive-index-status
+                           {:supported?     (boolean (get-val "supported?" :supported?))
+                            :engine-id      (get-val "engine-id" :engine-id)
+                            :enabled?       (boolean (get-val "enabled?" :enabled?))
+                            :running?       (boolean (get-val "running?" :running?))
+                            :indexed-events (or (get-val "indexed-events" :indexed-events) 0)
+                            :rooms-done     (or (get-val "rooms-done" :rooms-done) 0)
+                            :rooms-total    (or (get-val "rooms-total" :rooms-total) 0)}]))
+     "threads-list-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:threads/sync-list
+                           {:room-id   (get-val "room-id" :room-id)
+                            :threads   (get-val "threads" :threads)
+                            :has-more? (boolean (get-val "has-more?" :has-more?))
+                            :loading?  (boolean (get-val "loading?" :loading?))}]))
+     "thread-timeline-sync"
+     (fn [_ get-val]
+       (re-frame/dispatch [:threads/sync-timeline
+                           {:room-id        (get-val "room-id" :room-id)
+                            :thread-id      (get-val "thread-id" :thread-id)
+                            :prev-thread-id (get-val "prev-thread-id" :prev-thread-id)
+                            :title          (get-val "title" :title)
+                            :root-event     (get-val "root-event" :root-event)
+                            :events         (get-val "events" :events)
+                            :has-more?      (boolean (get-val "has-more?" :has-more?))
+                            :loading?       (boolean (get-val "loading?" :loading?))}]))})))
