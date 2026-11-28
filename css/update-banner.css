@@ -1,6 +1,6 @@
 .global-update-banner {
   position: fixed;
-  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + 16px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 9999999;
