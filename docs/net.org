@@ -13,8 +13,11 @@ engines, and SCI plugins keep a single ~net~ import.
 
 #+begin_src clojurescript :tangle ../src/net.cljs
 (ns net
-  (:require [promesa.core :as p]
-            [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.net.auth :as net-auth]
+            [paradise.shared.net.proxy :as net-proxy]
+            [promesa.core :as p]))
 #+end_src
 
 **** Auth Context
