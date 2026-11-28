@@ -993,31 +993,100 @@ be used.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
 (defn ^:react inline-editor [item active-id]
-  (r/with-let [!editor (r/atom nil)]
+  (r/with-let [!editor   (r/atom nil)
+               !room-ref (atom active-id)
+               on-esc    (fn [^js e]
+                           (when (and (= (.-key e) "Escape")
+                                      (not (suggestion-active?)))
+                             (.preventDefault e)
+                             (.stopPropagation e)
+                             (re-frame/dispatch [:input/clear-context @!room-ref])))
+               _         (when (exists? js/window)
+                           (.addEventListener js/window "keydown" on-esc true))]
     (fn [item active-id]
-      (let [m-content    (get-in item [:content :inner :content])
+      (reset! !room-ref active-id)
+      (let [tr           @(re-frame/subscribe [:i18n/tr])
+            m-content    (get-in item [:content :inner :content])
             raw-html     (:html m-content)
+            orig-body    (str (or (:body m-content) ""))
             initial-text (if (seq raw-html)
                            (prepare-html-for-editor raw-html)
-                           (or (:body m-content) ""))
+                           orig-body)
+            edit-key     (str active-id ":edit:" (:id item))
+            cancel-edit! (fn []
+                           (re-frame/dispatch [:input/clear-context active-id]))
             save-edit!   (fn []
                            (when-let [ed @!editor]
-                             (let [{:keys [text html]} (extract-editor-payload ed)]
-                               (re-frame/dispatch [:msg/edit active-id item text html])
-                               (re-frame/dispatch [:input/clear-context active-id]))))]
+                             (let [{:keys [text html]} (extract-editor-payload ed)
+                                   trimmed             (str/trim (str text))
+                                   has-media?          (str/includes? (str html) "<img")
+                                   unchanged?          (and (not has-media?)
+                                                            (= trimmed (str/trim orig-body))
+                                                            (or (str/blank? (str raw-html))
+                                                                (= html raw-html)))]
+                               (cond
+                                 (and (str/blank? trimmed) (not has-media?))
+                                 false
+
+                                 unchanged?
+                                 (do
+                                   (cancel-edit!)
+                                   true)
+
+                                 :else
+                                 (do
+                                   (re-frame/dispatch [:msg/edit active-id item text html])
+                                   (re-frame/dispatch [:input/clear-context active-id])
+                                   true)))))]
         [:div.inline-editor-wrapper
+         {:on-click    #(.stopPropagation %)
+          :on-key-down (fn [^js e]
+                         (when (and (= (.-key e) "Escape")
+                                    (not (suggestion-active?)))
+                           (.preventDefault e)
+                           (.stopPropagation e)
+                           (cancel-edit!)))}
          [:div.inline-editor-box
           [:> tiptap-component
-           #js {:activeId      active-id
+           #js {:activeId      edit-key
+                :key           edit-key
                 :enterSubmits  true
                 :loadedText    initial-text
-                :onEditorReady #(reset! !editor %)
+                :onEditorReady (fn [ed]
+                                 (reset! !editor ed)
+                                 (when ed
+                                   (js/requestAnimationFrame
+                                    (fn []
+                                      (try
+                                        (.commands.focus ed "end")
+                                        (catch :default _ nil))))))
                 :onSend        (fn [_ _] (save-edit!))}]]
-         [:div.inline-editor-hint
-          "escape to "
-          [:span.link-btn {:on-click #(re-frame/dispatch [:input/clear-context active-id])} "cancel"]
-          " \u2022 enter to "
-          [:span.link-btn {:on-click save-edit!} "save"]]]))))
+         [:div.inline-editor-footer
+          [:div.inline-editor-hints
+           [:kbd.inline-editor-kbd (tr [:composer.edit/esc-key])]
+           [:span (tr [:composer.edit/to-cancel])]
+           [:span.inline-editor-sep "·"]
+           [:kbd.inline-editor-kbd (tr [:composer.edit/enter-key])]
+           [:span (tr [:composer.edit/to-save])]]
+          [:div.inline-editor-actions
+           [:button.inline-editor-btn.is-cancel
+            {:type     "button"
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (cancel-edit!))}
+            (tr [:composer.edit/cancel])]
+           [:button.inline-editor-btn.is-save
+            {:type     "button"
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (save-edit!))}
+            [icons/check {:width "13px" :height "13px"}]
+            [:span (tr [:composer.edit/save])]]]]]))
+    (finally
+      (when (exists? js/window)
+        (.removeEventListener js/window "keydown" on-esc true)))))
 #+end_src
 
 
