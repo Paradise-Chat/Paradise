@@ -1,74 +1,97 @@
 (ns paradise.ui.input.emotes
   (:require
-   [promesa.core :as p]
    [re-frame.core :as re-frame]
    [taoensso.timbre :as log]
    [clojure.string :as str]
    [cljs.core.async :refer [go <!]]
+   [cljs.core.async.interop :refer-macros [<p!]]
    [cljs-workers.core :as main]
+   [paradise.shared.client.cache :as cache]
    [paradise.shared.client.state :as state]
    [reagent.core :as r]
-   [paradise.shared.utils.helpers :refer [clean-shortcode]]
-   [paradise.ui.global :refer [click-away-wrapper]]
+   [paradise.shared.utils.emotes :as shared-emotes]
+   [paradise.shared.utils.helpers :refer [clean-shortcode safe-lower safe-lower-trim]]
+   [paradise.shared.utils.svg :as icons]
+   [paradise.ui.global :refer [click-away-wrapper make-swipe-handlers]]
    [paradise.media.component :refer [media]]
    ["emojibase-data/en/data.json" :as emoji-data]
-   ["react" :as react]))
+   ["emojibase-data/en/shortcodes/emojibase.json" :as emojibase-shortcodes]
+   ["emojibase-data/en/shortcodes/joypixels.json" :as joypixels-shortcodes]))
+
+(def ^:private emote-pack-cache-ttl-ms (* 10 60 1000))
+
+(defn- emote-pack-cache-key [db source-type room-id]
+  (let [eng (name (or (:active-engine db) :default))
+        uid (some-> (:active-user-id db) str not-empty)]
+    (when uid
+      (str "emotes:" eng ":" uid ":" (name source-type) ":" (or room-id "all")))))
 
 (re-frame/reg-event-fx
  :sdk/fetch-room-emotes
- (fn [_ [_ source-type room-id]]
-   (if-let [pool @state/!engine-pool]
-     (go
-       (let [res (<! (main/do-with-pool! pool
-                                         {:handler   :fetch-emotes
-                                          :arguments {:source-type (name source-type)
-                                                      :room-id     room-id}}))]
-         (if (= (:status res) "success")
-           (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:packs res)])
-           (log/error "Worker emote fetch failed:" (:msg res)))))
-     (log/error "No engine pool to fetch emotes"))
+ (fn [{:keys [db]} [_ source-type room-id opts]]
+   (let [force?    (boolean (and (map? opts) (:force? opts)))
+         cache-key (emote-pack-cache-key db source-type room-id)
+         gen       (:session/gen db)]
+     (if-let [pool @state/!engine-pool]
+       (go
+         (let [cached (when cache-key
+                        (try (<p! (cache/get-meta cache-key))
+                             (catch :default _ nil)))
+               fresh? (and (not force?)
+                           cached
+                           (some? (:data cached))
+                           (< (- (js/Date.now) (or (:updated-at cached) 0))
+                              emote-pack-cache-ttl-ms))]
+           (when (and cached (some? (:data cached)))
+             (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:data cached) gen]))
+           (when-not fresh?
+             (let [res (<! (main/do-with-pool! pool
+                                               {:handler   :fetch-emotes
+                                                :arguments {:source-type (name source-type)
+                                                            :room-id     room-id}}))]
+               (if (#{"success" :success} (:status res))
+                 (do
+                   (when cache-key
+                     (cache/put-meta! cache-key (:packs res)))
+                   (re-frame/dispatch [:sdk/save-all-emotes source-type room-id (:packs res) gen]))
+                 (log/error "Worker emote fetch failed:" (:msg res)))))))
+       (log/error "No engine pool to fetch emotes")))
+   {}))
+
+(re-frame/reg-event-fx
+ :sdk/fetch-frequent-emotes
+ (fn [{:keys [db]} _]
+   (let [gen (:session/gen db)]
+     (when-let [pool @state/!engine-pool]
+       (go
+         (let [res (<! (main/do-with-pool! pool
+                                           {:handler   :fetch-frequent-emotes
+                                            :arguments {}}))]
+           (when (#{"success" :success} (:status res))
+             (re-frame/dispatch [:emoji/set-frequent-items
+                                 gen
+                                 {:items    (:items res)
+                                  :stickers (:stickers res)}]))))))
    {}))
 
 (re-frame/reg-event-fx
  :sdk/fetch-all-emotes
- (fn [{:keys [db]} _]
-   (re-frame/dispatch [:sdk/fetch-room-emotes :account nil])
+ (fn [{:keys [db]} [_ opts]]
+   (re-frame/dispatch [:sdk/fetch-room-emotes :account nil opts])
+   (re-frame/dispatch [:sdk/fetch-frequent-emotes])
    (when-let [active-room (:active-room-id db)]
-     (re-frame/dispatch [:sdk/fetch-room-emotes :room active-room]))
+     (re-frame/dispatch [:sdk/fetch-room-emotes :room active-room opts]))
    (when-let [active-space (:active-space-id db)]
-     (re-frame/dispatch [:sdk/fetch-room-emotes :space active-space]))
+     (re-frame/dispatch [:sdk/fetch-room-emotes :space active-space opts]))
    {}))
 
 (re-frame/reg-event-db
  :sdk/save-all-emotes
- (fn [db [_ source-type source-id fetched-packs]]
-   (let [structured-packs
-         (into {}
-               (for [{:keys [pack-id data]} (remove nil? fetched-packs)
-                     :let [clj-data    (if (map? data) data (js->clj data :keywordize-keys true))
-                           raw-images  (or (:images clj-data) (:items clj-data))
-                           pack-info   (or (:pack clj-data) clj-data)
-                           usage-set   (set (:usage pack-info []))
-                           is-sticker? (or (:is-sticker-pack? pack-info)
-                                           (contains? usage-set "sticker"))
-                           images      (into {}
-                                             (for [[raw-k v] raw-images
-                                                   :let [sc  (clean-shortcode raw-k)
-                                                         uri (or (:uri v) (:url v))]
-                                                   :when (and (seq sc) uri)]
-                                               [sc {:id               (or (:id v) (str pack-id ":" sc))
-                                                    :shortcode        sc
-                                                    :uri              uri
-                                                    :url              uri
-                                                    :info             (:info v)
-                                                    :search-text      (:search-text v)
-                                                    :is-unicode?      false
-                                                    :is-sticker-pack? is-sticker?}]))]
-                     :when (seq images)]
-                 [pack-id {:name             (or (:name pack-info) (:display_name pack-info) pack-id)
-                           :avatar           (or (:avatar pack-info) (:avatar_url pack-info))
-                           :is-sticker-pack? is-sticker?
-                           :images           images}]))]
+ [(state/guard-session-gen #(nth % 4 nil))]
+ (fn [db [_ source-type source-id fetched-packs _gen]]
+   (let [structured-packs (shared-emotes/normalize-emote-packs
+                           fetched-packs
+                           {:as-map? true :keep-empty? false})]
      (if (= source-type :account)
        (assoc-in db [:emoji/packs :account] structured-packs)
        (assoc-in db [:emoji/packs source-type source-id] structured-packs)))))
@@ -84,181 +107,824 @@
      (merge account-packs space-packs room-packs))))
 
 
+(defn- unwrap-json-module [mod]
+  (if (and mod (.-default mod)) (.-default mod) mod))
+
+(defn- normalize-shortcode-list [v]
+  (cond
+    (string? v) [v]
+    (sequential? v) (vec (filter string? v))
+    :else []))
+
+(defonce ^:private merged-unicode-shortcodes
+  (let [jp (js->clj (unwrap-json-module joypixels-shortcodes))
+        eb (js->clj (unwrap-json-module emojibase-shortcodes))]
+    (reduce-kv
+     (fn [acc hex raw-v]
+       (let [existing (get acc hex [])
+             added    (normalize-shortcode-list raw-v)]
+         (assoc acc hex (vec (distinct (concat existing added))))))
+     (reduce-kv (fn [acc hex raw-v]
+                  (assoc acc hex (normalize-shortcode-list raw-v)))
+                {}
+                jp)
+     eb)))
+
 (defonce categorized-system-packs
-  (let [unwrap     (fn [mod] (if (and mod (.-default mod)) (.-default mod) mod))
-        raw-data   (js->clj (unwrap emoji-data) :keywordize-keys true)
-        group-meta {0 {:name "Smileys & Emotion" :icon "😀"}
-                    1 {:name "People & Body"     :icon "👋"}
-                    3 {:name "Animals & Nature"  :icon "🐶"}
-                    4 {:name "Food & Drink"      :icon "🍔"}
-                    5 {:name "Travel & Places"   :icon "✈️"}
-                    6 {:name "Activities"        :icon "⚽"}
-                    7 {:name "Objects"           :icon "💡"}
-                    8 {:name "Symbols"           :icon "💖"}
-                    9 {:name "Flags"             :icon "🚩"}}]
+  (let [raw-data   (js->clj (unwrap-json-module emoji-data) :keywordize-keys true)
+        group-meta {0 {:name-key :composer.emotes/cat-smileys    :icon "😀"}
+                    1 {:name-key :composer.emotes/cat-people     :icon "👋"}
+                    3 {:name-key :composer.emotes/cat-animals    :icon "🐶"}
+                    4 {:name-key :composer.emotes/cat-food       :icon "🍔"}
+                    5 {:name-key :composer.emotes/cat-travel     :icon "✈️"}
+                    6 {:name-key :composer.emotes/cat-activities :icon "⚽"}
+                    7 {:name-key :composer.emotes/cat-objects    :icon "💡"}
+                    8 {:name-key :composer.emotes/cat-symbols    :icon "💖"}
+                    9 {:name-key :composer.emotes/cat-flags      :icon "🚩"}}]
     (->> raw-data
          (group-by :group)
-         (reduce-kv (fn [acc group-id emojis]
-                      (if (or (nil? group-id) (= group-id 9))
-                        acc
-                        (let [meta    (get group-meta group-id {:name "Other" :icon "📦"})
-                              pack-id (str "system-" group-id)]
-                          (assoc acc pack-id
-                                 {:name            (:name meta)
-                                  :hero-icon       (:icon meta)
-                                  :is-unicode?     true
-                                  :system-priority group-id
-                                  :images          (into {}
-                                                         (for [e emojis
-                                                               :let [char (or (:emoji e) (:unicode e))
-                                                                     slug (or (first (:shortcodes e))
-                                                                              (:annotation e)
-                                                                              (:name e)
-                                                                              (:hexcode e))
-                                                                     sc   (clean-shortcode slug)
-                                                                     search-string (str/lower-case
-                                                                                     (str (:name e) " " (:annotation e) " " (str/join " " (:tags e))))]
-                                                               :when (and char (seq sc))]
-                                                           [sc {:id          (str "unicode:" sc)
-                                                                :shortcode   sc
-                                                                :unicode     (str char)
-                                                                :is-unicode? true
-                                                                :search-text search-string}]))}))))
-                    {}))))
+         (reduce-kv
+          (fn [acc group-id emojis]
+            (if (or (nil? group-id) (= group-id 9))
+              acc
+              (let [meta    (get group-meta group-id {:name-key :composer.emotes/cat-other :icon "📦"})
+                    pack-id (str "system-" group-id)]
+                (assoc acc pack-id
+                       {:name-key        (:name-key meta)
+                        :hero-icon       (:icon meta)
+                        :is-unicode?     true
+                        :system-priority group-id
+                        :images
+                        (into {}
+                              (for [e emojis
+                                    :let [ch           (or (:emoji e) (:unicode e))
+                                          hex          (:hexcode e)
+                                          raw-scs      (get merged-unicode-shortcodes hex)
+                                          clean-scs    (->> raw-scs
+                                                            (map clean-shortcode)
+                                                            (filter seq)
+                                                            distinct
+                                                            vec)
+                                          label        (or (:label e) (:annotation e) (:name e))
+                                          primary-slug (or (first clean-scs)
+                                                           (some-> label
+                                                                   str/lower-case
+                                                                   (str/replace #"[^a-z0-9_+-]+" "_")
+                                                                   (str/replace #"^_+|_+$" ""))
+                                                           hex)
+                                          sc           (clean-shortcode primary-slug)
+                                          all-scs      (vec (distinct (cons sc clean-scs)))
+                                          search-str   (str/lower-case
+                                                        (str/join " "
+                                                                  (concat all-scs
+                                                                          [label]
+                                                                          (:tags e))))]
+                                    :when (and ch (seq sc))]
+                                [sc {:id          (str "unicode:" sc)
+                                     :shortcode   sc
+                                     :shortcodes  all-scs
+                                     :label       label
+                                     :unicode     (str ch)
+                                     :is-unicode? true
+                                     :group       group-id
+                                     :search-text search-str}]))}))))
+          {}))))
 
-(defn ^:ui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
+(defonce all-unicode-emojis
+  (->> categorized-system-packs
+       vals
+       (sort-by :system-priority)
+       (mapcat (fn [pack] (vals (:images pack))))
+       vec))
+
+(defonce unicode-by-char
+  (into {} (map (fn [item] [(:unicode item) item]) all-unicode-emojis)))
+
+(defonce unicode-by-shortcode
+  (reduce
+   (fn [acc item]
+     (let [primary (some-> (:shortcode item) clean-shortcode str/lower-case)
+           aliases (map #(some-> % clean-shortcode str/lower-case) (:shortcodes item))]
+       (reduce (fn [m sc]
+                 (if (and (seq sc) (not (contains? m sc)))
+                   (assoc m sc item)
+                   m))
+               (if (seq primary) (assoc acc primary item) acc)
+               aliases)))
+   {}
+   all-unicode-emojis))
+
+(def ^:private max-tracked-emojis 60)
+
+(defn emoji-usage-key [item]
+  (cond
+    (string? item)
+    (when (seq item) (str "u:" item))
+
+    (= (keyword (:kind item)) :sticker)
+    (when-let [k (or (:sticker-id item) (:id item) (:uri item) (:url item) (:shortcode item))]
+      (str "s:" k))
+
+    (:is-unicode? item)
+    (when-let [u (or (:unicode item)
+                     (:unicode (get unicode-by-shortcode
+                                    (some-> (:shortcode item) clean-shortcode str/lower-case))))]
+      (str "u:" u))
+
+    :else
+    (when-let [k (or (:emote-id item) (:id item) (:uri item) (:url item) (:shortcode item))]
+      (str "c:" k))))
+
+(defn frecency-score [{:keys [count last-used score]} now]
+  (if (and (number? score) (pos? score))
+    (double score)
+    (let [cnt       (max 1 (or count 1))
+          ts        (or last-used 0)
+          age-hours (/ (max 0 (- now ts)) 3600000.0)
+          weight    (cond
+                      (< age-hours 2)   4.0
+                      (< age-hours 24)  2.5
+                      (< age-hours 168) 1.5
+                      :else             1.0)]
+      (+ (* cnt weight) (/ 1.0 (+ 1.0 (/ age-hours 24.0)))))))
+
+(defn- resolve-unicode-entry [entry]
+  (let [u-raw (some-> (:unicode entry) str not-empty)
+        sc-l  (some-> (:shortcode entry) clean-shortcode str/lower-case not-empty)
+        found (or (when u-raw (get unicode-by-char u-raw))
+                  (when sc-l (get unicode-by-shortcode sc-l)))]
+    (cond
+      found
+      (merge entry found {:is-unicode? true})
+
+      u-raw
+      (assoc entry
+             :unicode     u-raw
+             :shortcode   (or (not-empty (clean-shortcode (or (:shortcode entry) ""))) u-raw)
+             :is-unicode? true)
+
+      :else nil)))
+
+(defn- normalize-engine-frequent-items [raw-items]
+  (->> (or raw-items [])
+       (keep (fn [entry]
+               (when (map? entry)
+                 (let [clj-e (if (map? entry) entry (js->clj entry :keywordize-keys true))]
+                   (if (:is-unicode? clj-e)
+                     (resolve-unicode-entry clj-e)
+                     (let [uri (or (:uri clj-e) (:url clj-e))]
+                       (when (or uri (:emote-id clj-e) (:sticker-id clj-e) (:id clj-e) (seq (:shortcode clj-e)))
+                         (assoc clj-e
+                                :is-unicode? false
+                                :shortcode   (clean-shortcode (or (:shortcode clj-e) (:body clj-e) ""))
+                                :uri         uri
+                                :url         uri))))))))
+       vec))
+
+(re-frame/reg-event-db
+ :emoji/set-frequent-items
+ [(state/guard-session-gen second)]
+ (fn [db [_ _gen payload]]
+   (let [items    (if (map? payload) (:items payload) payload)
+         stickers (when (map? payload) (:stickers payload))]
+     (cond-> db
+       (some? items)    (assoc :emoji/frequent-items (normalize-engine-frequent-items items))
+       (some? stickers) (assoc :emoji/frequent-stickers
+                               (mapv #(assoc % :kind :sticker)
+                                     (normalize-engine-frequent-items stickers)))))))
+
+(re-frame/reg-event-fx
+ :emoji/record-usage
+ (fn [{:keys [db]} [_ raw-item]]
+   (let [sticker? (= (keyword (when (map? raw-item) (:kind raw-item))) :sticker)
+         item     (cond
+                    (string? raw-item)
+                    (or (get unicode-by-char raw-item)
+                        (get unicode-by-shortcode (str/lower-case (str (or (clean-shortcode raw-item) ""))))
+                        {:id          (str "unicode:" raw-item)
+                         :shortcode   raw-item
+                         :unicode     raw-item
+                         :is-unicode? true})
+
+                    (map? raw-item)
+                    (if (and (not sticker?) (:is-unicode? raw-item))
+                      (or (resolve-unicode-entry raw-item) raw-item)
+                      raw-item)
+
+                    :else nil)
+         k        (when item (emoji-usage-key item))]
+     (if-not k
+       {}
+       (let [now        (js/Date.now)
+             gen        (:session/gen db)
+             db-key     (if sticker? :emoji/frequent-stickers :emoji/frequent-items)
+             cur-items  (vec (or (get db db-key) []))
+             existing   (first (filter #(= (emoji-usage-key %) k) cur-items))
+             others     (remove #(= (emoji-usage-key %) k) cur-items)
+             next-count (inc (or (:count existing) 0))
+             next-entry (cond-> {:key         k
+                                 :kind        (if sticker? :sticker :emoji)
+                                 :count       next-count
+                                 :last-used   now
+                                 :is-unicode? (and (not sticker?) (boolean (:is-unicode? item)))
+                                 :shortcode   (clean-shortcode (or (:shortcode item) (:body item) (:shortcode existing) ""))
+                                 :id          (or (:id item) (:id existing) k)}
+                          (:emote-id item)   (assoc :emote-id (:emote-id item))
+                          (:sticker-id item) (assoc :sticker-id (:sticker-id item))
+                          (:body item)       (assoc :body (:body item))
+                          (:unicode item)    (assoc :unicode (:unicode item))
+                          (:label item)      (assoc :label (:label item))
+                          (or (:uri item) (:url item))
+                          (assoc :uri (or (:uri item) (:url item))
+                                 :url (or (:uri item) (:url item)))
+                          (:info item)       (assoc :info (:info item)))
+             optimistic (->> (cons next-entry others)
+                             (sort-by #(- (frecency-score % now)))
+                             (take max-tracked-emojis)
+                             vec)]
+         (when-let [pool @state/!engine-pool]
+           (go
+             (let [res (<! (main/do-with-pool! pool
+                                               {:handler   :record-emote-usage
+                                                :arguments (select-keys next-entry
+                                                                        [:key :kind :is-unicode? :unicode
+                                                                         :shortcode :body :id :emote-id
+                                                                         :sticker-id :uri :url :info])}))]
+               (when (#{"success" :success} (:status res))
+                 (re-frame/dispatch [:emoji/set-frequent-items
+                                     gen
+                                     {:items    (:items res)
+                                      :stickers (:stickers res)}])))))
+         {:db (assoc db db-key optimistic)})))))
+
+(re-frame/reg-sub
+ :emoji/frequent-raw
+ (fn [db _]
+   (or (:emoji/frequent-items db) [])))
+
+(re-frame/reg-sub
+ :emoji/frequent-stickers-raw
+ (fn [db _]
+   (or (:emoji/frequent-stickers db) [])))
+
+(re-frame/reg-sub
+ :emoji/frequent-items
+ :<- [:emoji/frequent-raw]
+ :<- [:emoji/active-set]
+ (fn [[raw-items custom-packs] _]
+   (when (seq raw-items)
+     (let [all-live     (for [pack (vals custom-packs)
+                              [sc item] (:images pack)
+                              :let [uri (or (:uri item) (:url item))]
+                              :when (and uri (not= (:can-emoji? item) false))]
+                          (assoc item
+                                 :shortcode        (clean-shortcode (or (:shortcode item) sc))
+                                 :pack-name        (:name pack)
+                                 :uri              uri
+                                 :url              uri
+                                 :is-unicode?      false
+                                 :is-sticker-pack? (:is-sticker-pack? pack)))
+           live-by-uri  (into {} (map (fn [i] [(:uri i) i]) all-live))
+           live-by-id   (into {} (keep (fn [i] (when (:id i) [(:id i) i])) all-live))
+           live-by-eid  (into {} (keep (fn [i] (when (:emote-id i) [(str (:emote-id i)) i])) all-live))
+           live-by-sc   (into {} (keep (fn [i]
+                                         (when-let [sc (not-empty (str (or (:shortcode i) "")))]
+                                           [(str/lower-case sc) i]))
+                                       all-live))]
+       (->> raw-items
+            (keep (fn [entry]
+                    (if (:is-unicode? entry)
+                      (when-let [resolved (resolve-unicode-entry entry)]
+                        [(:shortcode resolved) resolved])
+                      (let [eid     (some-> (or (:emote-id entry) (:id entry)) str)
+                            uri     (or (:uri entry) (:url entry))
+                            sc-l    (some-> (:shortcode entry) clean-shortcode str/lower-case not-empty)
+                            live    (or (when eid (get live-by-eid eid))
+                                        (when (:id entry) (get live-by-id (:id entry)))
+                                        (when uri (get live-by-uri uri))
+                                        (when sc-l (get live-by-sc sc-l)))
+                            eff-uri (or (:uri live) (:url live) uri)]
+                        (when eff-uri
+                          (let [merged (merge entry live)
+                                sc     (clean-shortcode (or (:shortcode merged) "emote"))]
+                            [sc (assoc merged
+                                       :shortcode   sc
+                                       :uri         eff-uri
+                                       :url         eff-uri
+                                       :is-unicode? false)]))))))
+            (take 36)
+            vec)))))
+
+(re-frame/reg-sub
+ :emoji/frequent-stickers
+ :<- [:emoji/frequent-stickers-raw]
+ :<- [:emoji/active-set]
+ (fn [[raw-stickers custom-packs] _]
+   (when (seq raw-stickers)
+     (let [all-live     (for [pack (vals custom-packs)
+                              [sc item] (:images pack)
+                              :let [uri (or (:uri item) (:url item))]
+                              :when (and uri (:can-sticker? item))]
+                          (assoc item
+                                 :shortcode   (clean-shortcode (or (:shortcode item) sc))
+                                 :pack-name   (:name pack)
+                                 :uri         uri
+                                 :url         uri
+                                 :is-unicode? false
+                                 :kind        :sticker))
+           live-by-sid  (into {} (keep (fn [i] (when (:sticker-id i) [(str (:sticker-id i)) i])) all-live))
+           live-by-id   (into {} (keep (fn [i] (when (:id i) [(:id i) i])) all-live))
+           live-by-uri  (into {} (map (fn [i] [(:uri i) i]) all-live))]
+       (->> raw-stickers
+            (keep (fn [entry]
+                    (let [sid     (some-> (or (:sticker-id entry) (:id entry)) str)
+                          uri     (or (:uri entry) (:url entry))
+                          live    (or (when sid (get live-by-sid sid))
+                                      (when (:id entry) (get live-by-id (:id entry)))
+                                      (when uri (get live-by-uri uri)))
+                          eff-uri (or (:uri live) (:url live) uri)]
+                      (when eff-uri
+                        (let [merged (merge entry live)
+                              sc     (clean-shortcode (or (:body merged) (:shortcode merged) "sticker"))]
+                          [sc (assoc merged
+                                     :kind        :sticker
+                                     :shortcode   sc
+                                     :body        (or (:body merged) sc)
+                                     :uri         eff-uri
+                                     :url         eff-uri
+                                     :is-unicode? false)])))))
+            (take 24)
+            vec)))))
+
+(re-frame/reg-sub
+ :emoji/usage
+ :<- [:emoji/frequent-raw]
+ (fn [raw-items _]
+   (reduce (fn [acc entry]
+             (if-let [k (emoji-usage-key entry)]
+               (assoc acc k entry)
+               acc))
+           {}
+           raw-items)))
+
+(re-frame/reg-sub
+ :emoji/sticker-usage
+ :<- [:emoji/frequent-stickers-raw]
+ (fn [raw-stickers _]
+   (reduce (fn [acc entry]
+             (if-let [k (emoji-usage-key (assoc entry :kind :sticker))]
+               (assoc acc k entry)
+               acc))
+           {}
+           raw-stickers)))
+
+(defn- filter-pack-images [custom-packs pred]
+  (reduce-kv
+   (fn [acc pack-id pack]
+     (let [kept (into {} (filter (fn [[_ item]] (pred item)) (:images pack)))]
+       (if (seq kept)
+         (assoc acc pack-id (assoc pack :images kept))
+         acc)))
+   {}
+   custom-packs))
+
+(defn- pack-display-name [tr pack pack-id]
+  (or (when-let [nk (:name-key pack)]
+        (let [translated (when (fn? tr) (tr [nk]))]
+          (when (and (string? translated) (seq translated))
+            translated)))
+      (when (and (string? (:name pack)) (seq (:name pack)))
+        (:name pack))
+      (when-let [nk (:name-key pack)]
+        (name nk))
+      (str (or pack-id ""))))
+
+(defn ^:ui emoji-sticker-board [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker
+                                        inline? allow-stickers? default-mode on-tab-change
+                                        from-keyboard? sheet-height-px]}]
   (re-frame/dispatch [:sdk/fetch-all-emotes])
-  (let [selected-pack-id (r/atom nil)
-        sticker-mode?    (r/atom true)
-        search-query     (r/atom "")
-        tr-sub           (re-frame/subscribe [:i18n/tr])]
-    (fn [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker inline?]}]
-      (let [tr             @tr-sub
-            custom-packs   @(re-frame/subscribe [:emoji/active-set])
-            is-mobile?     @(re-frame/subscribe [:ui/mobile?])
-            packs          (merge categorized-system-packs custom-packs)
-            sorted-ids     (sort-by (fn [id]
-                                      (let [p (get packs id)]
-                                        [(if (:is-unicode? p) 1 0)
-                                         (if (:is-sticker-pack? p) 0 1)
-                                         (get p :system-priority 999)
-                                         (or (:name p) (str id))]))
-                                    (keys packs))
-            active-id      (or @selected-pack-id (first sorted-ids))
-            active-pack    (get packs active-id)
-            q              (str/lower-case @search-query)
-            is-searching?  (not-empty q)
-            search-results (when is-searching?
-                             (->> packs
-                                  vals
-                                  (mapcat (fn [pack]
-                                            (map (fn [[raw-shortcode item]]
-                                                   (let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))
-                                                         uri       (or (:uri item) (:url item))]
-                                                     [shortcode (assoc item
-                                                                       :shortcode shortcode
-                                                                       :uri uri
-                                                                       :url uri
-                                                                       :is-unicode? (:is-unicode? pack)
-                                                                       :is-sticker-pack? (:is-sticker-pack? pack))]))
-                                                 (:images pack))))
-                                  (filter (fn [[shortcode item]]
-                                            (or (str/includes? (str/lower-case shortcode) q)
-                                                (and (:search-text item) (str/includes? (:search-text item) q)))))
-                                  (take 150)))
-            render-cell    (fn [cell-key shortcode item unicode-pack? _sticker-pack?]
-                             (let [uri     (or (:uri item) (:url item))
-                                   payload {:id        (:id item)
-                                            :shortcode shortcode
-                                            :uri       uri
-                                            :url       uri
-                                            :info      (:info item)}]
-                               ^{:key cell-key}
-                               [:div.emoji-cell
-                                {:on-click (fn []
-                                             (cond
-                                               unicode-pack?
-                                               (on-insert-native (:unicode item))
+  (let [stickers-allowed? (not= allow-stickers? false)
+        init-tab          (if (and stickers-allowed? (= default-mode :sticker))
+                            :stickers
+                            :emoji)
+        active-tab        (r/atom init-tab)
+        last-default-mode (r/atom default-mode)
+        selected-pack-id  (r/atom nil)
+        search-query      (r/atom "")
+        hovered-item      (r/atom nil)
+        !sheet-mounted?   (r/atom (boolean from-keyboard?))
+        !sheet-expanded?  (r/atom false)
+        !sheet-drag       (r/atom {:start-x nil :start-y nil :dy 0 :dragging? false :target nil})
+        _                 (when-not from-keyboard?
+                            (js/requestAnimationFrame #(reset! !sheet-mounted? true)))
+        tr-sub            (re-frame/subscribe [:i18n/tr])]
+    (fn [{:keys [on-close on-insert-emoji on-insert-native on-send-sticker
+                 inline? allow-stickers? default-mode on-tab-change
+                 from-keyboard? sheet-height-px]}]
+      (let [tr                @tr-sub
+            stickers-allowed? (not= allow-stickers? false)
+            _                 (when (not= default-mode @last-default-mode)
+                                (reset! last-default-mode default-mode)
+                                (let [next-tab (if (and stickers-allowed? (= default-mode :sticker))
+                                                 :stickers
+                                                 :emoji)]
+                                  (when (not= @active-tab next-tab)
+                                    (reset! active-tab next-tab)
+                                    (reset! selected-pack-id nil)
+                                    (reset! hovered-item nil))))
+            tab               (if stickers-allowed? @active-tab :emoji)
+            stickers-tab?     (= tab :stickers)
+            custom-packs      @(re-frame/subscribe [:emoji/active-set])
+            frequent-emojis   @(re-frame/subscribe [:emoji/frequent-items])
+            frequent-stickers @(re-frame/subscribe [:emoji/frequent-stickers])
+            emoji-usage       @(re-frame/subscribe [:emoji/usage])
+            sticker-usage     @(re-frame/subscribe [:emoji/sticker-usage])
+            active-space      @(re-frame/subscribe [:spaces/active-id])
+            active-room       @(re-frame/subscribe [:rooms/active-id])
+            is-mobile?        @(re-frame/subscribe [:ui/mobile?])
+            expanded?         @!sheet-expanded?
+            mounted?          @!sheet-mounted?
+            {:keys [dy dragging?]} @!sheet-drag
+            dy-num            (or dy 0)
+            switch-tab!       (fn [next-tab]
+                                (reset! active-tab next-tab)
+                                (reset! selected-pack-id nil)
+                                (reset! hovered-item nil)
+                                (when on-tab-change
+                                  (on-tab-change (if (= next-tab :stickers) :sticker :emoji))))
+            sheet-handlers    (when is-mobile?
+                                (make-swipe-handlers
+                                 :bottom-sheet
+                                 {:!drag-state      !sheet-drag
+                                  :ignore-selector  "input, textarea, select, button"
+                                  :min-dy           (if expanded? 0 -240)
+                                  :max-dy           420
+                                  :dismiss-threshold 85
+                                  :expand-threshold  55
+                                  :collapse-max-dy   200
+                                  :expanded?         expanded?
+                                  :on-expand         #(reset! !sheet-expanded? true)
+                                  :on-collapse       #(reset! !sheet-expanded? false)
+                                  :on-dismiss        #(when on-close (on-close))}))
+            tab-custom-packs  (if stickers-tab?
+                                (filter-pack-images custom-packs #(:can-sticker? %))
+                                (filter-pack-images custom-packs #(not= (:can-emoji? %) false)))
+            tab-frequent      (if stickers-tab? frequent-stickers frequent-emojis)
+            tab-usage         (if stickers-tab? sticker-usage emoji-usage)
+            frequent-pack     (when (seq tab-frequent)
+                                {"frequent" {:name-key        (if stickers-tab?
+                                                                :composer.emotes/frequent-stickers-title
+                                                                :composer.emotes/frequent-title)
+                                             :icon-key        :clock
+                                             :is-frequent?    true
+                                             :is-unicode?     false
+                                             :system-priority -1
+                                             :ordered-items   tab-frequent}})
+            base-packs        (if stickers-tab?
+                                tab-custom-packs
+                                (merge categorized-system-packs tab-custom-packs))
+            packs             (merge base-packs frequent-pack)
+            sorted-ids        (sort-by (fn [id]
+                                         (let [p (get packs id)]
+                                           [(if (:is-frequent? p) 0 1)
+                                            (if (:is-unicode? p) 2 1)
+                                            (get p :system-priority 999)
+                                            (safe-lower (pack-display-name tr p id))]))
+                                       (keys packs))
+            custom-pack-ids   (filter #(let [p (get packs %)]
+                                         (and (not (:is-frequent? p))
+                                              (not (:is-unicode? p))))
+                                      sorted-ids)
+            unicode-pack-ids  (filter #(:is-unicode? (get packs %)) sorted-ids)
+            non-frequent-ids  (remove #(= % "frequent") sorted-ids)
+            active-id         (let [sel @selected-pack-id]
+                                (if (and sel (contains? packs sel))
+                                  sel
+                                  (first sorted-ids)))
+            active-pack       (get packs active-id)
+            show-combined?    (and (nil? @selected-pack-id)
+                                   (= active-id "frequent")
+                                   (seq non-frequent-ids))
+            primary-pack-id   (first non-frequent-ids)
+            primary-pack      (when show-combined? (get packs primary-pack-id))
+            q                 (safe-lower (str/trim (str (or @search-query ""))))
+            is-searching?     (not-empty q)
+            now               (js/Date.now)
+            search-results    (when is-searching?
+                                (->> base-packs
+                                     vals
+                                     (mapcat (fn [pack]
+                                               (let [pname (pack-display-name tr pack "")]
+                                                 (map (fn [[raw-shortcode item]]
+                                                        (let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))
+                                                              uri       (or (:uri item) (:url item))]
+                                                          [shortcode (assoc item
+                                                                            :shortcode   shortcode
+                                                                            :pack-name   (or (:pack-name item) pname)
+                                                                            :uri         uri
+                                                                            :url         uri
+                                                                            :kind        (if stickers-tab? :sticker :emoji)
+                                                                            :is-unicode? (boolean (:is-unicode? pack)))]))
+                                                      (:images pack)))))
+                                     (filter (fn [[shortcode item]]
+                                               (or (str/includes? (safe-lower shortcode) q)
+                                                   (and (:body item)
+                                                        (str/includes? (safe-lower (:body item)) q))
+                                                   (some #(str/includes? (safe-lower %) q)
+                                                         (:shortcodes item))
+                                                   (and (:search-text item)
+                                                        (str/includes? (safe-lower (:search-text item)) q)))))
+                                     (sort-by (fn [[shortcode item]]
+                                                (let [sc-l (safe-lower shortcode)
+                                                      tier (cond
+                                                             (= sc-l q)                0
+                                                             (str/starts-with? sc-l q) 1
+                                                             (some #(= (safe-lower %) q)
+                                                                   (:shortcodes item)) 1
+                                                             (some #(str/starts-with? (safe-lower %) q)
+                                                                   (:shortcodes item)) 2
+                                                             (str/includes? sc-l q)    3
+                                                             :else                     4)
+                                                      ukey (emoji-usage-key item)
+                                                      frec (if-let [u (get tab-usage ukey)]
+                                                             (frecency-score u now)
+                                                             0.0)]
+                                                  [tier (- frec) (if (:is-unicode? item) 1 0) sc-l])))
+                                     (take (if stickers-tab? 60 150))))
+            render-cell       (fn [cell-key shortcode item fallback-unicode? pack-label]
+                                (let [unicode? (and (not stickers-tab?)
+                                                    (if (some? (:is-unicode? item))
+                                                      (boolean (:is-unicode? item))
+                                                      (boolean fallback-unicode?)))
+                                      uri      (or (:uri item) (:url item))
+                                      display  (if stickers-tab?
+                                                 (or (not-empty (:body item)) shortcode)
+                                                 (str ":" shortcode ":"))
+                                      payload  {:id          (:id item)
+                                                :kind        (if stickers-tab? :sticker :emoji)
+                                                :emote-id    (:emote-id item)
+                                                :sticker-id  (:sticker-id item)
+                                                :shortcode   shortcode
+                                                :body        (or (:body item) shortcode)
+                                                :unicode     (:unicode item)
+                                                :label       (:label item)
+                                                :pack-name   (or (:pack-name item) pack-label)
+                                                :is-unicode? unicode?
+                                                :uri         uri
+                                                :url         uri
+                                                :info        (:info item)}]
+                                  ^{:key cell-key}
+                                  [:button.emoji-cell
+                                   {:type           "button"
+                                    :class          (when stickers-tab? "is-sticker-cell")
+                                    :title          display
+                                    :on-mouse-enter #(reset! hovered-item payload)
+                                    :on-click       (fn []
+                                                      (re-frame/dispatch [:emoji/record-usage payload])
+                                                      (cond
+                                                        unicode?
+                                                        (when on-insert-native
+                                                          (on-insert-native (:unicode item)))
 
-                                               @sticker-mode?
-                                               (on-send-sticker payload)
+                                                        stickers-tab?
+                                                        (when on-send-sticker
+                                                          (on-send-sticker payload))
 
-                                               :else
-                                               (on-insert-emoji payload)))}
-                                (if unicode-pack?
-                                  [:span.native-emoji {:title shortcode} (:unicode item)]
-                                  [media {:uri   uri
-                                          :class "emoji-img"
-                                          :title shortcode
-                                          :alt   shortcode}])]))
-            content        [:div.emoji-popover
-                            (if (empty? packs)
-                              [:div.emoji-loading (tr [:composer.emotes/no-emotes])]
-                              [:div.emoji-container
-                               (when-not is-searching?
-                                 ^{:key "sidebar"}
-                                 [:div.emoji-sidebar
-                                  (for [pack-id sorted-ids]
-                                    (let [pack-data (get packs pack-id)
-                                          pname     (or (:name pack-data) (str pack-id))
-                                          avatar    (:avatar pack-data)]
-                                      ^{:key pack-id}
-                                      [:div.sidebar-pack-item
-                                       {:class    (when (= active-id pack-id) "active")
-                                        :on-click #(reset! selected-pack-id pack-id)
-                                        :title    pname}
-                                       (cond
-                                         (:is-unicode? pack-data)
-                                         [:span.pack-text-icon (:hero-icon pack-data)]
+                                                        :else
+                                                        (when on-insert-emoji
+                                                          (on-insert-emoji payload))))}
+                                   (if unicode?
+                                     [:span.native-emoji (:unicode item)]
+                                     [media {:uri   uri
+                                             :class (if stickers-tab? "sticker-img" "emoji-img")
+                                             :alt   display}])]))
+            render-pack-btn   (fn [pack-id]
+                                (let [pack-data (get packs pack-id)
+                                      pname     (pack-display-name tr pack-data pack-id)
+                                      avatar    (:avatar pack-data)]
+                                  ^{:key pack-id}
+                                  [:button.sidebar-pack-item
+                                   {:type     "button"
+                                    :class    (when (= active-id pack-id) "active")
+                                    :on-click #(reset! selected-pack-id pack-id)
+                                    :title    pname}
+                                   (cond
+                                     (:icon-key pack-data)
+                                     [:span.pack-svg-icon
+                                      [icons/resolve-icon (:icon-key pack-data)
+                                       {:props {:width "18px" :height "18px"}}]]
 
-                                         avatar
-                                         [media {:uri   avatar
-                                                 :class "pack-icon"
-                                                 :alt   pname}]
+                                     (:hero-icon pack-data)
+                                     [:span.pack-text-icon (:hero-icon pack-data)]
 
-                                         :else
-                                         [:span.pack-text-icon (subs pname 0 (min 2 (count pname)))])]))])
-                               ^{:key "grid-area"}
-                               [:div.emoji-grid-area
-                                [:div.emoji-search-bar {:style {:padding "8px 12px" :border-bottom "1px solid var(--border-color)"}}
-                                 [:input.form-input
-                                  {:type        "text"
-                                   :placeholder (tr [:composer.emotes/search-placeholder])
-                                   :auto-focus  (not is-mobile?)
-                                   :value       @search-query
-                                   :on-change   #(reset! search-query (.. % -target -value))}]]
-                                [:div.emoji-pack-header
-                                 [:div.emoji-pack-title
-                                  (if is-searching?
-                                    (tr [:composer.emotes/search-results] "Search Results")
-                                    (or (:name active-pack) (tr [:composer.emotes/default-title])))]
-                                 [:div.emoji-mode-switch
-                                  [:button {:class    (when-not @sticker-mode? "active")
-                                            :on-click #(reset! sticker-mode? false)}
-                                   (tr [:composer.emotes/mode-inline])]
-                                  [:button {:class    (when @sticker-mode? "active")
-                                            :on-click #(reset! sticker-mode? true)}
-                                   (tr [:composer.emotes/mode-sticker])]]]
-                                (if is-searching?
-                                  [:div.emoji-grid
-                                   (if (empty? search-results)
-                                     [:div.emoji-empty-state (tr [:composer.emotes/no-results])]
-                                     (for [[shortcode item] search-results]
-                                       (render-cell (str "search-" (:id item) "-" shortcode)
+                                     avatar
+                                     [media {:uri   avatar
+                                             :class "pack-icon"
+                                             :alt   pname}]
+
+                                     :else
+                                     [:span.pack-initials (str/upper-case (subs pname 0 (min 2 (count pname))))])]))
+            grid-class        (if stickers-tab? "emoji-grid is-sticker-grid" "emoji-grid")
+            hov               @hovered-item
+            mobile-style      (when is-mobile?
+                                (let [use-kb-h? (and inline?
+                                                     (not expanded?)
+                                                     (number? sheet-height-px)
+                                                     (>= sheet-height-px 180))
+                                      base-dim  (cond
+                                                  use-kb-h? (str (max 180 (Math/round sheet-height-px)) "px")
+                                                  expanded? "74vh"
+                                                  inline?   "clamp(260px, 38vh, 360px)"
+                                                  :else     "52vh")
+                                      pull-up   (max 0 (- dy-num))
+                                      pull-dn   (max 0 dy-num)]
+                                  {:height     (if (pos? pull-up)
+                                                 (str "calc(" base-dim " + " pull-up "px)")
+                                                 base-dim)
+                                   :transform  (if mounted?
+                                                 (str "translateY(" pull-dn "px)")
+                                                 "translateY(100%)")
+                                   :transition (if (or dragging? (and from-keyboard? (zero? dy-num)))
+                                                 "none"
+                                                 "transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.24s cubic-bezier(0.2, 0.8, 0.2, 1)")}))
+            content           [:div.emoji-popover
+                               (cond-> {:class (cond-> []
+                                                 stickers-tab?                  (conj "is-stickers-tab")
+                                                 (and is-mobile? inline?)       (conj "is-mobile-docked-sheet")
+                                                 (and is-mobile? (not inline?)) (conj "is-mobile-overlay-sheet")
+                                                 (and is-mobile? expanded?)     (conj "is-mobile-expanded"))}
+                                 mobile-style
+                                 (assoc :style mobile-style))
+                               [:div.emoji-mobile-sheet-header
+                                (or sheet-handlers {})
+                                (when is-mobile?
+                                  [:div.emoji-mobile-sheet-handle-bar
+                                   [:div.emoji-mobile-drag-handle]])
+                                [:div.emoji-top-chrome
+                                 (when stickers-allowed?
+                                   [:div.emoji-tab-bar
+                                    [:button.emoji-tab-btn
+                                     {:type     "button"
+                                      :class    (when-not stickers-tab? "active")
+                                      :on-click #(switch-tab! :emoji)}
+                                     (tr [:composer.emotes/tab-emoji])]
+                                    [:button.emoji-tab-btn
+                                     {:type     "button"
+                                      :class    (when stickers-tab? "active")
+                                      :on-click #(switch-tab! :stickers)}
+                                     (tr [:composer.emotes/tab-stickers])]])
+                                 [:div.emoji-search-bar
+                                  [:span.emoji-search-icon
+                                   [icons/search {:width "15px" :height "15px"}]]
+                                  [:input.emoji-search-input
+                                   {:type        "text"
+                                    :placeholder (tr [(if stickers-tab?
+                                                        :composer.emotes/search-stickers-placeholder
+                                                        :composer.emotes/search-placeholder)])
+                                    :auto-focus  (not is-mobile?)
+                                    :value       @search-query
+                                    :on-change   #(reset! search-query (.. % -target -value))}]
+                                  (when (seq @search-query)
+                                    [:button.emoji-search-clear
+                                     {:type     "button"
+                                      :title    (tr [:composer.emotes/clear-search])
+                                      :on-click #(reset! search-query "")}
+                                     [icons/exit {:width "13px" :height "13px"}]])]]]
+                               [:div.emoji-body
+                                (when (and (not is-searching?) (seq sorted-ids))
+                                  ^{:key "sidebar"}
+                                  [:div.emoji-sidebar
+                                   [:div.emoji-sidebar-scroll
+                                    (when (contains? packs "frequent")
+                                      (render-pack-btn "frequent"))
+                                    (when (and (contains? packs "frequent")
+                                               (or (seq custom-pack-ids) (seq unicode-pack-ids)))
+                                      [:div.emoji-sidebar-divider])
+                                    (for [pid custom-pack-ids]
+                                      (render-pack-btn pid))
+                                    (when (and (seq custom-pack-ids) (seq unicode-pack-ids))
+                                      [:div.emoji-sidebar-divider])
+                                    (for [pid unicode-pack-ids]
+                                      (render-pack-btn pid))]
+                                   [:button.sidebar-pack-item.add-emote-btn
+                                    {:type     "button"
+                                     :title    (tr [:settings.emotes/add-custom-tooltip])
+                                     :on-click (fn [e]
+                                                 (.stopPropagation e)
+                                                 (when on-close (on-close))
+                                                 (re-frame/dispatch [:ui/close-popover])
+                                                 (if-let [tgt (or active-space active-room)]
+                                                   (re-frame/dispatch [:rooms/open-settings tgt :emotes])
+                                                   (re-frame/dispatch [:settings/open :emotes])))}
+                                    [icons/plus {:width "17px" :height "17px"}]]])
+                                ^{:key "grid-area"}
+                                [:div.emoji-grid-area
+                                 {:on-mouse-leave #(reset! hovered-item nil)}
+                                 (cond
+                                   is-searching?
+                                   [:div.emoji-grid-scroll
+                                    [:div.emoji-section-heading.is-first
+                                     (tr [:composer.emotes/search-results])]
+                                    [:div {:class (str grid-class " emoji-grid-section")}
+                                     (if (empty? search-results)
+                                       [:div.emoji-empty-state
+                                        (tr [(if stickers-tab?
+                                               :composer.emotes/no-sticker-results
+                                               :composer.emotes/no-results)])]
+                                       (for [[shortcode item] search-results]
+                                         (render-cell (str "search-" (:id item) "-" shortcode)
+                                                      shortcode
+                                                      item
+                                                      (:is-unicode? item)
+                                                      (:pack-name item))))]]
+
+                                   (empty? packs)
+                                   [:div.emoji-empty-panel
+                                    [:span.emoji-empty-icon [icons/smiley {:width "32px" :height "32px"}]]
+                                    [:span.emoji-empty-copy
+                                     (tr [(if stickers-tab?
+                                            :composer.emotes/no-stickers
+                                            :composer.emotes/no-emotes)])]]
+
+                                   show-combined?
+                                   [:div.emoji-grid-scroll
+                                    [:div.emoji-section-heading.is-first
+                                     (pack-display-name tr active-pack active-id)]
+                                    [:div {:class (str grid-class " emoji-grid-section")}
+                                     (for [[idx [shortcode item]]
+                                           (map-indexed vector (take (if stickers-tab? 9 16) tab-frequent))]
+                                       (render-cell (str "freq-" idx "-" (emoji-usage-key item))
                                                     shortcode
                                                     item
                                                     (:is-unicode? item)
-                                                    (:is-sticker-pack? item))))]
-                                  [:div.emoji-grid
-                                   (for [[raw-shortcode item] (get active-pack :images {})
-                                         :let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))]]
-                                     (render-cell shortcode
-                                                  shortcode
-                                                  item
-                                                  (:is-unicode? active-pack)
-                                                  (:is-sticker-pack? active-pack)))])]])]]
+                                                    (:pack-name item)))]
+                                    (when primary-pack
+                                      (let [p-label (pack-display-name tr primary-pack primary-pack-id)]
+                                        [:<>
+                                         [:div.emoji-section-heading p-label]
+                                         [:div {:class (str grid-class " emoji-grid-section")}
+                                          (for [[raw-shortcode item] (get primary-pack :images {})
+                                                :let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))]]
+                                            (render-cell (str "primary-" (:id item) "-" shortcode)
+                                                         shortcode
+                                                         item
+                                                         (:is-unicode? primary-pack)
+                                                         p-label))]]))]
+
+                                   (:is-frequent? active-pack)
+                                   [:div.emoji-grid-scroll
+                                    [:div.emoji-section-heading.is-first
+                                     (pack-display-name tr active-pack active-id)]
+                                    [:div {:class (str grid-class " emoji-grid-section")}
+                                     (for [[idx [shortcode item]] (map-indexed vector (:ordered-items active-pack))]
+                                       (render-cell (str "freq-all-" idx "-" (emoji-usage-key item))
+                                                    shortcode
+                                                    item
+                                                    (:is-unicode? item)
+                                                    (:pack-name item)))]]
+
+                                   :else
+                                   (let [a-label (pack-display-name tr active-pack active-id)]
+                                     [:div.emoji-grid-scroll
+                                      [:div.emoji-section-heading.is-first a-label]
+                                      [:div {:class (str grid-class " emoji-grid-section")}
+                                       (for [[raw-shortcode item] (get active-pack :images {})
+                                             :let [shortcode (clean-shortcode (or (:shortcode item) raw-shortcode))]]
+                                         (render-cell (str active-id "-" (:id item) "-" shortcode)
+                                                      shortcode
+                                                      item
+                                                      (:is-unicode? active-pack)
+                                                      a-label))]]))]]
+                               (when-not is-mobile?
+                                 [:div.emoji-footer
+                                  (if hov
+                                    [:<>
+                                     [:div.emoji-footer-preview
+                                      (if (:is-unicode? hov)
+                                        [:span.emoji-footer-unicode (:unicode hov)]
+                                        [media {:uri   (or (:uri hov) (:url hov))
+                                                :class "emoji-footer-img"
+                                                :alt   (:shortcode hov)}])]
+                                     [:div.emoji-footer-meta
+                                      [:span.emoji-footer-code
+                                       (if (= (:kind hov) :sticker)
+                                         (or (not-empty (:body hov)) (:shortcode hov))
+                                         (str ":" (:shortcode hov) ":"))]
+                                      (when-let [sub (or (:label hov) (:pack-name hov))]
+                                        [:span.emoji-footer-sub sub])]]
+                                    [:span.emoji-footer-hint
+                                     (tr [(if stickers-tab?
+                                            :composer.emotes/hover-hint-sticker
+                                            :composer.emotes/hover-hint-emoji)])])])]]
         (if inline?
-          [click-away-wrapper
-           {:on-close on-close :z-index 19}
-           content]
+          (if is-mobile?
+            [:<>
+             [:div.emoji-mobile-click-away
+              {:on-click (fn [e]
+                           (.stopPropagation e)
+                           (when on-close (on-close)))}]
+             content]
+            [click-away-wrapper
+             {:on-close on-close :z-index 19}
+             content])
           content)))))
