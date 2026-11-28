@@ -38,6 +38,7 @@ Not entirely important to read, but certainly interesting.
    [paradise.ui.overlays.settings.notifications :refer [notifications-tab]]
    [paradise.ui.overlays.settings.advanced :refer [advanced-tab]]
    [paradise.ui.overlays.settings.accounts :refer [accounts-tab]]
+   [paradise.ui.overlays.settings.scan-qr :refer [scan-qr-tab]]
    [paradise.ui.overlays.settings.keybinds :refer [keybinds-tab]]
    [paradise.ui.overlays.settings.verification :refer [verification-tab]]
    [paradise.ui.overlays.settings.about :refer [credits-tab about-tab]]
@@ -171,24 +172,32 @@ file.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
 (defn- build-settings-groups [tr profile accounts version]
-  [{:id    :user
-    :label (tr [:settings.groups/user-settings])
-    :items [{:id       :my-account
-             :title    (tr [:settings.tabs/my-account])
-             :subtitle (:user-id profile)
-             :accent   "indigo"
-             :icon     [icons/user]}
-            {:id       :verification
-             :title    (tr [:settings.tabs/verification])
-             :subtitle (tr [:settings.verification/description])
-             :accent   "emerald"
-             :icon     [icons/check]}
-            {:id       :accounts
-             :title    (tr [:settings.tabs/accounts])
-             :subtitle (tr [:settings.accounts/description])
-             :badge    (when (> (count accounts) 1) (str (count accounts)))
-             :accent   "sky"
-             :icon     [icons/members]}]}
+  (let [mobile?    (mobile-runtime?)
+        user-items (cond-> [{:id       :my-account
+                             :title    (tr [:settings.tabs/my-account])
+                             :subtitle (:user-id profile)
+                             :accent   "indigo"
+                             :icon     [icons/user]}
+                            {:id       :verification
+                             :title    (tr [:settings.tabs/verification])
+                             :subtitle (tr [:settings.verification/description])
+                             :accent   "emerald"
+                             :icon     [icons/check]}
+                            {:id       :accounts
+                             :title    (tr [:settings.tabs/accounts])
+                             :subtitle (tr [:settings.accounts/description])
+                             :badge    (when (> (count accounts) 1) (str (count accounts)))
+                             :accent   "sky"
+                             :icon     [icons/members]}]
+                     mobile?
+                     (conj {:id       :scan-qr
+                            :title    (tr [:settings.tabs/scan-qr])
+                            :subtitle (tr [:settings.scan-qr/description])
+                            :accent   "violet"
+                            :icon     [icons/qr-code]}))]
+    [{:id    :user
+      :label (tr [:settings.groups/user-settings])
+      :items user-items}
    {:id    :app
     :label (tr [:settings.groups/app])
     :items [{:id       :notifications
@@ -231,13 +240,14 @@ file.
             {:id     :credits
              :title  (tr [:settings.credits/title])
              :accent "amber"
-             :icon   [icons/smiley]}]}])
+             :icon   [icons/smiley]}]}]))
 
 (defn- tab-title [tr tab-id]
   (case tab-id
     :my-account    (tr [:settings.tabs/my-account])
     :verification  (tr [:settings.tabs/verification])
     :accounts      (tr [:settings.tabs/accounts])
+    :scan-qr       (tr [:settings.tabs/scan-qr])
     :notifications (tr [:settings.tabs/notifications])
     :voice-video   (tr [:settings.tabs/voice-video])
     :emotes        (tr [:settings.tabs/emotes])
@@ -427,6 +437,7 @@ file.
              :my-account    [my-account-tab profile]
              :verification  [verification-tab]
              :accounts      [accounts-tab]
+             :scan-qr       [scan-qr-tab]
              :notifications [notifications-tab]
              :voice-video   [voice-video-tab]
              :emotes        [user-emotes-settings-tab]
