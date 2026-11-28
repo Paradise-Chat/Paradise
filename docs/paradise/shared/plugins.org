@@ -258,18 +258,26 @@ component slots
  :registry/hydrate-custom-urls
  (fn [{:keys [db]} [_ urls]]
    (let [clj-urls   (js->clj urls)
-         valid-urls (if (coll? clj-urls) (vec clj-urls) [])]
+         valid-urls (if (coll? clj-urls)
+                      (->> clj-urls
+                           (keep #(when (string? %) (not-empty (str/trim %))))
+                           distinct
+                           vec)
+                      [])]
      (refresh-registry-state! valid-urls)
      {:db (assoc db :plugins/custom-registries valid-urls)})))
 
 (rf/reg-event-fx
  :registry/add-custom-url
  (fn [{:keys [db]} [_ url]]
-   (let [current (:plugins/custom-registries db [])
-         updated (vec (distinct (conj current url)))]
-     (refresh-registry-state! updated)
-     {:db (assoc db :plugins/custom-registries updated)
-      :dispatch [:settings/save "custom_registries" (clj->js updated)]})))
+   (let [clean-url (some-> url str str/trim not-empty)]
+     (if-not clean-url
+       {}
+       (let [current (:plugins/custom-registries db [])
+             updated (vec (distinct (conj current clean-url)))]
+         (-> (store/set-setting! "custom_registries" updated)
+             (p/then #(refresh-registry-state! updated)))
+         {:db (assoc db :plugins/custom-registries updated)})))))
 
 (rf/reg-event-fx
  :registry/remove-custom-url
