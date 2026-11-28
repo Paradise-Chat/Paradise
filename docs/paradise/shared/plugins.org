@@ -200,7 +200,10 @@ component slots
 (defn inject-script! [url]
   (p/create
    (fn [resolve-fn reject]
+     (when-let [existing (.querySelector js/document (str "script[data-plugin-script=\"" url "\"]"))]
+       (.remove existing))
      (let [script (.createElement js/document "script")]
+       (.setAttribute script "data-plugin-script" url)
        (set! (.-src script) url)
        (set! (.-crossOrigin script) "anonymous")
        (set! (.-onload script) #(resolve-fn true))
