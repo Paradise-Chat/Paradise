@@ -1,23 +1,129 @@
 (ns paradise.shared.client.config
   (:require [cljs.reader :refer [read-string]]
+            [clojure.string :as str]
+            [paradise.shared.client.cache :as cache]
+            [paradise.shared.utils.macros :as macros]
             [taoensso.timbre :as log]
             [re-frame.core :as re-frame]
             [net :as net]
             [promesa.core :as p]))
 
+
+(def ^:private config-meta-key "config:last")
+(def ^:private core-i18n-asset-key "i18n:core")
+(def ^:private update-reload-guard-key "paradise_update_reload_v")
+(def bundled-version (some-> (:version macros/config) str not-empty))
+
+(defn clear-update-reload-guard! []
+  (try
+    (when (exists? js/sessionStorage)
+      (.removeItem js/sessionStorage update-reload-guard-key))
+    (catch :default _ nil)))
+
+(defn claim-update-reload!
+  "Marks `remote-version` as having triggered an automatic update reload in
+   `sessionStorage`. Returns true if this version has not yet been attempted
+   (caller should reload), or false if we already reloaded for it."
+  [remote-version]
+  (let [r-str (some-> remote-version str not-empty)]
+    (boolean
+     (when r-str
+       (let [prev (try
+                    (when (exists? js/sessionStorage)
+                      (.getItem js/sessionStorage update-reload-guard-key))
+                    (catch :default _ nil))]
+         (when (not= prev r-str)
+           (try
+             (when (exists? js/sessionStorage)
+               (.setItem js/sessionStorage update-reload-guard-key r-str))
+             (catch :default _ nil))
+           true))))))
+
 (defn load-config []
-  (-> (net/fetch "./config.edn"  #js {:cache "no-store"} )
-      (p/then #(.text %))
-      (p/then #(read-string %))))
+  (p/let [cached-meta (cache/get-meta config-meta-key)
+          prev-ver    (or (:version cached-meta) (:version (:data cached-meta)))
+          remote-cfg  (-> (net/fetch "./config.edn" #js {:cache "no-store"})
+                          (p/then (fn [resp]
+                                    (when (and resp (.-ok resp))
+                                      (.text resp))))
+                          (p/then (fn [raw]
+                                    (when (and (string? raw) (not (str/blank? raw)))
+                                      (let [parsed (read-string raw)]
+                                        (when (map? parsed)
+                                          (merge macros/config parsed))))))
+                          (p/catch (fn [err]
+                                     (log/warn "Runtime config fetch fell back to cached/bundled config:" err)
+                                     nil)))]
+    (let [effective     (or remote-cfg
+                            (when (map? (:data cached-meta))
+                              (merge macros/config (:data cached-meta)))
+                            macros/config)
+          next-ver      (some-> (:version effective) str not-empty)
+          remote-ver    (some-> (:version remote-cfg) str not-empty)
+          changed?      (boolean (and prev-ver next-ver (not= (str prev-ver) next-ver)))
+          bundle-stale? (boolean (and bundled-version
+                                      remote-ver
+                                      (not= bundled-version remote-ver)))]
+      (when (and remote-cfg next-ver)
+        (cache/put-meta! config-meta-key remote-cfg next-ver))
+      (assoc effective
+             :bundled-version         bundled-version
+             :remote-version          remote-ver
+             :config/version-changed? changed?
+             :config/bundle-stale?    bundle-stale?))))
 
-(defn load-i18n []
-  (-> (net/fetch "./i18n.edn" #js {:cache "no-store"})
-      (p/then #(.text %))
-      (p/then (fn [raw]
-                (let [dict (cljs.reader/read-string raw)]
-                  (re-frame/dispatch-sync [:i18n/set-dictionary dict])
-                  dict)))))
+(defn- apply-i18n-edn! [raw]
+  (when (and (string? raw) (not (str/blank? raw)))
+    (try
+      (let [dict (read-string raw)]
+        (when (and (map? dict) (contains? dict :en))
+          (re-frame/dispatch-sync [:i18n/set-dictionary dict])
+          dict))
+      (catch :default _ nil))))
 
+(defn- apply-bundled-i18n! []
+  (when (and (map? macros/i18n-data) (contains? macros/i18n-data :en))
+    (re-frame/dispatch-sync [:i18n/set-dictionary macros/i18n-data])
+    macros/i18n-data))
+
+(defn load-i18n
+  ([]
+   (load-i18n nil nil))
+  ([config]
+   (load-i18n config nil))
+  ([config {:keys [force?]}]
+   (let [target-ver  (str (or (:version config) (:version macros/config) "dev"))
+         bundled-ver (str (or (:version macros/config) ""))
+         local-dev?  (cache/local-dev-origin?)]
+     (if (and (not force?)
+              (not local-dev?)
+              (not (str/blank? bundled-ver))
+              (= target-ver bundled-ver)
+              (map? macros/i18n-data)
+              (contains? macros/i18n-data :en))
+       ;; Production / native / Electron where remote config version matches the
+       ;; bundled build -> compiled macros/i18n-data is already exact (0 network calls).
+       (p/resolved (apply-bundled-i18n!))
+       ;; Local dev, forced reload, or version bumped relative to bundled build ->
+       ;; delegate to persistent IDB cache (0 network calls once cached for target-ver
+       ;; in prod, conditional ETag/304 check on localhost dev, offline fallback).
+       (let [url (cond
+                   force?     (str "./i18n.edn?v=" (js/encodeURIComponent target-ver)
+                                   "&t=" (.getTime (js/Date.)))
+                   local-dev? "./i18n.edn"
+                   :else      (str "./i18n.edn?v=" (js/encodeURIComponent target-ver)))]
+         (-> (cache/fetch-text-cached! url
+                                       {:key               core-i18n-asset-key
+                                        :version           target-ver
+                                        :force?            (boolean force?)
+                                        :local-revalidate? true
+                                        :fetch-fn          net/fetch})
+             (p/then (fn [res]
+                       (or (apply-i18n-edn! (:text res))
+                           (apply-bundled-i18n!))))
+             (p/catch (fn [err]
+                        (log/warn "Runtime i18n fetch fell back to bundled dictionary:" err)
+                        (apply-bundled-i18n!)))))))))
 
 (defn check-remote-version []
   (let [url (str "./config.edn?t=" (.getTime (js/Date.)))]
