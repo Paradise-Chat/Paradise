@@ -1,9 +1,13 @@
 (ns paradise.shared.utils.helpers
   (:require
-   [net :as net]
+   [cljs.reader :as reader]
    [clojure.string :as str]
-   [promesa.core :as p]
    [hickory.core :as h]
+   [paradise.shared.utils.cache :as mem-cache]
+   [paradise.shared.utils.encoding :as encoding]
+   [paradise.shared.utils.media :as media-utils]
+   [paradise.shared.utils.platform :as platform]
+   [promesa.core :as p]
    [taoensso.timbre :as log]))
 
 (def max-tag-nesting 100)
@@ -44,10 +48,47 @@
 
 (def non-text-tags #{:style :script :textarea :option :noscript :reply-quote :mx-reply})
 
+(defn safe-lower
+  "Nil-safe string lowercasing."
+  [x]
+  (str/lower-case (str (or x ""))))
+
+(defn safe-lower-trim
+  "Nil-safe string trimming and lowercasing."
+  [x]
+  (str/lower-case (str/trim (str (or x "")))))
+
 (defn clean-shortcode [raw]
   (-> (if (keyword? raw) (name raw) (str raw))
       (str/replace #":" "")
       str/trim))
+
+(defn slugify-shortcode
+  "Normalizes an arbitrary string or filename into a valid emote shortcode slug.
+   Options:
+   - `:strip-ext?`  strip trailing file extension before slugifying (default false)
+   - `:lowercase?`  force lower-case output (default false)
+   - `:allow-plus?` keep `+` characters (default false)
+   - `:min-len`     pad short slugs when provided
+   - `:max-len`     truncate long slugs when provided"
+  ([raw]
+   (slugify-shortcode raw nil))
+  ([raw {:keys [strip-ext? lowercase? allow-plus? min-len max-len]}]
+   (let [base     (clean-shortcode (or raw ""))
+         no-ext   (if strip-ext? (str/replace base #"\.[^.]+$" "") base)
+         cased    (if lowercase? (str/lower-case no-ext) no-ext)
+         pat      (if allow-plus? #"[^A-Za-z0-9_+-]+" #"[^A-Za-z0-9_-]+")
+         slug     (-> cased
+                      (str/replace pat "_")
+                      (str/replace #"_+" "_")
+                      (str/replace #"^_+|_+$" ""))
+         bounded  (if (and max-len (> (count slug) max-len))
+                    (subs slug 0 max-len)
+                    slug)]
+     (cond
+       (empty? bounded) ""
+       (and min-len (< (count bounded) min-len)) (str bounded "_emote")
+       :else bounded))))
 
 (defn format-shortcode [raw]
   (let [cleaned (clean-shortcode raw)]
@@ -58,6 +99,20 @@
 (defn media-uri? [s]
   (and (string? s)
        (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
+
+(def http-url? media-utils/http-url?)
+(def local-media-url? media-utils/local-media-url?)
+(def audio-media? media-utils/audio-media?)
+(def normalize-base-url media-utils/normalize-base-url)
+(def same-origin-prefix? media-utils/same-origin-prefix?)
+(def extract-media-source media-utils/extract-media-source)
+
+(defn extract-first-url
+  "Extracts the first HTTP(S) URL from `text`, stripping trailing punctuation."
+  [text]
+  (when text
+    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
+      (str/replace match #"[.,:;!?]$" ""))))
 
 (defn- parse-style-str [style-str]
   (if (string? style-str)
@@ -100,7 +155,6 @@
     (if (and (media-uri? src) (or emote? (valid-url? src)))
       {:tag   "comp:paradise.media.component/media-native"
        :attrs {:uri       src
-;;               :mxc       src
                :emote-id  (get attrs :data-emote-id)
                :class     "timeline-emotes"
                :className "timeline-emotes"
@@ -168,27 +222,40 @@
           hickory-maps  (map h/as-hickory raw-fragments)]
       (sanitize-nodes hickory-maps 0))))
 
+(defonce ^:private !sanitize-cache
+  (mem-cache/make-ttl-cache {:max-entries 300}))
+
+(defn memoized-sanitize
+  "Bounded-cache wrapper around `sanitize-custom-html` for hot timeline paths."
+  [html]
+  (mem-cache/memoize-bounded !sanitize-cache html #(sanitize-custom-html html)))
+
 (defn sanitize-text [raw-text]
   (when raw-text
     (str/escape (str raw-text) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;" \' "&#39;"})))
 
 (defn linkify-text [text]
   (if (str/blank? text)
-    [text]
+    (if (seq text) (list text) '())
     (let [pattern #"https?://[^\s]+"
           parts   (str/split text pattern -1)
           matches (re-seq pattern text)]
       (if (empty? matches)
-        [text]
-        (remove nil?
-                (mapcat
-                 (fn [i part]
-                   (let [url (nth matches i nil)]
-                     (if url
-                       [part [:a {:href url :target "_blank" :rel "noopener noreferrer"} url]]
-                       [part])))
-                 (range (count parts))
-                 parts))))))
+        (list text)
+        (mapcat
+         (fn [i part]
+           (let [url (nth matches i nil)]
+             (if url
+               (cond-> []
+                 (seq part) (conj part)
+                 true       (conj ^{:key (str "lnk-" i)}
+                                  [:a {:href   url
+                                       :target "_blank"
+                                       :rel    "noopener noreferrer"}
+                                   url]))
+               (when (seq part) [part]))))
+         (range (count parts))
+         parts)))))
 
 (def block-level-tags #{:p :div :h1 :h2 :h3 :h4 :h5 :h6 :blockquote :li :tr})
 
@@ -265,6 +332,164 @@
        (catch :default e
          (reject e))))))
 
+(defn file->base64-payload
+  "Reads a browser File/Blob into `{:buffer-b64 :mime :filename}` for worker RPCs,
+  or resolves to nil when `file` is nil."
+  [^js file]
+  (if-not file
+    (p/resolved nil)
+    (p/let [ab (file->array-buffer file)]
+      (let [u8  (when (and ab (pos? (.-byteLength ab)))
+                  (js/Uint8Array. ab))
+            b64 (when u8 (encoding/uint8->base64 u8))]
+        {:buffer-b64 b64
+         :mime       (or (not-empty (.-type file)) "image/png")
+         :filename   (.-name file)}))))
+
+(defn revoke-object-url!
+  "Safely revokes a `blob:` object URL, ignoring errors."
+  [url]
+  (when url
+    (try
+      (js/URL.revokeObjectURL url)
+      (catch :default _ nil))))
+
+(defn click-element-by-id!
+  "Triggers a click on the DOM element with `element-id`, if mounted."
+  [element-id]
+  (when-let [el (and element-id (exists? js/document) (.getElementById js/document element-id))]
+    (.click el)))
+
+(defn copy-to-clipboard!
+  "Writes `text` to the browser clipboard when available; returns true on dispatch."
+  [text]
+  (when-let [cb (and (exists? js/navigator) (.-clipboard js/navigator))]
+    (.writeText cb (str text))
+    true))
+
+(defn- u16-be [^js dv off] (.getUint16 dv off false))
+(defn- u16-le [^js dv off] (.getUint16 dv off true))
+(defn- u32-be [^js dv off] (.getUint32 dv off false))
+
+(defn- read-ascii4 [^js u8 off]
+  (when (<= (+ off 4) (.-length u8))
+    (str (js/String.fromCharCode (aget u8 off)
+                                 (aget u8 (+ off 1))
+                                 (aget u8 (+ off 2))
+                                 (aget u8 (+ off 3))))))
+
+(defn- parse-png-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 24)
+             (= (aget u8 0) 0x89)
+             (= (read-ascii4 u8 1) "PNG\r"))
+    {:width  (u32-be dv 16)
+     :height (u32-be dv 20)}))
+
+(defn- parse-gif-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 10)
+             (let [hdr (read-ascii4 u8 0)]
+               (or (= hdr "GIF8"))))
+    {:width  (u16-le dv 6)
+     :height (u16-le dv 8)}))
+
+(defn- parse-jpeg-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 4)
+             (= (aget u8 0) 0xFF)
+             (= (aget u8 1) 0xD8))
+    (let [len (.-length u8)]
+      (loop [off 2]
+        (when (< (+ off 4) len)
+          (if (not= (aget u8 off) 0xFF)
+            nil
+            (let [marker (aget u8 (inc off))]
+              (cond
+                (or (= marker 0xFF) (= marker 0x00))
+                (recur (inc off))
+
+                (contains? #{0xC0 0xC1 0xC2 0xC3 0xC5 0xC6 0xC7 0xC9 0xCA 0xCB 0xCD 0xCE 0xCF}
+                           marker)
+                (when (<= (+ off 9) len)
+                  {:height (u16-be dv (+ off 5))
+                   :width  (u16-be dv (+ off 7))})
+
+                (or (= marker 0xD9) (= marker 0xDA))
+                nil
+
+                :else
+                (let [seg-len (u16-be dv (+ off 2))]
+                  (when (>= seg-len 2)
+                    (recur (+ off 2 seg-len))))))))))))
+
+(defn- parse-webp-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 30)
+             (= (read-ascii4 u8 0) "RIFF")
+             (= (read-ascii4 u8 8) "WEBP"))
+    (let [chunk (read-ascii4 u8 12)]
+      (cond
+        (= chunk "VP8X")
+        {:width  (inc (bit-or (aget u8 24)
+                              (bit-shift-left (aget u8 25) 8)
+                              (bit-shift-left (aget u8 26) 16)))
+         :height (inc (bit-or (aget u8 27)
+                              (bit-shift-left (aget u8 28) 8)
+                              (bit-shift-left (aget u8 29) 16)))}
+
+        (= chunk "VP8 ")
+        {:width  (bit-and (u16-le dv 26) 0x3FFF)
+         :height (bit-and (u16-le dv 28) 0x3FFF)}
+
+        (= chunk "VP8L")
+        (let [bits (bit-or (aget u8 21)
+                           (bit-shift-left (aget u8 22) 8)
+                           (bit-shift-left (aget u8 23) 16)
+                           (bit-shift-left (aget u8 24) 24))]
+          {:width  (inc (bit-and bits 0x3FFF))
+           :height (inc (bit-and (unsigned-bit-shift-right bits 14) 0x3FFF))})
+
+        :else nil))))
+
+(defn- parse-heic-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 24)
+             (= (read-ascii4 u8 4) "ftyp"))
+    (let [len (.-length u8)]
+      (loop [i 8]
+        (when (<= (+ i 16) len)
+          (if (= (read-ascii4 u8 i) "ispe")
+            (let [w (u32-be dv (+ i 8))
+                  h (u32-be dv (+ i 12))]
+              (when (and (pos? w) (pos? h) (<= w 32768) (<= h 32768))
+                {:width w :height h}))
+            (recur (inc i))))))))
+
+(defn parse-image-dimensions-from-buffer
+  "Parses `{:width :height}` from the leading header bytes of PNG/GIF/JPEG/WebP/HEIC."
+  [^js ab]
+  (when (and ab (pos? (.-byteLength ab)))
+    (try
+      (let [u8 (js/Uint8Array. ab)
+            dv (js/DataView. ab)]
+        (or (parse-png-dims u8 dv)
+            (parse-jpeg-dims u8 dv)
+            (parse-webp-dims u8 dv)
+            (parse-gif-dims u8 dv)
+            (parse-heic-dims u8 dv)))
+      (catch :default _
+        nil))))
+
+(defn- probe-image-header-dims [raw-file]
+  (try
+    (let [slice-fn (.-slice raw-file)
+          head     (if (fn? slice-fn)
+                     (.slice raw-file 0 (min (or (.-size raw-file) 65536) 65536))
+                     raw-file)]
+      (-> (file->array-buffer head)
+          (p/then parse-image-dimensions-from-buffer)
+          (p/catch (fn [_] nil))))
+    (catch :default _
+      (p/resolved nil))))
+
+(def ^:private max-ios-inline-preview-bytes (* 2 1024 1024))
+
 (defn extract-metadata [raw-file]
   (p/create
    (fn [resolve-fn _]
@@ -273,40 +498,116 @@
          (do
            (log/warn "Extract-metadata received an empty or undefined file object. Bailing.")
            (resolve-fn nil))
-         (let [mime      (or (.-type raw-file) "application/octet-stream")
-               filename  (or (.-name raw-file) (str "upload-" (random-uuid)))
-               size      (or (.-size raw-file) 0)
-               is-image? (str/starts-with? mime "image/")
-               is-video? (str/starts-with? mime "video/")]
+         (let [mime          (or (not-empty (.-type raw-file)) "application/octet-stream")
+               filename      (or (not-empty (.-name raw-file)) (str "upload-" (random-uuid)))
+               size          (or (.-size raw-file) 0)
+               is-image?     (str/starts-with? mime "image/")
+               is-video?     (str/starts-with? mime "video/")
+               ios?          (platform/ios-runtime?)
+               make-preview? (and is-image?
+                                  (or (not ios?)
+                                      (<= size max-ios-inline-preview-bytes)))]
            (log/info "Safe extract-metadata -> Name:" filename "Mime:" mime "Size:" size)
            (let [fid      (register-file! raw-file)
-                 preview  (try (js/URL.createObjectURL raw-file)
-                               (catch :default e
-                                 (log/warn "Failed to create object URL" e)
-                                 nil))
+                 preview  (when make-preview?
+                            (try (js/URL.createObjectURL raw-file)
+                                 (catch :default e
+                                   (log/warn "Failed to create object URL" e)
+                                   nil)))
                  base-att {:file-id     fid
                            :mime        mime
                            :mimetype    mime
                            :filename    filename
                            :size        size
-                           :preview-url preview}]
-             (if (and preview (or is-image? is-video?))
-               (let [el (if is-image? (js/Image.) (js/document.createElement "video"))]
-                 (set! (.-onerror el)
-                       (fn [e]
-                         (log/warn "Failed to load media to extract dimensions." e)
-                         (resolve-fn base-att)))
-                 (if is-image?
-                   (set! (.-onload el)
-                         (fn []
-                           (resolve-fn (assoc base-att :width (.-width el) :height (.-height el)))))
-                   (do
-                     (set! (.-preload el) "metadata")
-                     (set! (.-onloadedmetadata el)
+                           :preview-url preview}
+                 !settled (atom false)
+                 finish!  (fn [att]
+                            (when (compare-and-set! !settled false true)
+                              (resolve-fn att)))]
+             (cond
+               is-image?
+               (-> (probe-image-header-dims raw-file)
+                   (p/then
+                    (fn [dims]
+                      (cond
+                        (and dims (pos? (:width dims)) (pos? (:height dims)))
+                        (finish! (merge base-att dims))
+
+                        (and (not ios?) preview)
+                        (let [img   (js/Image.)
+                              timer (js/setTimeout
+                                     (fn []
+                                       (set! (.-onload img) nil)
+                                       (set! (.-onerror img) nil)
+                                       (set! (.-src img) "")
+                                       (finish! base-att))
+                                     2500)
+                              done! (fn [att]
+                                      (js/clearTimeout timer)
+                                      (set! (.-onload img) nil)
+                                      (set! (.-onerror img) nil)
+                                      (set! (.-src img) "")
+                                      (finish! att))]
+                          (set! (.-onerror img)
+                                (fn [e]
+                                  (log/warn "Failed to load image to extract dimensions." e)
+                                  (done! base-att)))
+                          (set! (.-onload img)
+                                (fn []
+                                  (done! (assoc base-att
+                                                :width  (.-width img)
+                                                :height (.-height img)))))
+                          (set! (.-src img) preview))
+
+                        :else
+                        (finish! base-att))))
+                   (p/catch (fn [_] (finish! base-att))))
+
+               (and is-video? (not ios?))
+               (let [probe-url (try (js/URL.createObjectURL raw-file)
+                                    (catch :default _ nil))]
+                 (if-not probe-url
+                   (finish! base-att)
+                   (let [vid   (js/document.createElement "video")
+                         timer (js/setTimeout
+                                (fn []
+                                  (try
+                                    (set! (.-onloadedmetadata vid) nil)
+                                    (set! (.-onerror vid) nil)
+                                    (.removeAttribute vid "src")
+                                    (.load vid)
+                                    (catch :default _ nil))
+                                  (revoke-object-url! probe-url)
+                                  (finish! base-att))
+                                2500)
+                         done! (fn [att]
+                                 (js/clearTimeout timer)
+                                 (try
+                                   (set! (.-onloadedmetadata vid) nil)
+                                   (set! (.-onerror vid) nil)
+                                   (.removeAttribute vid "src")
+                                   (.load vid)
+                                   (catch :default _ nil))
+                                 (revoke-object-url! probe-url)
+                                 (finish! att))]
+                     (set! (.-muted vid) true)
+                     (set! (.-playsInline vid) true)
+                     (set! (.-preload vid) "metadata")
+                     (set! (.-onerror vid)
+                           (fn [e]
+                             (log/warn "Failed to load video metadata." e)
+                             (done! base-att)))
+                     (set! (.-onloadedmetadata vid)
                            (fn []
-                             (resolve-fn (assoc base-att :width (.-videoWidth el) :height (.-videoHeight el)))))))
-                 (set! (.-src el) preview))
-               (resolve-fn base-att)))))
+                             (done! (assoc base-att
+                                           :width    (.-videoWidth vid)
+                                           :height   (.-videoHeight vid)
+                                           :duration (when (js/Number.isFinite (.-duration vid))
+                                                       (Math/round (* 1000 (.-duration vid))))))))
+                     (set! (.-src vid) probe-url))))
+
+               :else
+               (finish! base-att)))))
        (catch :default e
          (log/error "Catastrophic error in extract-metadata:" e)
          (resolve-fn nil))))))
@@ -318,6 +619,19 @@
   (js/Intl.DateTimeFormat. js/undefined #js {:month "long"
                                              :day   "numeric"
                                              :year  "numeric"}))
+
+(defn normalize-ts-ms
+  "Normalizes a numeric epoch timestamp (in seconds or milliseconds) to milliseconds, or nil."
+  [raw]
+  (when (and (number? raw) (pos? raw))
+    (if (< raw 100000000000) (* raw 1000) raw)))
+
+(defn date-day-key
+  "Returns a `[year month day]` calendar key for a millisecond timestamp, or nil."
+  [ts]
+  (when-let [ms (normalize-ts-ms ts)]
+    (let [d (js/Date. ms)]
+      [(.getFullYear d) (.getMonth d) (.getDate d)])))
 
 (defn format-divider-date [ts]
   (let [date         (js/Date. ts)
@@ -334,6 +648,19 @@
   (when ts
     (let [date (js/Date. ts)]
       (.toLocaleTimeString date js/undefined #js {:hour "numeric" :minute "2-digit"}))))
+
+(defn format-duration-seconds
+  "Formats a non-negative duration in seconds as `M:SS`."
+  [seconds]
+  (let [s   (max 0 (js/Math.floor (or seconds 0)))
+        m   (quot s 60)
+        rem (mod s 60)]
+    (str m ":" (when (< rem 10) "0") rem)))
+
+(defn format-duration-ms
+  "Formats a non-negative duration in milliseconds as `M:SS`."
+  [ms]
+  (format-duration-seconds (quot (or ms 0) 1000)))
 
 (defn truncate-name [name max-len]
   (if (> (count name) max-len)
@@ -368,14 +695,182 @@
                      " is in the call"
                      " are in the call"))))))
 
-(defn get-status-string [tr type names]
-  (let [cnt       (count names)
-        base-path (if (= type :typing)
-                    "container.timeline.status.typing"
-                    "container.timeline.status.reading")]
+(defn get-status-string [tr path names]
+  (let [cnt  (count names)
+        base (if (vector? path) (first path) path)
+        k    #(keyword (name base) %)
+        n1   #(truncate-name (first names) 16)
+        n2   #(truncate-name (second names) 16)
+        n3   #(truncate-name (nth names 2) 16)]
     (case cnt
       0 ""
-      1 (tr [(keyword base-path "one")] [(truncate-name (first names) 16)])
-      2 (tr [(keyword base-path "two")] [(truncate-name (first names) 16) (truncate-name (second names) 16)])
-      3 (tr [(keyword base-path "three")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (truncate-name (nth names 2) 16)])
-      (tr [(keyword base-path "many")] [(truncate-name (first names) 16) (truncate-name (second names) 16) (- cnt 2)]))))
+      1 (tr [(k "one")] [(n1)])
+      2 (tr [(k "two")] [(n1) (n2)])
+      3 (tr [(k "three")] [(n1) (n2) (n3)])
+      (tr [(k "many")] [(n1) (n2) (- cnt 2)]))))
+
+(defn clamp
+  "Clamps numeric value `x` into the closed interval `[lo, hi]`."
+  [x lo hi]
+  (max lo (min hi (or x lo))))
+
+(defn clamp01
+  "Clamps numeric value `x` into `[0.0, 1.0]`."
+  [x]
+  (clamp (or x 0.0) 0.0 1.0))
+
+(defn ok-status?
+  "Returns true when a worker status value or response map indicates success."
+  [x]
+  (let [s (if (map? x) (:status x) x)]
+    (contains? #{"success" :success} s)))
+
+(defn normalize-id
+  "Normalizes a keyword or arbitrary identifier to a clean string without a leading colon."
+  [id]
+  (if (keyword? id)
+    (subs (str id) 1)
+    (str id)))
+
+(defn normalize-keyword
+  "Converts a non-empty keyword, string, or symbol into a keyword (preserving namespace); returns nil otherwise."
+  [x]
+  (cond
+    (keyword? x) x
+    (symbol? x)  (keyword x)
+    (string? x)  (let [s (str/replace x #"^:" "")]
+                   (when (seq s) (keyword s)))
+    :else        nil))
+
+(defn clean-user-id
+  "Strips trailing LiveKit/device suffixes (e.g. `|device`) from a matrix-style user ID."
+  [raw-id]
+  (when (and raw-id (not (str/blank? (str raw-id))))
+    (or (re-find #"^@[^:]+:[^:|]+" (str raw-id))
+        (str raw-id))))
+
+(defn deep-merge
+  "Recursively merges maps, ignoring nil inputs."
+  [& maps]
+  (apply merge-with
+         (fn [a b]
+           (if (and (map? a) (map? b))
+             (deep-merge a b)
+             b))
+         (remove nil? maps)))
+
+(defn hex->rgba
+  "Converts a 6-digit hex color string into an `rgba(r, g, b, alpha)` CSS string."
+  [hex alpha]
+  (let [clean (str/replace (or hex "#5865f2") #"^#" "")]
+    (if (= 6 (count clean))
+      (let [r (js/parseInt (subs clean 0 2) 16)
+            g (js/parseInt (subs clean 2 4) 16)
+            b (js/parseInt (subs clean 4 6) 16)]
+        (str "rgba(" r ", " g ", " b ", " alpha ")"))
+      (str "rgba(88, 101, 242, " alpha ")"))))
+
+(defn first-non-blank
+  "Returns the first non-blank trimmed string from `vals`, or nil."
+  [& vals]
+  (some (fn [v]
+          (when (some? v)
+            (let [s (str/trim (str v))]
+              (when (seq s) s))))
+        vals))
+
+(defn resolve-item-label
+  "Resolves a declarative item's display label from `:title-key`/`:label-key` or literal `:title`/`:label`."
+  [tr {:keys [title title-key title-args label label-key label-args]}]
+  (let [k    (normalize-keyword (or title-key label-key))
+        args (or title-args label-args)]
+    (cond
+      k     (if (seq args) (tr [k] (vec args)) (tr [k]))
+      title title
+      label label
+      :else "")))
+
+(defn resolve-item-desc
+  "Resolves a declarative item's description/subtitle from `:desc-key`/`:subtitle-key` or literal `:desc`/`:subtitle`."
+  [tr {:keys [desc desc-key desc-args subtitle subtitle-key subtitle-args]}]
+  (let [k    (normalize-keyword (or desc-key subtitle-key))
+        args (or desc-args subtitle-args)]
+    (cond
+      k        (if (seq args) (tr [k] (vec args)) (tr [k]))
+      desc     desc
+      subtitle subtitle
+      :else    "")))
+
+(defn resolve-dm-display
+  "Derives DM / Group-DM peer list, avatar, and display name from room membership."
+  [{:keys [is-dm? is-group-dm? members-map my-id avatar-url name only-replace-loading?]}]
+  (let [other-users (when (and is-dm? (seq members-map))
+                      (->> (vals members-map)
+                           (remove #(= (:user-id %) my-id))))
+        group-dm?   (boolean (or is-group-dm? (> (count other-users) 1)))
+        other-user  (when (and is-dm? (not group-dm?))
+                      (first other-users))
+        final-av    (if group-dm?
+                      avatar-url
+                      (or avatar-url (:avatar-url other-user)))
+        placeholder (or (str/blank? name) (= name "Loading..."))
+        final-name  (cond
+                      (and group-dm? placeholder (seq other-users))
+                      (str/join ", " (map :display-name other-users))
+
+                      (and is-dm? other-user (or (not only-replace-loading?) placeholder))
+                      (:display-name other-user)
+
+                      :else
+                      name)]
+    {:other-users  other-users
+     :group-dm?    group-dm?
+     :other-user   other-user
+     :avatar-url   final-av
+     :display-name final-name}))
+
+(def capacitor-platform platform/capacitor-platform)
+(def current-platform platform/current-platform)
+(def native-platform? platform/native-platform?)
+(def capacitor-mobile? platform/capacitor-mobile?)
+(def mobile-native? platform/mobile-native?)
+(def ios-native? platform/ios-native?)
+(def ios-runtime? platform/ios-runtime?)
+(def mobile-runtime? platform/mobile-runtime?)
+(def electron-platform? platform/electron-platform?)
+(def mac-os? platform/mac-os?)
+(def mobile-viewport? platform/mobile-viewport?)
+
+(def uint8->base64 encoding/uint8->base64)
+(def base64->uint8 encoding/base64->uint8)
+(def utf8->base64 encoding/utf8->base64)
+(def bytes->base64url encoding/bytes->base64url)
+(def base64url->uint8 encoding/base64url->uint8)
+(def array-buffer->data-url encoding/array-buffer->data-url)
+
+(defn parse-edn-map
+  "Parses an EDN string into a map (or passes an existing map through), returning `{}` on failure."
+  [raw-val]
+  (cond
+    (map? raw-val)    raw-val
+    (string? raw-val) (try
+                        (let [parsed (reader/read-string raw-val)]
+                          (if (map? parsed) parsed {}))
+                        (catch :default _ {}))
+    :else             {}))
+
+(defn decode-edn-field
+  "Decodes an EDN-encoded string field (e.g. :options-edn) from a worker payload,
+  falling back to `fallback-key` when absent or unreadable."
+  ([m edn-key]
+   (decode-edn-field m edn-key nil))
+  ([m edn-key fallback-key]
+   (or (when-let [s (get m edn-key)]
+         (when (string? s)
+           (try
+             (reader/read-string s)
+             (catch :default e
+               (log/warn "Failed to parse" edn-key ":" e)
+               nil))))
+       (when fallback-key
+         (get m fallback-key)))))
