@@ -677,7 +677,7 @@ spaces navigation bar.
                      (.stopPropagation e)
                      (finish!)
                      (re-frame/dispatch [:settings/open :voice-video]))}
-        [:span.item-icon [icons/settings {:size "15px"}]]
+        [:span.item-icon [icons/settings {:size "15px" :animate :spin}]]
         [:span.item-label (tr [:settings.tabs/voice-video])]]])))
 
 (defn ^:ui mic-options-context-menu [{:keys [close-fn]}]
@@ -941,7 +941,7 @@ spaces navigation bar.
         {:type     "button"
          :title    (tr [:settings.groups/user-settings])
          :on-click #(re-frame/dispatch [:settings/open])}
-        [icons/settings {:width "17px" :height "17px"}]]]]]))
+        [icons/settings {:width "17px" :height "17px" :animate :spin}]]]]]))
 
 (def ^:private default-profile-fields
   [{:key             :display-name
