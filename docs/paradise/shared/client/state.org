@@ -17,6 +17,5 @@ This may be move-able there too, but will let it remain for now.
 (defonce !virtualizer-pool (atom nil))
 (defonce !config (atom nil))
 
-(defonce !ast-handoff (atom {}))
 (defonce !attachments-cache (atom {}))
 #+end_src
