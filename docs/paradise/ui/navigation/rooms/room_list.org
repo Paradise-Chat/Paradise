@@ -60,16 +60,18 @@ Room Lists sauce here.
  (fn [db _]
    (update-in db [:ui :parent-refresh-counter] (fnil inc 0))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :room-list/set-home-rooms-sync
- (fn [db [_ rooms]]
+ (fn [{:keys [db]} [_ rooms]]
    (if (= (:rooms db) rooms)
-     db
-     (assoc db :rooms rooms))))
+     {}
+     (cond-> {:db (assoc db :rooms rooms)}
+       (get-in db [:session/pending-restore :applied?])
+       (assoc :fx [[:dispatch [:session/reconcile-restored-room]]])))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :room-list/set-bg-rooms-sync
- (fn [db [_ rooms-list]]
+ (fn [{:keys [db]} [_ rooms-list]]
    (let [old-cache (:rooms-unfiltered-cache db {})
          old-idx   (:rooms-manual-children-idx db {})
          [raw-map next-idx]
@@ -96,14 +98,16 @@ Room Lists sauce here.
          cache-eq? (= old-cache rooms-map)
          idx-eq?   (= old-idx next-idx)]
      (if (and cache-eq? idx-eq?)
-       db
-       (cond-> db
-         (not cache-eq?) (assoc :rooms-unfiltered-cache rooms-map)
-         (not idx-eq?)   (assoc :rooms-manual-children-idx next-idx))))))
+       {}
+       (cond-> {:db (cond-> db
+                      (not cache-eq?) (assoc :rooms-unfiltered-cache rooms-map)
+                      (not idx-eq?)   (assoc :rooms-manual-children-idx next-idx))}
+         (get-in db [:session/pending-restore :applied?])
+         (assoc :fx [[:dispatch [:session/reconcile-restored-room]]]))))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :room-list/patch-bg-rooms-sync
- (fn [db [_ upserts removals]]
+ (fn [{:keys [db]} [_ upserts removals]]
    (let [old-cache (:rooms-unfiltered-cache db {})
          old-idx   (:rooms-manual-children-idx db {})
          [rem-cache rem-idx]
@@ -149,10 +153,12 @@ Room Lists sauce here.
          cache-same? (identical? old-cache next-cache)
          idx-same?   (identical? old-idx next-idx)]
      (if (and cache-same? idx-same?)
-       db
-       (cond-> db
-         (not cache-same?) (assoc :rooms-unfiltered-cache next-cache)
-         (not idx-same?)   (assoc :rooms-manual-children-idx next-idx))))))
+       {}
+       (cond-> {:db (cond-> db
+                      (not cache-same?) (assoc :rooms-unfiltered-cache next-cache)
+                      (not idx-same?)   (assoc :rooms-manual-children-idx next-idx))}
+         (get-in db [:session/pending-restore :applied?])
+         (assoc :fx [[:dispatch [:session/reconcile-restored-room]]]))))))
 #+end_src
 
 **** Space Tree Flattening
