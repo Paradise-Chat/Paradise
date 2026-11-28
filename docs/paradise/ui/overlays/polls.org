@@ -13,14 +13,9 @@ Provides protocol-agnostic Poll creation (~:create-poll~ modal)
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
    [paradise.shared.client.state :as state]
-   [paradise.shared.utils.helpers :refer [uint8->base64]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.container.call.audio-processor :as audio-processor]
-   [paradise.ui.container.call.runtime :as call-rtc]
    [paradise.ui.overlays.base :refer [modal-component]]
-   [promesa.core :as p]
    [re-frame.core :as re-frame]
-   [re-frame.db :as rf-db]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
 #+end_src
