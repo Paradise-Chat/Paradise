@@ -1,0 +1,25 @@
+(specifications->manifest
+ '("node"
+   "nss"
+   "nss-certs"
+   "coreutils"
+   "pipewire"
+   "pulseaudio"
+   "tar"
+   "gcc-toolchain"
+   "zlib"
+   "squashfs-tools"
+   "glibc"
+   "make"
+   "sed"
+   "pkg-config"
+   "binutils"
+   "flatpak"
+   "bash"
+   "pnpm"
+   "jq"
+   "clojure"
+   "clojure-tools"
+   "git"))
+
+
