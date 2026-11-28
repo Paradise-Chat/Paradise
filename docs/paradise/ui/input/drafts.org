@@ -10,185 +10,29 @@ text or pending attachments when navigating away.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
 (ns paradise.ui.input.drafts
-  (:require [re-frame.core :as re-frame]
-            [taoensso.timbre :as log]
-            [promesa.core :as p]
-            [clojure.string :as str]
-            [paradise.shared.utils.svg :as icons]
-            [paradise.shared.utils.helpers :refer [unregister-file! file->array-buffer register-file! get-file]]
-            [cljs.core.async.interop :refer-macros [<p!]]
-            [cljs.core.async :refer [go <!]]
-            [cljs-workers.core :as main]
-            [paradise.shared.client.state :as state]))
+  (:require
+   [cljs-workers.core :as main]
+   [cljs.core.async :refer [<! go]]
+   [cljs.core.async.interop :refer-macros [<p!]]
+   [clojure.string :as str]
+   [paradise.shared.client.state :as state]
+   [paradise.shared.utils.helpers :refer [file->array-buffer
+                                          get-file
+                                          register-file!
+                                          revoke-object-url!
+                                          unregister-file!]]
+   [paradise.shared.utils.platform :as platform]
+   [paradise.shared.utils.svg :as icons]
+   [re-frame.core :as re-frame]
+   [taoensso.timbre :as log]))
 #+end_src
-
-**** Handling Attachments
-
-
-***** Reifying Attachments
-
-Inside the sdk attachments can be handle more or less universally as long as we
-provide a nice implementation to do so. So it's easier to just have a method that
-converts the attachment to a format we like to work with.
-#+begin_src clojurescript  ../../../../src/paradise/ui/input/drafts.cljs
-
-#_(defn reify-attachment [att]
-  (let [mime       (or (:mime att) (:mimetype att) "application/octet-stream")
-        safe-bytes (if (= (type (:buffer att)) js/Uint8Array)
-                     (:buffer att)
-                     (js/Uint8Array. (:buffer att)))
-        file-info  #js {:mime mime
-                        :size (js/BigInt (.-byteLength safe-bytes))
-                        :height (js/BigInt (or (:height att) 0))
-                        :width (js/BigInt (or (:width att) 0))
-                        :thumbnailInfo js/undefined
-                        :thumbnailSource js/undefined}
-        source     (.new (.-Data (.-UploadSource sdk))
-                         #js {:bytes safe-bytes
-                              :filename (:filename att)})]
-    (cond
-      (str/starts-with? mime "image/")
-      (.new (.-Image (.-DraftAttachment sdk))
-            #js {:imageInfo file-info :source source :thumbnailSource js/undefined})
-      (str/starts-with? mime "video/")
-      (.new (.-Video (.-DraftAttachment sdk))
-            #js {:videoInfo file-info :source source :thumbnailSource js/undefined})
-      (str/starts-with? mime "audio/")
-      (.new (.-Audio (.-DraftAttachment sdk))
-            #js {:audioInfo file-info :source source})
-      :else
-      (.new (.-File (.-DraftAttachment sdk))
-            #js {:fileInfo file-info :source source}))))
-#+end_src
-
-
-However, we need to expand on this much much more. Sending a file for everything circumnavigates
-some functionality we'd like (like including the Info to our images).
-
-They are mostly described here:
-#+begin_src typescript
-export type ImageInfo = {
-  height: /*u64*/ bigint | undefined;
-  width: /*u64*/ bigint | undefined;
-  mimetype: string | undefined;
-  size: /*u64*/ bigint | undefined;
-  thumbnailInfo: ThumbnailInfo | undefined;
-  thumbnailSource: MediaSourceInterface | undefined;
-  blurhash: string | undefined;
-  isAnimated: boolean | undefined;
-};
-
-
-export type VideoInfo = {
-  duration: UniffiDuration | undefined;
-  height: /*u64*/ bigint | undefined;
-  width: /*u64*/ bigint | undefined;
-  mimetype: string | undefined;
-  size: /*u64*/ bigint | undefined;
-  thumbnailInfo: ThumbnailInfo | undefined;
-  thumbnailSource: MediaSourceInterface | undefined;
-  blurhash: string | undefined;
-};
-
-export type AudioInfo = {
-  duration: UniffiDuration | undefined;
-  size: /*u64*/ bigint | undefined;
-  mimetype: string | undefined;
-};
-
-
-export type ThumbnailInfo = {
-  height: /*u64*/ bigint | undefined;
-  width: /*u64*/ bigint | undefined;
-  mimetype: string | undefined;
-  size: /*u64*/ bigint | undefined;
-};
-
-export interface MediaSourceInterface {
-    toJson(): string
-    url(): string
-}
-#+end_src
-
-For now this is just exploratory.
-#+begin_src clojurescript
-(defn create-media-source [url]
-  (.fromUrl MediaSource url))
-
-(defn create-image-info [att source]
-  (let [{:keys [width height size mime blurhash is-animated]} att]
-
-    (js/console.error source)
-    #js {:height          (if height (js/BigInt height) js/undefined)
-         :width           (if width (js/BigInt width) js/undefined)
-         :mimetype        (if mime mime js/undefined)
-         :size            (if size (js/BigInt size) js/undefined)
-         :thumbnailInfo  #js {
-                           :height (if height (js/BigInt height) js/undefined)
-                           :width   (if width (js/BigInt width) js/undefined)
-                           :mimetype  (if mime mime js/undefined)
-                           :size (if size (js/BigInt size) js/undefined)
-                           } ;; js/undefined
-         :thumbnailSource js/undefined
-         :blurhash        (if blurhash blurhash js/undefined)
-         :isAnimated      (if (some? is-animated) is-animated js/undefined)}))
-
-(defn create-video-info [att source]
-  (let [{:keys [width height size mime blurhash duration]} att]
-    #js {:duration        (if duration duration js/undefined)
-         :height          (if height (js/BigInt height) js/undefined)
-         :width           (if width (js/BigInt width) js/undefined)
-         :mimetype        (if mime mime js/undefined)
-         :size            (if size (js/BigInt size) js/undefined)
-         :thumbnailInfo   #js {
-                           :height (if height (js/BigInt height) js/undefined)
-                           :width   (if width (js/BigInt width) js/undefined)
-                           :mimetype  (if mime mime js/undefined)
-                           :size (if size (js/BigInt size) js/undefined)
-                           } ;; js/undefined
-         :thumbnailSource js/undefined
-         :blurhash        (if blurhash blurhash js/undefined)}))
-
-(defn create-audio-info [att source]
-  (let [{:keys [size mime duration]} att]
-    #js {:duration (if duration duration js/undefined)
-         :size     (if size (js/BigInt size) js/undefined)
-         :mimetype (if mime mime js/undefined)}))
-#+end_src
-
-
-***** Preparing Attachments
-
-#+begin_src clojurescript  ../../../../src/paradise/ui/input/drafts.cljs
-#_(defui prepare-attachment [sdk att]
-  (let [mime       (or (:mime att) (:mimetype att) "application/octet-stream")
-        safe-bytes (if (= (type (:buffer att)) js/Uint8Array)
-                     (:buffer att)
-                     (js/Uint8Array. (:buffer att)))
-        file-info  #js {:mimetype mime
-                        :size (js/BigInt (.-byteLength safe-bytes))
-                        :thumbnailInfo js/undefined
-                        :thumbnailSource js/undefined}
-
-        source     (.. sdk -UploadSource -Data
-                       (new #js {:bytes safe-bytes
-                                 :filename (:filename att)}))]
-    {:source source
-     :info   file-info
-     :type   (cond
-               (str/starts-with? mime "image/") "Image"
-               (str/starts-with? mime "video/") "Video"
-               (str/starts-with? mime "audio/") "Audio"
-               :else                            "File")}))
-
-
-
-
-#+end_src
-
 
 **** Attachment Preview Component
 
+When an image attachment omits a ~:preview-url~ (for instance, large photos on
+iOS where creating an eager blob preview risks exceeding WKWebView memory
+limits), the preview tile gracefully falls back to a lightweight file card
+showing the filename.
 
 ***** Component
 
