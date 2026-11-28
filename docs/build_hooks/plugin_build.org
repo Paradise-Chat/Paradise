@@ -306,15 +306,21 @@ easily done. It'll be something that needs to be revisited.
                                            cljs.core.async/alts! 'clojure.core.async/alts!
                                            %)
                                         unrolled-promises)
-                    expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
-                (scrub-jvm-artifacts expanded))
+                     expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
+                 (scrub-jvm-artifacts expanded))
 
-              (custom-macro? sym)
-              (let [qualified-macro (symbol "paradise.shared.utils.macros" (name sym))]
-                (macroexpand-1 (cons qualified-macro (rest x))))
-              :else x))
-          x))
-      form)))
+               (match-promesa-macro sym promesa-info)
+               (case (match-promesa-macro sym promesa-info)
+                 "let"  (expand-promesa-let (second x) (drop 2 x))
+                 "do"   (expand-promesa-do (rest x))
+                 "plet" (expand-promesa-plet (second x) (drop 2 x)))
+
+               (custom-macro? sym)
+               (let [qualified-macro (symbol "paradise.shared.utils.macros" (name sym))]
+                 (macroexpand-1 (cons qualified-macro (rest x))))
+               :else x))
+           x))
+       form))))
 #+end_src
 
 
