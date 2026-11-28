@@ -1,173 +1,215 @@
 (ns paradise.ui.overlays.rooms
   (:require
-   [paradise.ui.overlays.base :refer [popover-component
-                          context-menu-component]]
-   [taoensso.timbre :as log]
-   [paradise.shared.utils.svg :as icons]
+   [cljs-workers.mesh :as mesh]
+   [cljs.core.async :refer [<! go]]
+   [clojure.string :as str]
+   [paradise.shared.utils.helpers :refer [decode-edn-field ok-status? resolve-item-label safe-lower]]
+   [paradise.shared.utils.svg :as icons :refer [resolve-icon]]
+   [paradise.ui.overlays.base :as overlays-base :refer [context-menu-component engine-option-items]]
+   [paradise.ui.overlays.room-notifications :as room-notifs]
    [re-frame.core :as re-frame]
-   [paradise.ui.global :refer [avatar]]
-   [paradise.media.component :refer [media]]))
+   [reagent.core :as r]
+   [taoensso.timbre :as log]))
 
-(defn build-room-actions [tr room-id parent-id room-name is-space? is-dm? context membership]
-  (let [is-joined?  (= membership "joined")
-        is-invited? (= membership "invited")
-        is-knocked? (= membership "knocked")]
-    (remove nil?
-            [(when is-invited?
-               {:id "join"
-                :label (if is-space? (tr [:navigation.actions/join-space]) (tr [:navigation.actions/join-room]))
-                :icon [icons/door-open]
-                :class-name "success"
-                :action #(re-frame/dispatch [:rooms/join room-id])})
+(def resolve-option-icon resolve-icon)
 
-             (when is-invited?
-               {:id "reject"
-                :label (tr [:navigation.actions/reject-invite])
-                :icon [icons/leave]
-                :class-name "danger"
-                :action #(re-frame/dispatch [:rooms/leave room-id])})
+(def resolve-option-label resolve-item-label)
 
-             (when (and (not is-joined?) (not is-invited?) (not is-knocked?))
-               {:id "knock"
-                :label (tr [:navigation.actions/knock-room])
-                :icon [icons/doorbell]
-                :action #(re-frame/dispatch [:rooms/knock room-id])})
+(def execute-option-command! overlays-base/execute-option-command!)
 
-             (when (and is-joined? (= context :list))
-               {:id "mark-read"
-                :label (tr [:navigation.actions/mark-read])
-                :icon [icons/check]
-                :action #(re-frame/dispatch [:rooms/mark-read room-id])})
+(defn- options-cache-key [engine-id {:keys [room-id context membership is-forum?]}]
+  [(or engine-id :default)
+   (str room-id)
+   (keyword (or context :list))
+   (str (or membership "joined"))
+   (boolean is-forum?)])
 
-             (when is-joined?
-               {:id "notifications"
-                :label (tr [:navigation.actions/notification-settings])
-                :icon [icons/bell]
-                :action #(re-frame/dispatch [:ui/open-modal :notification-settings {:room-id room-id}])})
+(defn fallback-room-actions [{:keys [room-id is-space? membership]}]
+  (let [joined? (= (safe-lower (or membership "joined")) "joined")]
+    (vec
+     (remove nil?
+             [(when joined?
+                {:id        "notifications"
+                 :label-key :navigation.actions/notification-settings
+                 :icon      :bell
+                 :command   {:type  :dispatch
+                             :event [:rooms/open-settings room-id :notifications]}})
+              (when joined?
+                {:id        "settings"
+                 :label-key :navigation.actions/settings
+                 :icon      :settings
+                 :command   {:type  :dispatch
+                             :event [:rooms/open-settings room-id]}})
+              (when joined?
+                {:id         "leave"
+                 :label-key  (if is-space?
+                               :navigation.actions/leave-space
+                               :navigation.actions/leave-room)
+                 :icon       :leave
+                 :class-name "danger"
+                 :command    {:type  :dispatch
+                              :event [:rooms/leave room-id]}})
+              {:id        "copy-link"
+               :label-key :navigation.actions/copy-link
+               :icon      :link
+               :command   {:type  :dispatch
+                           :event [:rooms/copy-link room-id]}}]))))
 
-             (when is-joined?
-               {:id "invite"
-                :label (tr (if is-dm? [:navigation.actions/invite-to] [:navigation.actions/invite-here]))
-                :icon [icons/members-plus]
-                :action #(re-frame/dispatch [:ui/open-modal (if is-dm? :invite-room :invite-user)
-                                             {:backdrop-props {:class "lightbox-backdrop"}
-                                              :window-props   {:style {:background "transparent"
-                                                                       :box-shadow "none"}}
-                                              :target-room-id room-id}])})
+(re-frame/reg-event-db
+ :room-options/set
+ (fn [db [_ cache-key options]]
+   (assoc-in db [:room-options/by-key cache-key] (vec options))))
 
-             (when (and is-joined? (not is-dm?) (= context :header))
-               {:id "call"
-                :label (tr [:container.header/start-call])
-                :icon [icons/phone]
-                :action (fn []
-                          (re-frame/dispatch [:call/init-widget room-id])
-                          (re-frame/dispatch [:container/set-main-focus :call]))})
+(re-frame/reg-sub
+ :room-options/items
+ (fn [db [_ cache-key]]
+   (get-in db [:room-options/by-key cache-key])))
 
-             (when (and is-joined? (= context :header))
-               {:id "search"
-                :label (tr [:container.header/search])
-                :icon [icons/search]
-                :class-name "mobile-menu-item"
-                :action #(re-frame/dispatch [:container/set-side-panel :search])})
+(re-frame/reg-event-fx
+ :room-options/fetch
+ (fn [{:keys [db]} [_ req]]
+   (let [eng-id    (:active-engine db)
+         cache-key (options-cache-key eng-id req)
+         fallback! (fn [reason]
+                     (log/warn "Engine :get-room-options fallback:" reason)
+                     (re-frame/dispatch [:room-options/set cache-key (fallback-room-actions req)]))]
+     (when (:room-id req)
+       (go
+         (try
+           (let [res  (<! (mesh/do-with-thread!
+                           :engine-pool
+                           {:handler   :get-room-options
+                            :arguments req}))
+                 opts (when (ok-status? res)
+                        (decode-edn-field res :options-edn :options))]
+             (if (sequential? opts)
+               (re-frame/dispatch [:room-options/set cache-key opts])
+               (fallback! res)))
+           (catch :default e
+             (fallback! e))))))
+   {}))
 
-             (when (and is-joined? (= context :header))
-               {:id "pins"
-                :label (tr [:container.header/pinned-messages])
-                :icon [icons/pins]
-                :class-name "mobile-menu-item"
-                :action (fn []
-                          (re-frame/dispatch [:container/set-side-panel :pins])
-                          (re-frame/dispatch [:room/fetch-pinned-events room-id]))})
+(defn ^:ui room-notifications-submenu-content
+  [{:keys [room-id close-fn on-item-click]}]
+  (r/with-let [!fetched-rid (atom nil)]
+    (let [_           (when (and room-id (not= @!fetched-rid room-id))
+                        (reset! !fetched-rid room-id)
+                        (re-frame/dispatch [:room-settings/fetch-notifications room-id]))
+          tr          @(re-frame/subscribe [:i18n/tr])
+          notif-state @(re-frame/subscribe [:room-settings/notifications-state room-id])
+          {:keys [loading? saving? data supported? can-edit? cur-mode def-mode
+                  modes toggles toggle-vals]}
+          (room-notifs/derive-room-notif-view-model notif-state tr)
+          finish!     (fn [f]
+                        (if on-item-click
+                          (on-item-click f)
+                          (do
+                            (when f (f))
+                            (if close-fn
+                              (close-fn)
+                              (re-frame/dispatch [:ui/close-context-menu])))))]
+      [:<>
+       (cond
+         (and loading? (nil? data))
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:common/loading])]]
 
-             (when (and is-joined? is-dm? (= context :header))
-               {:id "members"
-                :label (tr [:container.header/member-list])
-                :icon [icons/members]
-                :action #(re-frame/dispatch [:container/set-side-panel :members])})
+         (and data (not supported?))
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:room-settings.notifications/unsupported])]]
 
-             (when (and is-joined?)
-               {:id "create-room"
-                :icon [icons/plus-circle]
-                :label (tr [:navigation.actions/create-room])
-                :action #(re-frame/dispatch
-                          [:ui/open-modal :create-room
-                           {:backdrop-props  {:class "lightbox-backdrop"}
-                            :window-props    {:class "settings-window"
-                                              :style {:display "flex"
-                                                      :flex-direction "column"
-                                                      :align-items "center"
-                                                      :justify-content "center"
-                                                      :gap "16px"}}
-                            :target-space-id (if is-space? room-id parent-id)}])})
-             
-             (when (and is-joined?
-                        ;;perm check
-                        )
-               {:id "create-space"
-                :label (tr [:navigation.actions/create-space])
-                :icon [icons/plus-circle]
-                :action #(re-frame/dispatch [:ui/open-modal :create-space
-                                             {:backdrop-props {:class "lightbox-backdrop"}
-                                              :window-props   {:class "settings-window"
-                                                               :style {:display "flex"
-                                                                       :flex-direction "column"
-                                                                       :align-items "center"
-                                                                       :justify-content "center"
-                                                                       :gap "16px"}}
+         data
+         [:<>
+          (for [m modes]
+            (let [selected? (= m cur-mode)
+                  title     (room-notifs/effective-mode-title tr m def-mode)]
+              ^{:key (name m)}
+              [:div.context-menu-item
+               {:class    (when selected? "is-selected")
+                :on-click (fn [e]
+                            (.stopPropagation e)
+                            (when (and can-edit? (not saving?))
+                              (finish!
+                               #(when-not selected?
+                                  (room-notifs/set-room-notif-mode! room-id m toggle-vals)))))}
+               [:span.item-icon
+                (when selected? [icons/check {:size "15px"}])]
+               [:span.item-label title]]))
+          (when (seq toggles)
+            [:<>
+             [:div.context-menu-divider]
+             (for [{:keys [id value disabled?] :as toggle} toggles]
+               (let [tid   (keyword id)
+                     on?   (boolean value)
+                     title (or (not-empty (resolve-item-label tr toggle)) (name tid))]
+                 ^{:key (name tid)}
+                 [:div.context-menu-item
+                  {:class    (when on? "is-selected")
+                   :on-click (fn [e]
+                               (.stopPropagation e)
+                               (when (and can-edit? (not saving?) (not disabled?))
+                                 (room-notifs/toggle-room-notif-option!
+                                  room-id cur-mode toggle-vals tid (not on?))))}
+                  [:span.item-icon
+                   (when on? [icons/check {:size "15px"}])]
+                  [:span.item-label title]]))])]
 
-                                              :target-space-id (if is-space? room-id parent-id)
-                                              }])})
+         :else
+         [:div.context-menu-item.is-muted-status
+          [:span.item-label (tr [:room-settings.notifications/unsupported])]])
 
-             (when is-joined?
-               {:id "settings"
-                :label (tr [:navigation.actions/settings])
-                :icon [icons/settings]
-                :action #(re-frame/dispatch [:ui/open-modal :room-settings {:room-id room-id}])})
-
-             (when (and is-joined? (not is-dm?))
-               {:id "duplicate"
-                :label (tr [:navigation.actions/duplicate-room])
-                :icon [icons/copy]
-                :action #(re-frame/dispatch [:ui/open-modal :duplicate-room {:room-id room-id}])})
-
-             (when (or is-joined? is-knocked?)
-               {:id "leave"
-                :label (if is-space? (tr [:navigation.actions/leave-space]) (tr [:navigation.actions/leave-room]))
-                :icon [icons/leave]
-                :class-name "danger"
-                :action #(re-frame/dispatch [:rooms/leave room-id])})
-
-             (when (and is-joined? (not is-dm?))
-               {:id "delete"
-                :label (if is-space? (tr [:navigation.actions/delete-space]) (tr [:navigation.actions/delete-room]))
-                :icon [icons/trash]
-                :class-name "danger"
-                :action #(re-frame/dispatch [:ui/open-modal :confirm-delete {:room-id room-id}])})
-
-             {:id "copy-link"
-              :label (tr [:navigation.actions/copy-link])
-              :icon [icons/link]
-              :action #(re-frame/dispatch [:rooms/copy-link room-id])
-             }
-             ])))
-
-(defn ^:ui room-context-menu-content [{:keys [room-id parent-id room-name is-space? is-dm? context membership close-fn]}]
-  (let [tr @(re-frame/subscribe [:i18n/tr])
-        items (build-room-actions tr room-id parent-id room-name is-space? is-dm? context membership)]
-    [:<>
-     (for [{:keys [id label action class-name icon]} items]
-       ^{:key id}
+       [:div.context-menu-divider]
        [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
+        {:on-click (fn [e]
                      (.stopPropagation e)
-                     (when action
-                       (action))
-                     (if close-fn
-                       (close-fn)
-                       (re-frame/dispatch [:ui/close-context-menu])))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+                     (finish! #(re-frame/dispatch
+                                [:rooms/open-settings room-id :notifications])))}
+        [:span.item-icon [icons/settings {:size "15px"}]]
+        [:span.item-label (tr [:room-settings.notifications/more-settings])]]])))
+
+(defn ^:ui engine-room-option-items
+  "Fetches and renders engine-supplied room option items for a context menu."
+  [{:keys [room-id parent-id room-name is-space? is-dm? context membership close-fn on-item-click]}]
+  (r/with-let [!last-req (atom nil)]
+    (let [tr            @(re-frame/subscribe [:i18n/tr])
+          active-engine @(re-frame/subscribe [:auth/active-engine])
+          preview       @(re-frame/subscribe [:rooms/preview room-id])
+          is-forum?     @(re-frame/subscribe [:room/is-forum? room-id])
+          notif-state   @(re-frame/subscribe [:room-settings/notifications-state room-id])
+          native-forum? (boolean (:native-forum? preview))
+          joined?       (= (safe-lower (or membership "joined")) "joined")
+          req           {:room-id       room-id
+                         :parent-id     parent-id
+                         :room-name     room-name
+                         :is-space?     (boolean is-space?)
+                         :is-dm?        (boolean is-dm?)
+                         :context       (or context :list)
+                         :membership    (or membership "joined")
+                         :is-forum?     (boolean is-forum?)
+                         :native-forum? native-forum?}
+          cache-key     (options-cache-key active-engine req)
+          _             (when (and room-id (not= @!last-req cache-key))
+                          (reset! !last-req cache-key)
+                          (re-frame/dispatch [:room-options/fetch req])
+                          (when joined?
+                            (re-frame/dispatch [:room-settings/fetch-notifications room-id])))
+          items         @(re-frame/subscribe [:room-options/items cache-key])
+          notif-sub     (room-notifs/format-notif-mode-subtitle tr (:data notif-state))]
+      [engine-option-items
+       {:tr                   tr
+        :items                items
+        :close-fn             close-fn
+        :on-item-click        on-item-click
+        :subtitle-by-id       (when notif-sub {"notifications" notif-sub})
+        :render-submenu-by-id {"notifications"
+                               (fn [_ cfn]
+                                 [room-notifications-submenu-content
+                                  {:room-id       room-id
+                                   :close-fn      cfn
+                                   :on-item-click on-item-click}])}}])))
+
+(defn ^:ui room-context-menu-content [props]
+  [engine-room-option-items props])
 
 (defmethod context-menu-component :room-actions [_]
   room-context-menu-content)
