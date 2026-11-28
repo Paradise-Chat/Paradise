@@ -1,62 +1,290 @@
 .profile-preview-card {
-      position: fixed;
-      z-index: 9998;
-      pointer-events: none;
-      width: 240px;
-      background: var(--surface-1, var(--bg-color, #1e1e24));
-      border: 1px solid var(--border-color, #333);
-      border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-      overflow: hidden;
-  }
+  position: relative;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  width: 316px;
+  max-width: calc(100vw - 24px);
+  max-height: min(580px, calc(100vh - 24px));
+  background: #232428;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
 
-  .profile-preview-cover {
-      height: 60px;
-      background: var(--surface-3, #2a2a35);
-  }
+.profile-preview-header-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
 
-  .profile-preview-content {
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
+.profile-preview-dm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 11px;
+  border: none;
+  border-radius: 7px;
+  background: #5865f2;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.14s ease;
+}
+
+.profile-preview-dm-btn:hover {
+  filter: brightness(1.1);
+}
+
+.profile-mutuals-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #1b1c1f;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+
+.profile-mutuals-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.profile-mutuals-tab {
+  flex: 1;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #949ba4;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.profile-mutuals-tab:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #dbdee1;
+}
+
+.profile-mutuals-tab.is-active {
+  background: rgba(88, 101, 242, 0.22);
+  color: #f2f3f5;
+}
+
+.profile-mutuals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.profile-mutuals-empty {
+  padding: 8px 4px;
+  text-align: center;
+  font-size: 11.5px;
+  color: #80848e;
+}
+
+.profile-mutual-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #dbdee1;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.profile-mutual-row:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.profile-mutual-user-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.profile-mutual-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #f2f3f5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-mutual-sub {
+  font-size: 10.5px;
+  color: #80848e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-mutual-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(88, 101, 242, 0.2);
+  color: #c7d2fe;
+  flex-shrink: 0;
+}
+
+.profile-preview-cover {
+  position: relative;
+  flex: 0 0 84px;
+  height: 84px;
+  overflow: hidden;
+  background: linear-gradient(125deg, #3b449b 0%, #5865f2 55%, #3730a3 100%);
+}
+
+.profile-preview-banner-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-preview-content {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  padding: 0 14px 14px;
 }
 
 .profile-preview-avatar-wrap {
-  margin-top: -36px;
-  margin-bottom: 4px;
-  background: var(--surface-1, var(--bg-color, #1e1e24));
-  border: 4px solid var(--surface-1, var(--bg-color, #1e1e24));
-  border-radius: 12px;
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
   width: fit-content;
-  background: var(--surface-1);
+  margin-top: -38px;
+  margin-bottom: 6px;
+  padding: 4px;
+  background: #232428;
+  border-radius: 50%;
+}
+
+.profile-preview-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
 }
 
 .profile-preview-id-block {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .profile-preview-name {
-  font-weight: bold;
-  font-size: 1.1rem;
+  color: #f2f3f5;
+  font-size: 16.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.profile-preview-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: #b5bac1;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.profile-preview-handle {
+  color: #dbdee1;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.profile-preview-dot {
+  color: #80848e;
+  user-select: none;
+}
+
+.profile-preview-pronouns {
+  color: #b5bac1;
+  overflow-wrap: anywhere;
 }
 
 .profile-preview-id {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
+  color: #80848e;
+  font-size: 11.5px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .profile-preview-role-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
+  align-self: flex-start;
   gap: 6px;
-  margin-top: 4px;
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
 }
 
 .profile-preview-role-text {
-  font-size: 0.8rem;
+  color: #dbdee1;
+  font-size: 12px;
   font-weight: 600;
+}
+
+.profile-preview-bio-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: #1b1c1f;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+}
+
+.profile-preview-section-label {
+  color: #949ba4;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.profile-preview-bio {
+  color: #dbdee1;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .text-danger {
