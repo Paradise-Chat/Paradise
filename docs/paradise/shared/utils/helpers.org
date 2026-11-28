@@ -184,7 +184,6 @@ throw an error.
     (if (and (media-uri? src) (or emote? (valid-url? src)))
       {:tag   "comp:paradise.media.component/media-native"
        :attrs {:uri       src
-;;               :mxc       src
                :emote-id  (get attrs :data-emote-id)
                :class     "timeline-emotes"
                :className "timeline-emotes"
