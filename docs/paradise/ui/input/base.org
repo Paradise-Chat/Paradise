@@ -1211,6 +1211,44 @@ Ideally, we should break this apart more later.
                                       (-> ed .chain .clearContent .run)
                                       true)
                                     false))))
+            emoji-board-el  (when picker-open?
+                              [emoji-sticker-board
+                               {:inline?         true
+                                :default-mode    picker-mode
+                                :from-keyboard?  picker-from-kb?
+                                :sheet-height-px (:last-height kb-state)
+                                :on-tab-change   #(re-frame/dispatch
+                                                   [:ui/open-popover :inline-emoji
+                                                    {:default-mode   %
+                                                     :from-keyboard? true}])
+                                :on-close        (fn []
+                                                   (clear-kb-handoff!)
+                                                   (re-frame/dispatch [:ui/close-popover]))
+                                :on-send-sticker
+                                (fn [sticker-payload]
+                                  (re-frame/dispatch [:sdk/send-sticker active-id sticker-payload])
+                                  (re-frame/dispatch [:ui/close-popover]))
+                                :on-insert-native
+                                (fn [unicode-char]
+                                  (when-let [ed @!editor]
+                                    (if is-mobile?
+                                      (-> ed .chain (.insertContent unicode-char) .run)
+                                      (-> ed .chain .focus (.insertContent unicode-char) .run))))
+                                :on-insert-emoji
+                                (fn [emote-or-shortcode & [maybe-url]]
+                                  (when-let [ed @!editor]
+                                    (let [{:keys [id shortcode uri]} (if (map? emote-or-shortcode)
+                                                                       emote-or-shortcode
+                                                                       {:shortcode emote-or-shortcode :uri maybe-url})
+                                          clean-sc                   (clean-shortcode shortcode)
+                                          node                       #js {:type  "customEmote"
+                                                                          :attrs #js {:id        id
+                                                                                      :shortcode clean-sc
+                                                                                      :uri       uri
+                                                                                      :src       uri}}]
+                                      (if is-mobile?
+                                        (-> ed .chain (.insertContent node) .run)
+                                        (-> ed .chain .focus (.insertContent node) .run)))))}])
             editor-node     [:> tiptap-component
                              #js {:activeId          active-id
                                   :key               (str "editor-" active-id)
