@@ -1,6 +1,7 @@
 (ns paradise.ui.container.timeline.base
   (:require [re-frame.core :as re-frame]
             [taoensso.timbre :as log]
+            [clojure.core.async :refer [timeout alts!]]
             [clojure.string :as str]
             [re-frame.db :as db]
             [cljs-workers.core :as main]
@@ -14,7 +15,7 @@
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.shared.utils.svg :as icons]
             [virtualizer.core :refer [virtualized-list]]
-            [paradise.ui.container.timeline.hydrator :refer [!local-timeline-data]]
+            [virtualizer.client.hydrator :as vhydrator]
             [paradise.ui.container.timeline.item :refer [event-tile]]
             [paradise.ui.container.timeline.components :refer [timeline-empty-state
                                                    timeline-jump-button
@@ -24,6 +25,13 @@
             [paradise.ui.container.reusable :refer [room-header]]
             [paradise.ui.input.base :refer [message-input]]))
 
+
+(def sanitize-js-dispatch
+  (re-frame/->interceptor
+   :id :sanitize-js-dispatch
+   :before vhydrator/sanitize-dispatch-context))
+
+(re-frame/reg-global-interceptor sanitize-js-dispatch)
 
 (re-frame/reg-event-db
  :app/worker-redraw-ping
@@ -35,15 +43,16 @@
  (fn [_ [_ room-id source]]
    (reagent.ratom/make-reaction
     (fn []
-      (get-in @!local-timeline-data [room-id (keyword source)] [])))))
+      (vhydrator/get-stream room-id source)))))
 
 (re-frame/reg-sub
  :timeline/events
  (fn [[_ room-id]]
-   [(re-frame/subscribe [:timeline/worker-data room-id :focused])
+   [(re-frame/subscribe [:room/is-focused? room-id])
+    (re-frame/subscribe [:timeline/worker-data room-id :focused])
     (re-frame/subscribe [:timeline/worker-data room-id :live])])
- (fn [[focused live] _]
-   (if (empty? focused) live focused)))
+ (fn [[focused? focused live] _]
+   (if focused? focused live)))
 
 (re-frame/reg-sub
  :timeline/events-map
@@ -60,45 +69,66 @@
    (some #(when (= (:id %) event-id) %) events)))
 
 
+(defn- normalize-jump-event-id [event-id]
+  (if (map? event-id)
+    (or (:event-id event-id) (:id event-id))
+    event-id))
+
 (re-frame/reg-event-fx
  :sdk/boot-timeline
  (fn [{:keys [db]} [_ room-id]]
    (if (get-in db [:timeline-subs room-id :live])
      (do (log/warn "Prevented duplicate timeline boot for:" room-id) {})
      (do
-       (main/do-with-pool! @state/!engine-pool
-                           {:handler :boot-timeline
-                            :arguments {:room-id room-id :mode :live}})
-       {:db (assoc-in db [:timeline-subs room-id :live] true)}))))
+       (mesh/do-with-thread! :engine-pool
+                             {:handler   :boot-timeline
+                              :arguments {:room-id room-id :mode :live}})
+       {:db (-> db
+                (assoc-in [:timeline-subs room-id :live] true)
+                (assoc-in [:timeline/back-dead? room-id] false))}))))
 
 
 (re-frame/reg-event-fx
  :room/boot-focused-timeline
  (fn [{:keys [db]} [_ room-id event-id]]
-   (main/do-with-pool! @state/!engine-pool
-                       {:handler :boot-timeline
-                        :arguments {:room-id room-id :mode :focused :event-id event-id}})
-   {:db (assoc-in db [:timeline-subs room-id :focused] true)}))
+   (let [eid (normalize-jump-event-id event-id)]
+     (mesh/do-with-thread! :engine-pool
+                           {:handler   :boot-timeline
+                            :arguments {:room-id room-id :mode :focused :event-id eid}})
+     {:db (-> db
+              (assoc-in [:timeline-subs room-id :focused] true)
+              (assoc-in [:timeline/back-dead? room-id] false))})))
 
 
 (re-frame/reg-event-fx
  :room/boot-pinned-timeline
  (fn [{:keys [db]} [_ room-id]]
-   (main/do-with-pool! @state/!engine-pool
-                       {:handler :boot-timeline
-                        :arguments {:room-id room-id :mode :pins}})
+   (mesh/do-with-thread! :engine-pool
+                         {:handler   :boot-timeline
+                          :arguments {:room-id room-id :mode :pins}})
    {:db (assoc-in db [:timeline-subs room-id :pins] true)}))
 
 (re-frame/reg-event-fx
  :sdk/cleanup-timeline
  (fn [{:keys [db]} [_ room-id]]
-   (main/do-with-pool! @state/!engine-pool {:handler :cleanup-timeline
-                                            :arguments {:room-id room-id}})
+   (vhydrator/clear-stream! room-id)
+   (go
+     (alts! [(mesh/do-with-thread! :engine-pool
+                                   {:handler   :cleanup-timeline
+                                    :arguments {:room-id room-id}})
+             (timeout 4000)])
+     (alts! [(mesh/do-with-thread! :virtualizer-pool
+                                   {:handler   :cleanup-timeline
+                                    :arguments {:room-id room-id}})
+             (timeout 4000)]))
    {:db (-> db
             (update :timeline-subs dissoc room-id)
             (update :timeline-data dissoc room-id)
+            (update :timeline/jump-target-id dissoc room-id)
+            (assoc-in [:timeline/back-dead? room-id] false)
             (assoc-in [:timeline/loading-more? room-id] false)
-            (assoc-in [:timeline/loading-forward? room-id] false))}))
+            (assoc-in [:timeline/loading-forward? room-id] false)
+            (assoc-in [:timeline/ui-state room-id :animating-jump?] false))}))
 
 
 (re-frame/reg-sub
@@ -114,11 +144,11 @@
        (do
          (log/info "Triggering Worker Back Paginate for" room-id)
          (go
-           (let [req-ch     (main/do-with-pool! @state/!engine-pool
-                                                {:handler   :paginate-timeline
-                                                 :arguments {:room-id room-id :direction :back :amount 25}})
-                 timeout-ch (cljs.core.async/timeout 15000)
-                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+           (let [req-ch     (mesh/do-with-thread! :engine-pool
+                                                  {:handler   :paginate-timeline
+                                                   :arguments {:room-id room-id :direction :back :amount 25}})
+                 timeout-ch (timeout 15000)
+                 [_ port]   (alts! [req-ch timeout-ch])]
              (when (= port timeout-ch)
                (log/warn "Worker Back Paginate timed out for" room-id))
              (re-frame/dispatch [:sdk/pagination-complete room-id])))
@@ -133,11 +163,11 @@
        (do
          (log/info "Triggering Worker Forward Paginate for" room-id)
          (go
-           (let [req-ch     (main/do-with-pool! @state/!engine-pool
-                                                {:handler   :paginate-timeline
-                                                 :arguments {:room-id room-id :direction :forward :amount 25}})
-                 timeout-ch (cljs.core.async/timeout 15000)
-                 [_ port]   (cljs.core.async/alts! [req-ch timeout-ch])]
+           (let [req-ch     (mesh/do-with-thread! :engine-pool
+                                                  {:handler   :paginate-timeline
+                                                   :arguments {:room-id room-id :direction :forward :amount 25}})
+                 timeout-ch (timeout 15000)
+                 [_ port]   (alts! [req-ch timeout-ch])]
              (when (= port timeout-ch)
                (log/warn "Worker Forward Paginate timed out for" room-id))
              (re-frame/dispatch [:sdk/forward-pagination-complete room-id])))
@@ -170,47 +200,83 @@
 (re-frame/reg-event-db
  :sdk/update-pagination-status
  (fn [db [_ room-id status]]
-   (assoc-in db [:timeline-pagination room-id] status)))
+   (let [status-str (if (keyword? status) (name status) (str status))]
+     (-> db
+         (assoc-in [:timeline-pagination room-id] status)
+         (assoc-in [:timeline/back-dead? room-id]
+                   (= status-str "TimelineStartReached"))))))
 
 (re-frame/reg-event-fx
  :room/pretty-jump
  (fn [{:keys [db]} [_ room-id event-id]]
-   {:db (assoc-in db [:timeline/ui-state room-id :animating-jump?] true)
-    :dispatch-later [{:ms 300
-                      :dispatch [:room/execute-deep-jump room-id event-id]}]}))
+   (let [eid (normalize-jump-event-id event-id)]
+     (if (and room-id (not= room-id (:active-room-id db)))
+       {:dispatch [:rooms/select room-id {:jump-event-id eid}]}
+       {:db (assoc-in db [:timeline/ui-state room-id :animating-jump?] true)
+        :dispatch-later [{:ms 300
+                          :dispatch [:room/execute-deep-jump room-id eid]}]}))))
 
 (re-frame/reg-event-fx
  :room/execute-deep-jump
  (fn [{:keys [db]} [_ room-id event-id]]
-   {:db (assoc-in db [:timeline/jump-target-id room-id] event-id)
-    :dispatch-n [[:sdk/cleanup-timeline room-id]
-                 [:room/boot-focused-timeline room-id event-id]]}))
+   (let [eid (normalize-jump-event-id event-id)]
+     (vhydrator/clear-stream! room-id)
+     (go
+       (alts! [(mesh/do-with-thread! :engine-pool {:handler   :cleanup-timeline
+                                                   :arguments {:room-id room-id}})
+               (timeout 4000)])
+       (alts! [(mesh/do-with-thread! :virtualizer-pool {:handler   :cleanup-timeline
+                                                        :arguments {:room-id room-id}})
+               (timeout 4000)])
+       (vhydrator/clear-stream! room-id)
+       (when (and (= (:active-room-id @db/app-db) room-id)
+                  (= (get-in @db/app-db [:timeline/jump-target-id room-id]) eid))
+         (re-frame/dispatch [:room/boot-focused-timeline room-id eid])))
+     {:db (-> db
+              (update :timeline-subs dissoc room-id)
+              (update :timeline-data dissoc room-id)
+              (assoc-in [:timeline/jump-target-id room-id] eid)
+              (assoc-in [:timeline/back-dead? room-id] false)
+              (assoc-in [:timeline/loading-more? room-id] false)
+              (assoc-in [:timeline/loading-forward? room-id] false)
+              (assoc-in [:timeline/ui-state room-id :animating-jump?] false))})))
 
 (re-frame/reg-event-fx
  :room/jump-to-live-bottom
  (fn [{:keys [db]} [_ room-id]]
+   (log/info "Return-to-live triggered for" room-id)
+   (vhydrator/clear-stream! room-id)
+   (go
+     (let [[eng-res _]  (alts! [(mesh/do-with-thread! :engine-pool {:handler   :cleanup-timeline
+                                                                    :arguments {:room-id room-id}})
+                                (timeout 4000)])
+           [virt-res _] (alts! [(mesh/do-with-thread! :virtualizer-pool {:handler   :cleanup-timeline
+                                                                         :arguments {:room-id room-id}})
+                                (timeout 4000)])]
+       (log/info "Return-to-live cleanup done for" room-id {:eng eng-res :virt virt-res}))
+     (vhydrator/clear-stream! room-id)
+     (when (and (= (:active-room-id @db/app-db) room-id)
+                (nil? (get-in @db/app-db [:timeline/jump-target-id room-id])))
+       (log/info "Return-to-live dispatching :sdk/boot-timeline for" room-id)
+       (re-frame/dispatch [:sdk/boot-timeline room-id])))
    {:db (-> db
-            (assoc-in [:timeline/ui-state room-id :animating-jump?] true)
-            (update :timeline/jump-target-id dissoc room-id))
-    :dispatch-later [{:ms 300
-                      :dispatch [:room/execute-return-to-live room-id]}]}))
+            (update :timeline-subs dissoc room-id)
+            (update :timeline-data dissoc room-id)
+            (update :timeline/jump-target-id dissoc room-id)
+            (assoc-in [:timeline/back-dead? room-id] false)
+            (assoc-in [:timeline/loading-more? room-id] false)
+            (assoc-in [:timeline/loading-forward? room-id] false)
+            (assoc-in [:timeline/ui-state room-id :animating-jump?] false))}))
+
 (re-frame/reg-event-fx
  :room/execute-return-to-live
- (fn [{:keys [db]} [_ room-id]]
-   {:dispatch-n [[:sdk/cleanup-timeline room-id]
-                 [:sdk/boot-timeline room-id]]}))
+ (fn [_ [_ room-id]]
+   {:dispatch [:room/jump-to-live-bottom room-id]}))
 
 (re-frame/reg-event-fx
  :room/jump-to-present
- (fn [{:keys [db]} [_ room-id]]
-   (main/do-with-pool! @state/!engine-pool {:handler :cleanup-timeline
-                                            :arguments {:room-id room-id}})
-   {:db (-> db
-            (update-in [:timeline-subs room-id] dissoc :focused :focused-handle)
-            (assoc-in [:timeline-data room-id :focused] [])
-            (assoc-in [:timeline/ui-state room-id :animating-jump?] true))
-    :dispatch-later [{:ms 50
-                      :dispatch [:room/jump-to-live-bottom room-id]}]}))
+ (fn [_ [_ room-id]]
+   {:dispatch [:room/jump-to-live-bottom room-id]}))
 
 (re-frame/reg-sub
  :timeline/ui-state
@@ -242,7 +308,6 @@
  (fn [db [_ room-id]]
    (some? (get-in db [:timeline/jump-target-id room-id]))))
 
-
 (defn followers-indicator [active-room]
   (let [reader-ids  @(re-frame/subscribe [:timeline/latest-readers])
         members-map @(re-frame/subscribe [:room/members-map active-room])
@@ -264,7 +329,7 @@
  :sdk/clear-stale-typing
  (fn [db [_ room-id]]
    (let [data (get-in db [:typing-users room-id])]
-     (if (and data (> (- (js/Date.now) (:last-update data)) 6000))
+     (if (and data (> (- (js/Date.now) (:last-update data)) 30000))
        (update db :typing-users dissoc room-id)
        db))))
 
@@ -275,17 +340,23 @@
      (if (empty? users)
        {:db (update db :typing-users dissoc room-id)}
        {:db (assoc-in db [:typing-users room-id]
-                      {:users users
+                      {:users       users
                        :last-update (js/Date.now)})
-        :dispatch-later [{:ms 7000
+        :dispatch-later [{:ms       31000
                           :dispatch [:sdk/clear-stale-typing room-id]}]}))))
 
 (re-frame/reg-sub
+ :typing/map
+ (fn [db _]
+   (get db :typing-users {})))
+
+(re-frame/reg-sub
  :room/typing-users
- (fn [db [_ room-id]]
-   (let [data (get-in db [:typing-users room-id])]
+ :<- [:typing/map]
+ (fn [typing-map [_ room-id]]
+   (let [data (get typing-map room-id)]
      (if (and data
-              (< (- (js/Date.now) (:last-update data)) 6000))
+              (< (- (js/Date.now) (:last-update data)) 30000))
        (:users data)
        []))))
 
@@ -331,18 +402,18 @@
        has-typists?
        [:div.status-content {:key "typing"}
         [icons/typing-dots {:width "14px" :height "14px" :style {:color "var(--cp-text-muted)"}}]
-        [:span.text (get-status-string tr :typing typing-names)]]
+        [:span.text (get-status-string tr [:container.timeline.status.typing] typing-names)]]
        has-readers?
        [:div.status-content {:key "readers"}
         [icons/double-check {:width "14px" :height "14px"}]
-        [:span.text (get-status-string tr :reading reader-names)]]
+        [:span.text (get-status-string tr [:container.timeline.status.reading] reader-names)]]
        :else
        [:span.text {:key "empty"} "\u00A0"])]))
 
 (def default-metrics {:font "15.2px Inter, sans-serif" :line-height 22.8})
 
 
-(defn pretext-timeline [room-id]
+(defn pretext-timeline [_room-id]
   (let [on-viewport-change #(mesh/do-with-thread! :virtualizer-pool
                                                   {:handler :set-viewport
                                                    :arguments {:visible-ids %}})
@@ -351,7 +422,8 @@
                                                    :arguments {:scrolling? %}})
         render-loading     (fn [] [timeline-loading-overlay])
         render-sticks      (fn [ruler-ref-fn] [timeline-measuring-sticks ruler-ref-fn])
-        render-jump        (fn [do-jump! is-focused?] [timeline-jump-button do-jump! is-focused?])]
+        render-jump        (fn [do-jump! is-focused? new-count]
+                             [timeline-jump-button do-jump! is-focused? new-count])]
     (fn [room-id]
       (let [events           @(re-frame/subscribe [:timeline/events room-id])
             events-map       @(re-frame/subscribe [:timeline/events-map room-id])
@@ -359,7 +431,8 @@
             loading-forward? @(re-frame/subscribe [:timeline/loading-forward? room-id])
             back-dead?       @(re-frame/subscribe [:timeline/back-dead? room-id])
             jump-target      @(re-frame/subscribe [:timeline/jump-target-id room-id])
-            focus-mode?      @(re-frame/subscribe [:room/is-focused? room-id])]
+            focus-mode?      @(re-frame/subscribe [:room/is-focused? room-id])
+            render-tile      (fn [layout-node] (event-tile layout-node room-id))]
         ^{:key room-id}
         [virtualized-list
          {:items                    events
@@ -385,7 +458,7 @@
           :default-theme-metrics    default-metrics
           :wrapper-class            "timeline-wrapper"
           :scroll-container-class   "timeline-messages"
-          :render-item              event-tile
+          :render-item              render-tile
           :render-empty-state       (fn [] [timeline-empty-state room-id])
           :render-jump-button       render-jump
           :render-loading-overlay   render-loading
@@ -406,6 +479,4 @@
        [:<>
         [pretext-timeline active-id]
         [message-input]
-        [status-indicator active-id]
-        ])]))
-
+        [status-indicator active-id]])]))
