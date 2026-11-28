@@ -7,14 +7,9 @@
    [paradise.shared.plugins :as plugins]
    [paradise.ui.overlays.tray :refer [tray-section]]
    [paradise.shared.client.key-handler :refer [keybind-spec]]
+   [paradise.shared.utils.helpers :refer [clean-user-id]]
    [paradise.ui.container.call.events]
    [paradise.ui.container.call.runtime :as rtc]))
-
-
-(defn- clean-user-id [raw-id]
-  (when (and raw-id (not (str/blank? (str raw-id))))
-    (or (re-find #"^@[^:]+:[^:|]+" (str raw-id))
-        (str raw-id))))
 
 (defn- active-video? [p]
   (and (rtc/resolve-media-track (:video-track p))
@@ -127,7 +122,8 @@
                         (.-current state-ref)
                         nodes (.-current nodes-ref)
                         now   (js/performance.now)]
-                    (when (and (seq nodes) (= (.-state ctx) "suspended"))
+                    (when (and (seq nodes)
+                               (contains? #{"suspended" "interrupted"} (.-state ctx)))
                       (-> (.resume ctx) (p/catch (fn [_] nil))))
                     (let [speaking-set
                           (reduce
@@ -208,38 +204,137 @@
        :on-change #(rf/dispatch [:call/set-volume volume-key (.. % -target -value)])}]
      [:span.call-volume-value (str effective "%")]]))
 
-(defn toggle-video-pip [video-el]
-  (when (and video-el (.-pictureInPictureEnabled js/document))
-    (if (= (.-pictureInPictureElement js/document) video-el)
-      (-> (.exitPictureInPicture js/document) (p/catch (fn [_] nil)))
-      (-> (.requestPictureInPicture video-el) (p/catch (fn [_] nil))))))
+(defn toggle-video-pip [^js video-el]
+  (when video-el
+    (cond
+      (and (exists? js/document) (.-pictureInPictureEnabled js/document))
+      (if (= (.-pictureInPictureElement js/document) video-el)
+        (-> (.exitPictureInPicture js/document) (p/catch (fn [_] nil)))
+        (-> (.requestPictureInPicture video-el) (p/catch (fn [_] nil))))
+
+      (and (fn? (.-webkitSupportsPresentationMode video-el))
+           (fn? (.-webkitSetPresentationMode video-el))
+           (try (.webkitSupportsPresentationMode video-el "picture-in-picture")
+                (catch :default _ false)))
+      (let [cur-mode (.-webkitPresentationMode video-el)]
+        (try
+          (.webkitSetPresentationMode
+           video-el
+           (if (= cur-mode "picture-in-picture") "inline" "picture-in-picture"))
+          (catch :default _ nil)))
+
+      (fn? (.-webkitEnterFullscreen video-el))
+      (try (.webkitEnterFullscreen video-el) (catch :default _ nil)))))
+
+(defonce ^:private !ios-webaudio-ctx (atom nil))
+
+(defn- ios-webkit-audio? []
+  (when (exists? js/navigator)
+    (let [ua  (str (.-userAgent js/navigator))
+          plt (str (.-platform js/navigator))
+          mtp (or (.-maxTouchPoints js/navigator) 0)]
+      (or (boolean (re-find #"(?i)iPhone|iPad|iPod" ua))
+          (and (= plt "MacIntel") (> mtp 1))))))
+
+(defn- ensure-ios-webaudio-ctx! []
+  (let [Ctor (when (exists? js/window)
+               (or (.-AudioContext js/window)
+                   (.-webkitAudioContext js/window)))]
+    (when Ctor
+      (let [^js cur @!ios-webaudio-ctx
+            ^js ctx (if (or (nil? cur) (= (.-state cur) "closed"))
+                      (let [^js created (Ctor.)]
+                        (reset! !ios-webaudio-ctx created)
+                        created)
+                      cur)]
+        (when (contains? #{"suspended" "interrupted"} (.-state ctx))
+          (-> (.resume ctx) (p/catch (fn [_] nil))))
+        ctx))))
 
 (defn remote-audio-track [{:keys [track volume muted? output-device-id]}]
   (let [audio-ref  (react/useRef nil)
+        gain-ref   (react/useRef nil)
         live-track (rtc/resolve-media-track track)
-        norm-vol   (-> (/ (or volume 100) 100.0) (max 0.0) (min 1.0))
+        raw-gain   (-> (/ (or volume 100) 100.0) (max 0.0) (min 2.0))
+        norm-vol   (min 1.0 raw-gain)
         eff-muted  (boolean (or muted? (<= (or volume 100) 0)))]
     (react/useEffect
      (fn []
-       (when-let [el (.-current audio-ref)]
-         (if live-track
-           (let [stream (js/MediaStream. #js [live-track])]
-             (set! (.-srcObject el) stream)
-             (set! (.-volume el) norm-vol)
-             (set! (.-muted el) eff-muted)
-             (-> (.play el) (p/catch (fn [_] nil))))
-           (set! (.-srcObject el) nil)))
-       (fn []
-         (when-let [el (.-current audio-ref)]
-           (set! (.-srcObject el) nil))))
+       (let [ensure-playing! (fn []
+                               (when-let [^js ctx @!ios-webaudio-ctx]
+                                 (when (contains? #{"suspended" "interrupted"} (.-state ctx))
+                                   (-> (.resume ctx) (p/catch (fn [_] nil)))))
+                               (when-let [^js el (.-current audio-ref)]
+                                 (when (and live-track
+                                            (= (.-readyState live-track) "live")
+                                            (.-paused el))
+                                   (-> (.play el) (p/catch (fn [_] nil))))))
+             on-el-pause     (fn []
+                               (js/setTimeout ensure-playing! 120))
+             !bridge         (atom nil)]
+         (when-let [^js el (.-current audio-ref)]
+           (.addEventListener el "pause" on-el-pause)
+           (if live-track
+             (let [stream (js/MediaStream. #js [live-track])]
+               (set! (.-srcObject el) stream)
+               (if (and (ios-webkit-audio?)
+                        (not (true? (aget el "__paradiseWebAudioRouted"))))
+                 (if-let [^js ctx (ensure-ios-webaudio-ctx!)]
+                   (try
+                     (let [^js src  (.createMediaStreamSource ctx stream)
+                           ^js gain (.createGain ctx)]
+                       (set! (.. gain -gain -value) (if eff-muted 0.0 raw-gain))
+                       (.connect src gain)
+                       (.connect gain (.-destination ctx))
+                       (set! (.-current gain-ref) gain)
+                       (reset! !bridge {:src src :gain gain})
+                       (set! (.-muted el) true))
+                     (catch :default _
+                       (set! (.-volume el) norm-vol)
+                       (set! (.-muted el) eff-muted)))
+                   (do
+                     (set! (.-volume el) norm-vol)
+                     (set! (.-muted el) eff-muted)))
+                 (do
+                   (set! (.-volume el) norm-vol)
+                   (set! (.-muted el) eff-muted)))
+               (-> (.play el) (p/catch (fn [_] nil))))
+             (set! (.-srcObject el) nil)))
+         (when live-track
+           (try (.addEventListener live-track "unmute" ensure-playing!)
+                (catch :default _ nil)))
+         (when (exists? js/window)
+           (.addEventListener js/window "paradise:call-visibility" ensure-playing!))
+         (when (exists? js/document)
+           (.addEventListener js/document "visibilitychange" ensure-playing!))
+         (fn []
+           (when-let [{:keys [^js src ^js gain]} @!bridge]
+             (set! (.-current gain-ref) nil)
+             (try (.disconnect src) (catch :default _ nil))
+             (try (.disconnect gain) (catch :default _ nil)))
+           (when live-track
+             (try (.removeEventListener live-track "unmute" ensure-playing!)
+                  (catch :default _ nil)))
+           (when (exists? js/window)
+             (.removeEventListener js/window "paradise:call-visibility" ensure-playing!))
+           (when (exists? js/document)
+             (.removeEventListener js/document "visibilitychange" ensure-playing!))
+           (when-let [^js el (.-current audio-ref)]
+             (.removeEventListener el "pause" on-el-pause)
+             (set! (.-srcObject el) nil)))))
      #js [live-track])
     (react/useEffect
      (fn []
-       (when-let [el (.-current audio-ref)]
-         (set! (.-volume el) norm-vol)
-         (set! (.-muted el) eff-muted))
+       (if-let [^js gain (.-current gain-ref)]
+         (do
+           (set! (.. gain -gain -value) (if eff-muted 0.0 raw-gain))
+           (when-let [^js el (.-current audio-ref)]
+             (set! (.-muted el) true)))
+         (when-let [^js el (.-current audio-ref)]
+           (set! (.-volume el) norm-vol)
+           (set! (.-muted el) eff-muted)))
        js/undefined)
-     #js [norm-vol eff-muted])
+     #js [raw-gain norm-vol eff-muted])
     (react/useEffect
      (fn []
        (when-let [el (.-current audio-ref)]
@@ -248,10 +343,11 @@
                (p/catch (fn [_] nil)))))
        js/undefined)
      #js [output-device-id])
-    [:audio {:ref      audio-ref
-             :autoPlay true
-             :muted    eff-muted
-             :style    {:display "none"}}]))
+    [:audio {:ref                        audio-ref
+             :data-paradise-remote-audio "true"
+             :autoPlay                   true
+             :playsInline                true
+             :style                      {:display "none"}}]))
 
 (defn mini-video-preview [{:keys [track mirror? video-ref]}]
   (let [live-track (rtc/resolve-media-track track)]
@@ -454,6 +550,7 @@
         stage-mounted?                   @(rf/subscribe [:call/stage-mounted?])
         audio-enabled?                   @(rf/subscribe [:call/audio-enabled?])
         output-device-id                 @(rf/subscribe [:settings/call-device :audiooutput])
+        master-output-vol                @(rf/subscribe [:settings/output-volume])
         volumes                          @(rf/subscribe [:call/volumes])
         local-mutes                      @(rf/subscribe [:call/local-mutes])]
     (react/useEffect
@@ -480,10 +577,13 @@
              :when (and (not local?) live-track)
              :let [vol-key (participant-volume-key p)
                    vol     (get volumes vol-key 100)
-                   muted?  (or deafened? (contains? local-mutes vol-key))]]
+                   eff-vol (* vol (/ (or master-output-vol 100) 100.0))
+                   muted?  (or deafened?
+                               (<= (or master-output-vol 100) 0)
+                               (contains? local-mutes vol-key))]]
          ^{:key (str id "-audio")}
          [:f> remote-audio-track {:track            live-track
-                                  :volume           vol
+                                  :volume           eff-vol
                                   :muted?           muted?
                                   :output-device-id output-device-id}]))]
      [plugins/plugin-slot
@@ -507,32 +607,31 @@
        [:f> persistent-audio-renderer {:deafened? deafened?}])
      children]))
 
-(defmethod tray-section :call [_ db]
-  (let [call-state      (:call db)
-        connected?      (= (:status call-state) :connected)
-        audio-enabled?  (:audio-enabled? call-state true)
-        deafened?       (:deafened? call-state false)
-        screen-sharing? (:screen-sharing? call-state false)]
-    (when connected?
-      {:order   10
-       :tooltip "Paradise - In Call"
-       :items   [{:label   "Active Voice Call"
-                  :enabled false}
-                 {:id      "call/toggle-audio"
-                  :label   (if audio-enabled?
-                             "Mute Microphone"
-                             "Unmute Microphone")}
-                 {:id      "call/toggle-deafen"
-                  :label   (if deafened?
-                             "Undeafen Audio"
-                             "Deafen Audio")}
-                 {:id      "call/toggle-share"
-                  :label   (if screen-sharing?
-                             "Stop Screen Share"
-                             "Share Screen")}
-                 {:type    "separator"}
-                 {:id      "call/hangup"
-                  :label   "Disconnect Call"}]})))
+(defmethod tray-section :call
+  [_ {:keys [connected? audio-enabled? deafened? screen-sharing?]
+      :or   {audio-enabled?  true
+             deafened?       false
+             screen-sharing? false}}]
+  (when connected?
+    {:order   10
+     :tooltip "Paradise - In Call"
+     :items   [{:label   "Active Voice Call"
+                :enabled false}
+               {:id      "call/toggle-audio"
+                :label   (if audio-enabled?
+                           "Mute Microphone"
+                           "Unmute Microphone")}
+               {:id      "call/toggle-deafen"
+                :label   (if deafened?
+                           "Undeafen Audio"
+                           "Deafen Audio")}
+               {:id      "call/toggle-share"
+                :label   (if screen-sharing?
+                           "Stop Screen Share"
+                           "Share Screen")}
+               {:type    "separator"}
+               {:id      "call/hangup"
+                :label   "Disconnect Call"}]}))
 
 (defmethod keybind-spec :call/toggle-audio [_]
   {:id              "call/toggle-audio"
