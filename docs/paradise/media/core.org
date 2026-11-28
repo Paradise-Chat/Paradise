@@ -67,12 +67,14 @@ by creating a smaller compiled bundle or so.
      (try
        (let [protocol-str (if (map? payload) (:engine-id payload) payload)]
          (if protocol-str
-           (let [protocol-name (name protocol-str)]
-             (<! (load-protocol-media! protocol-name))
-             {:status "success" :msg (str "Registered media handlers for " protocol-name)})
+           (let [protocol-name (name protocol-str)
+                 res           (<! (load-protocol-media! protocol-name))]
+             (if (= "error" (:status res))
+               res
+               {:status "success" :msg (str "Registered media handlers for " protocol-name)}))
            {:status "error" :msg "No engine provided."}))
        (catch :default e
-         {:status "error" :msg (.-message e)})))))
+         {:status "error" :msg (or (.-message e) (str e))})))))
 #+end_src
 
 
