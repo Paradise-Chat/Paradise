@@ -31,6 +31,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
    [paradise.ui.overlays.permissions-roles :refer [members-moderation-tab
                                                    permissions-access-tab
                                                    roles-editor-tab]]
+   [paradise.ui.overlays.room-notifications :as room-notifs]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
@@ -136,6 +137,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
 
 (defn- room-settings-fetch-fx [room-id parent-sp]
   [[:dispatch [:room-settings/fetch-config room-id]]
+   [:dispatch [:room-settings/fetch-notifications room-id]]
    [:dispatch [:room-perms/fetch room-id parent-sp]]
    [:dispatch [:room/fetch-members room-id]]
    [:dispatch [:room/fetch-power-level-tags room-id]]])
@@ -352,6 +354,85 @@ Overview (name, topic/description, avatar) and Members & Roles views.
              (tr [:settings.context-menu/copy-id]))]]]]])
     (finally
       (clear-av!))))
+
+(defn ^:ui room-notifications-tab [{:keys [room-id config notif-state]}]
+  (let [tr @(re-frame/subscribe [:i18n/tr])
+        {:keys [loading? saving? data error saved? is-space? supported?
+                can-edit? cur-mode def-mode modes toggles toggle-vals note-text]}
+        (room-notifs/derive-room-notif-view-model notif-state tr config)]
+    [:div.settings-tab-content
+     [:p.settings-subview-lead
+      (tr [(if is-space?
+             :room-settings.notifications/lead-space
+             :room-settings.notifications/lead-room)])]
+
+     (cond
+       (and loading? (nil? data))
+       [:div.settings-empty (tr [:common/loading])]
+
+       (and data (not supported?))
+       [:div.settings-empty (tr [:room-settings.notifications/unsupported])]
+
+       data
+       [:<>
+        (when (seq modes)
+          [:div.settings-hub-group
+           [:div.settings-hub-group-label
+            (tr [:room-settings.notifications/level-heading])]
+           [:div.settings-hub-group-card
+            (for [m modes]
+              (let [selected? (= m cur-mode)
+                    title     (room-notifs/effective-mode-title tr m def-mode)]
+                ^{:key (name m)}
+                [:button.settings-radio-row
+                 {:type     "button"
+                  :class    (when selected? "is-selected")
+                  :disabled (or saving? (not can-edit?))
+                  :on-click (fn []
+                              (when (and can-edit? (not saving?) (not selected?))
+                                (room-notifs/set-room-notif-mode! room-id m toggle-vals)))}
+                 [:div.settings-row-text
+                  [:div.settings-row-title title]
+                  [:div.settings-row-description (room-notifs/notif-mode-desc tr m)]]
+                 [:span.settings-radio-dot]]))]])
+
+        (when (seq toggles)
+          [:div.settings-hub-group
+           [:div.settings-hub-group-label
+            (tr [:room-settings.notifications/options-heading])]
+           [:div.settings-hub-group-card
+            (for [{:keys [id value disabled?] :as toggle} toggles]
+              (let [tid   (keyword id)
+                    title (or (not-empty (resolve-item-label tr toggle)) (name tid))
+                    desc  (resolve-item-desc tr toggle)]
+                ^{:key (name tid)}
+                [:div.settings-card-row.is-toggle
+                 [:div.settings-row-text
+                  [:div.settings-row-title title]
+                  (when (not (str/blank? (str desc)))
+                    [:div.settings-row-description desc])]
+                 [:label.settings-toggle
+                  [:input
+                   {:type      "checkbox"
+                    :checked   (boolean value)
+                    :disabled  (or saving? (not can-edit?) (boolean disabled?))
+                    :on-change (fn [e]
+                                 (room-notifs/toggle-room-notif-option!
+                                  room-id cur-mode toggle-vals tid (.. e -target -checked)))}]
+                  [:span.settings-toggle-track
+                   [:span.settings-toggle-knob]]]]))]])
+
+        (when note-text
+          [:div.settings-banner
+           [:div.settings-banner-copy
+            [:div.settings-banner-description note-text]]])]
+
+       :else
+       [:div.settings-empty (tr [:room-settings.notifications/unsupported])])
+
+     [feedback-banners {:error   error
+                        :success (when saved? (tr [:room-settings/saved]))
+                        :style   {:margin "0"}}]]))
 #+end_src
 
 **** Modal Shell
@@ -364,7 +445,13 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                             :room-settings/overview-space-desc
                             :room-settings/overview-room-desc)
             :accent       "indigo"
-            :icon         :edit}]
+            :icon         :edit}
+           {:id           :notifications
+            :title-key    :room-settings.tabs/notifications
+            :subtitle-key :room-settings/notifications-desc
+            :badge-source :notifications-mode
+            :accent       "pink"
+            :icon         :bell}]
     (not is-dm?)
     (conj {:id           :roles
            :title-key    :room-settings.tabs/roles
@@ -397,14 +484,15 @@ Overview (name, topic/description, avatar) and Members & Roles views.
   (if-let [item (some #(when (= (:id %) tab-id) %) nav-items)]
     (:title item)
     (case tab-id
-      :overview    (tr [:room-settings.tabs/overview])
-      :roles       (tr [:room-settings.tabs/roles])
-      :permissions (tr [:room-settings.tabs/permissions])
-      :emotes      (tr [:room-settings.tabs/emotes])
-      :members     (tr [:room-settings.tabs/members])
+      :overview      (tr [:room-settings.tabs/overview])
+      :notifications (tr [:room-settings.tabs/notifications])
+      :roles         (tr [:room-settings.tabs/roles])
+      :permissions   (tr [:room-settings.tabs/permissions])
+      :emotes        (tr [:room-settings.tabs/emotes])
+      :members       (tr [:room-settings.tabs/members])
       (tr [:navigation.room-list/room-settings]))))
 
-(defn ^:ui room-settings-modal [{:keys [room-id]}]
+(defn ^:ui room-settings-modal [{:keys [room-id initial-tab]}]
   (r/with-let [!fetched-id (atom nil)
                on-esc      (fn [^js e]
                              (when (and (= (.-key e) "Escape")
@@ -416,6 +504,7 @@ Overview (name, topic/description, avatar) and Members & Roles views.
     (let [tr          @(re-frame/subscribe [:i18n/tr])
           active-tab  @(re-frame/subscribe [:room-settings/active-tab])
           rs-state    @(re-frame/subscribe [:room-settings/state room-id])
+          notif-state @(re-frame/subscribe [:room-settings/notifications-state room-id])
           perms-data  @(re-frame/subscribe [:room-perms/data room-id])
           rooms-map   @(re-frame/subscribe [:rooms/indexed-map])
           spaces-list @(re-frame/subscribe [:spaces/all])
@@ -423,12 +512,15 @@ Overview (name, topic/description, avatar) and Members & Roles views.
           parent-sp   (some-> (get rooms-map room-id) :first-parent-id)
           _           (when (and room-id (not= @!fetched-id room-id))
                         (reset! !fetched-id room-id)
+                        (when initial-tab
+                          (re-frame/dispatch [:room-settings/set-tab initial-tab]))
                         (re-frame/dispatch [:room-settings/load-all room-id parent-sp]))
           config      (resolve-fallback-config room-id (:config rs-state) rooms-map spaces-list)
           is-space?   (boolean (:is-space? config))
           is-dm?      (boolean (:is-dm? config))
           roles-cnt   (count (:roles perms-data []))
           members-cnt (count members)
+          notif-badge (room-notifs/notif-mode-badge tr (get-in notif-state [:data :mode]))
           root-title  (tr [(or (:title-key config)
                                (if is-space?
                                  :room-settings/space-title
@@ -447,8 +539,9 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                           :subtitle (resolve-item-desc tr tab)
                           :badge    (or badge
                                         (case (some-> badge-source keyword)
-                                          :roles-count   (when (pos? roles-cnt) (str roles-cnt))
-                                          :members-count (when (pos? members-cnt) (str members-cnt))
+                                          :notifications-mode notif-badge
+                                          :roles-count        (when (pos? roles-cnt) (str roles-cnt))
+                                          :members-count      (when (pos? members-cnt) (str members-cnt))
                                           nil))
                           :accent   (or accent "indigo")
                           :icon     (icons/resolve-icon icon {:default [icons/settings]})})
@@ -520,6 +613,11 @@ Overview (name, topic/description, avatar) and Members & Roles views.
                                  :error   (:error rs-state)
                                  :saved?  (:saved? rs-state)}]
 
+             :notifications
+             [room-notifications-tab {:room-id     room-id
+                                      :config      config
+                                      :notif-state notif-state}]
+
              :roles
              [roles-editor-tab {:room-id room-id}]
 
@@ -543,4 +641,103 @@ Overview (name, topic/description, avatar) and Members & Roles views.
 
 (defmethod modal-component :room-settings [_]
   room-settings-modal)
+
+(defmethod modal-component :notification-settings [_]
+  (fn [props]
+    [room-settings-modal (assoc props :initial-tab :notifications)]))
+#+end_src
+
+**** CSS
+
+#+begin_src css :tangle ../../../../css/room-settings.css
+.room-settings-roles-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px;
+}
+
+.room-settings-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: 0.8rem;
+  color: #fff;
+}
+
+.room-settings-role-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #818cf8;
+}
+
+.room-settings-member-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.room-settings-member-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.room-settings-member-row:last-child {
+  border-bottom: none;
+}
+
+.room-settings-member-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.room-settings-member-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-settings-member-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-settings-member-id {
+  font-size: 0.75rem;
+  color: var(--text-muted, #949ba4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-settings-avatar-editor {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.room-settings-form-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
 #+end_src
