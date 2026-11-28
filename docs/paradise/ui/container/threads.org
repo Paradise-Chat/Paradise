@@ -50,7 +50,21 @@ and Nostr in both layout modes:
 **** Helpers
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/threads.cljs
-(def ^:private forum-overrides-key "forum_room_overrides_v1")
+(def ^:private forum-overrides-key "ui_forum_view_rooms_v1")
+
+(defn- forum-scope-key [db]
+  (let [eng (name (or (:active-engine db) :default))
+        uid (some-> (:active-user-id db) str not-empty)]
+    (when uid (str eng ":" uid))))
+
+(defn- persist-forum-overrides! [overrides-map]
+  (store/set-setting!
+   forum-overrides-key
+   (into {}
+         (keep (fn [[k v]]
+                 (let [ids (vec (sort (keep #(some-> % str not-empty) v)))]
+                   (when (seq ids) [(str k) ids]))))
+         overrides-map)))
 
 (defn thread-draft-key [room-id thread-id]
   (str room-id "::thread::" thread-id))
@@ -67,11 +81,11 @@ and Nostr in both layout modes:
         (not-empty (truncate-name (str/replace (str/trim body) #"\s+" " ") 48)))))
 
 (defn- filter-and-sort-forum-items [items query sort-mode]
-  (let [q        (str/lower-case (str/trim (str query "")))
+  (let [q        (safe-lower-trim query)
         filtered (if (str/blank? q)
                    items
                    (filter (fn [entry]
-                             (let [haystack (str/lower-case
+                             (let [haystack (safe-lower
                                              (str (:title entry "") " "
                                                   (:root-body entry "") " "
                                                   (:root-sender entry "") " "
@@ -91,37 +105,85 @@ and Nostr in both layout modes:
 **** Reframe Events & Subscriptions
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/threads.cljs
+(defn- read-attachments-sequential! [attachments]
+  (go
+    (loop [remaining attachments
+           acc       []]
+      (if-let [att (first remaining)]
+        (let [f  (get-file (:file-id att))
+              ab (if f
+                   (<p! (file->array-buffer f))
+                   (js/ArrayBuffer. 0))]
+          (revoke-object-url! (:preview-url att))
+          (when (:file-id att) (unregister-file! (:file-id att)))
+          (recur (rest remaining) (conj acc (assoc att :buffer ab))))
+        acc))))
+
+(re-frame/reg-event-db
+ :rooms/hydrate-forum-overrides
+ (fn [db [_ saved]]
+   (let [scope   (forum-scope-key db)
+         ovr-map (cond
+                   (map? saved)
+                   (into {}
+                         (map (fn [[k v]]
+                                [(if (keyword? k) (subs (str k) 1) (str k))
+                                 (set (keep #(some-> % str not-empty) v))]))
+                         saved)
+
+                   (and (sequential? saved) scope)
+                   {scope (set (keep #(some-> % str not-empty) saved))}
+
+                   :else {})
+         active  (if scope (get ovr-map scope #{}) #{})]
+     (assoc db
+            :forum-room-overrides-map ovr-map
+            :forum-room-overrides     active))))
+
 (re-frame/reg-event-db
  :rooms/set-forum-overrides
  (fn [db [_ ids]]
-   (assoc db :forum-room-overrides (set (keep #(some-> % str not-empty) ids)))))
+   (let [scope  (forum-scope-key db)
+         id-set (set (keep #(some-> % str not-empty) ids))]
+     (cond-> (assoc db :forum-room-overrides id-set)
+       scope (assoc-in [:forum-room-overrides-map scope] id-set)))))
 
 (re-frame/reg-event-fx
  :rooms/mark-forum-room
  (fn [{:keys [db]} [_ room-id enabled?]]
-   (let [rid     (str room-id)
-         cur-set (set (get db :forum-room-overrides #{}))
-         nxt-set (if enabled? (conj cur-set rid) (disj cur-set rid))]
-     (store/set-setting! forum-overrides-key (vec nxt-set))
+   (let [rid      (str room-id)
+         scope    (forum-scope-key db)
+         cur-set  (set (get db :forum-room-overrides #{}))
+         nxt-set  (if enabled? (conj cur-set rid) (disj cur-set rid))
+         next-map (cond-> (or (:forum-room-overrides-map db) {})
+                    scope (assoc scope nxt-set))]
+     (when scope
+       (persist-forum-overrides! next-map))
      {:db (-> db
-              (assoc :forum-room-overrides nxt-set)
+              (assoc :forum-room-overrides     nxt-set
+                     :forum-room-overrides-map next-map)
               (assoc-in [:room-previews rid :is-forum?] (boolean enabled?)))})))
 
 (re-frame/reg-event-fx
  :rooms/toggle-forum-mode
  (fn [{:keys [db]} [_ room-id]]
    (let [rid          (str room-id)
+         scope        (forum-scope-key db)
          native-forum (boolean (get-in db [:room-previews rid :native-forum?]))
          cur-ovr      (set (get db :forum-room-overrides #{}))
          currently-f? (or (= (:main-focus db) :thread)
-                          (contains? cur-ovr rid)
-                          (boolean (get-in db [:room-previews rid :is-forum?])))
+                          (state/room-forum-mode? db rid))
          next-forum?  (if native-forum true (not currently-f?))
          next-ovr     (if next-forum? (conj cur-ovr rid) (disj cur-ovr rid))
+         next-map     (cond-> (or (:forum-room-overrides-map db) {})
+                        scope (assoc scope next-ovr))
          active?      (= (:active-room-id db) rid)
          next-focus   (if next-forum? :thread :timeline)]
-     (store/set-setting! forum-overrides-key (vec next-ovr))
-     {:db         (cond-> (assoc db :forum-room-overrides next-ovr)
+     (when scope
+       (persist-forum-overrides! next-map))
+     {:db         (cond-> (assoc db
+                                 :forum-room-overrides     next-ovr
+                                 :forum-room-overrides-map next-map)
                     (not native-forum)
                     (assoc-in [:room-previews rid :is-forum?] next-forum?)
                     (and active? next-forum? (= (:side-panel db) :threads))
@@ -134,13 +196,6 @@ and Nostr in both layout modes:
                     (conj [:threads/fetch-list rid false])
                     (and active? (not next-forum?))
                     (conj [:sdk/boot-timeline rid]))})))
-
-(defonce ^:private _init-forum-overrides
-  (-> (store/get-setting forum-overrides-key)
-      (p/then (fn [saved]
-                (when (sequential? saved)
-                  (re-frame/dispatch [:rooms/set-forum-overrides saved]))))
-      (p/catch (fn [_] nil))))
 
 (re-frame/reg-event-fx
  :threads/toggle-panel
@@ -166,8 +221,7 @@ and Nostr in both layout modes:
  (fn [{:keys [db]} [_ room-id paginate?]]
    (when room-id
      (let [forum? (or (= (:main-focus db) :thread)
-                      (boolean (get-in db [:room-previews room-id :is-forum?]))
-                      (contains? (get db :forum-room-overrides #{}) room-id))]
+                      (state/room-forum-mode? db room-id))]
        (when-let [pool @state/!engine-pool]
          (main/do-with-pool!
           pool
@@ -335,8 +389,9 @@ and Nostr in both layout modes:
          {:keys [text html ast]} payload
          attachments (get-in db [:drafts draft-key :attachments] [])
          raw-ctx     (get-in db [:input-context draft-key])
-         worker-ctx  (when raw-ctx
-                       {:mode        (:mode raw-ctx)
+         reply-ctx?  (= (:mode raw-ctx) :reply)
+         worker-ctx  (when reply-ctx?
+                       {:mode        :reply
                         :target      (get-in raw-ctx [:target :id])
                         :msg-tag     (get-in raw-ctx [:target :content :inner :tag])
                         :ffi-content (get-in raw-ctx [:target :content :inner :content :ffi-content])})
@@ -348,33 +403,22 @@ and Nostr in both layout modes:
        (let [pool @state/!engine-pool]
          (go
            (try
-             (let [worker-atts
-                   (if (seq attachments)
-                     (<p! (p/all
-                           (map (fn [att]
-                                  (p/let [f  (get-file (:file-id att))
-                                          ab (if f
-                                               (file->array-buffer f)
-                                               (p/resolved (js/ArrayBuffer. 0)))]
-                                    (assoc att :buffer ab)))
-                                attachments)))
-                     [])
-                   _   (doseq [att attachments]
-                         (when (:preview-url att) (js/URL.revokeObjectURL (:preview-url att)))
-                         (when (:file-id att) (unregister-file! (:file-id att))))
-                   res (<! (main/do-with-pool!
-                            pool
-                            {:handler   :send-thread-message
-                             :arguments {:room-id       room-id
-                                         :thread-id     thread-id
-                                         :root-event-id root-id
-                                         :is-new?       (boolean (:is-new? cur-th))
-                                         :title         final-title
-                                         :text          text
-                                         :html          html
-                                         :ast           ast
-                                         :attachments   worker-atts
-                                         :context       worker-ctx}}))]
+             (let [worker-atts (if (seq attachments)
+                                 (<! (read-attachments-sequential! attachments))
+                                 [])
+                   res         (<! (main/do-with-pool!
+                                    pool
+                                    {:handler   :send-thread-message
+                                     :arguments {:room-id       room-id
+                                                 :thread-id     thread-id
+                                                 :root-event-id root-id
+                                                 :is-new?       (boolean (:is-new? cur-th))
+                                                 :title         final-title
+                                                 :text          text
+                                                 :html          html
+                                                 :ast           ast
+                                                 :attachments   worker-atts
+                                                 :context       worker-ctx}}))]
                (when (and (ok-status? (:status res))
                           (:thread-id res)
                           (not= (:thread-id res) thread-id))
@@ -393,15 +437,15 @@ and Nostr in both layout modes:
      (when-let [old-timer (get-in db [:composer draft-key :save-timer])]
        (js/clearTimeout old-timer))
      (let [next-seq (inc (get-in db [:composer draft-key :edit-seq] 0))]
-       {:db (-> db
-                (assoc-in [:composer draft-key] {:text            ""
-                                                 :html            ""
-                                                 :loaded-text     nil
-                                                 :uploading?      false
-                                                 :draft-hydrated? true
-                                                 :edit-seq        next-seq})
-                (assoc-in [:drafts draft-key :attachments] [])
-                (update :input-context dissoc draft-key))}))))
+       {:db (cond-> (-> db
+                        (assoc-in [:composer draft-key] {:text            ""
+                                                         :html            ""
+                                                         :loaded-text     nil
+                                                         :uploading?      false
+                                                         :draft-hydrated? true
+                                                         :edit-seq        next-seq})
+                        (assoc-in [:drafts draft-key :attachments] []))
+              reply-ctx? (update :input-context dissoc draft-key))}))))
 
 (re-frame/reg-event-fx
  :threads/create-forum-post
@@ -417,29 +461,18 @@ and Nostr in both layout modes:
        (let [pool @state/!engine-pool]
          (go
            (try
-             (let [worker-atts
-                   (if (seq attachments)
-                     (<p! (p/all
-                           (map (fn [att]
-                                  (p/let [f  (get-file (:file-id att))
-                                          ab (if f
-                                               (file->array-buffer f)
-                                               (p/resolved (js/ArrayBuffer. 0)))]
-                                    (assoc att :buffer ab)))
-                                attachments)))
-                     [])
-                   _   (doseq [att attachments]
-                         (when (:preview-url att) (js/URL.revokeObjectURL (:preview-url att)))
-                         (when (:file-id att) (unregister-file! (:file-id att))))
-                   res (<! (main/do-with-pool!
-                            pool
-                            {:handler   :create-forum-thread
-                             :arguments {:room-id     room-id
-                                         :title       final-title
-                                         :text        text
-                                         :html        html
-                                         :ast         ast
-                                         :attachments worker-atts}}))]
+             (let [worker-atts (if (seq attachments)
+                                 (<! (read-attachments-sequential! attachments))
+                                 [])
+                   res         (<! (main/do-with-pool!
+                                    pool
+                                    {:handler   :create-forum-thread
+                                     :arguments {:room-id     room-id
+                                                 :title       final-title
+                                                 :text        text
+                                                 :html        html
+                                                 :ast         ast
+                                                 :attachments worker-atts}}))]
                (re-frame/dispatch [:threads/set-forum-posting room-id false])
                (when (ok-status? (:status res))
                  (re-frame/dispatch [:threads/fetch-list room-id false])
@@ -570,8 +603,9 @@ and Nostr in both layout modes:
             (tr [:container.threads/load-more])])])]]))
 
 (defn ^:ui thread-composer [room-id active-thread tr]
-  (r/with-let [!editor           (r/atom nil)
-               !recording-voice? (r/atom false)]
+  (r/with-let [!editor             (r/atom nil)
+               !recording-voice?   (r/atom false)
+               !voice-hold-gesture (r/atom nil)]
     (let [is-mobile?   @(re-frame/subscribe [:ui/mobile?])
           recording?   @!recording-voice?
           thread-id    (:thread-id active-thread)
@@ -595,14 +629,27 @@ and Nostr in both layout modes:
                                 true)
                               false))))]
       [:div.thread-composer-outer
+       {:on-key-down (fn [e]
+                       (when (and (= (.-key e) "Escape")
+                                  (= (:mode context) :reply))
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (re-frame/dispatch [:input/clear-context draft-key])))}
        (when (and context (= (:mode context) :reply))
-         [:div.input-context-banner
-          [:div.context-info
-           [:span (tr [:composer/replying-to]
-                      [(truncate-name (get-in context [:target :sender-name]) 24)])]]
-          [:button.context-cancel-btn
-           {:on-click #(re-frame/dispatch [:input/clear-context draft-key])}
-           [icons/exit]]])
+         (let [reply-body (or (get-in context [:target :content :inner :content :body])
+                              (get-in context [:target :content :inner :content :caption]))]
+           [:div.input-context-banner
+            [:div.context-info
+             [:span.context-reply-icon [icons/reply {:width "14px" :height "14px"}]]
+             [:span.context-reply-label
+              (tr [:composer/replying-to]
+                  [(truncate-name (get-in context [:target :sender-name]) 24)])]
+             (when (not (str/blank? (str reply-body)))
+               [:span.context-reply-snippet (truncate-name (str reply-body) 48)])]
+            [:button.context-cancel-btn
+             {:type     "button"
+              :on-click #(re-frame/dispatch [:input/clear-context draft-key])}
+             [icons/exit]]]))
        [:div.timeline-input-wrapper.is-thread-composer
         (when (seq attachments)
           [:div.composer-attachments
@@ -620,7 +667,10 @@ and Nostr in both layout modes:
             :is-new?       (boolean (:is-new? active-thread))
             :title         (or (not-empty (str/trim (str (:custom-title active-thread ""))))
                                (:title active-thread))
-            :on-close      #(reset! !recording-voice? false)}]
+            :hold-gesture  @!voice-hold-gesture
+            :on-close      (fn []
+                             (reset! !voice-hold-gesture nil)
+                             (reset! !recording-voice? false))}]
           [:div.timeline-input-row
            [:label.timeline-upload-btn
             {:title (tr [:composer/upload-tooltip])}
@@ -665,9 +715,23 @@ and Nostr in both layout modes:
                   :onEditorReady #(reset! !editor %)}]]
            (when (or (not is-mobile?) (not has-content?))
              [:button.timeline-mic-btn
-              {:type     "button"
-               :title    (tr [:composer/record-voice-tooltip])
-               :on-click #(reset! !recording-voice? true)}
+              (cond-> {:type  "button"
+                       :title (tr [:composer/record-voice-tooltip])}
+                is-mobile?
+                (assoc :class           "is-mobile-cta"
+                       :on-context-menu #(.preventDefault %)
+                       :on-pointer-down (fn [e]
+                                          (.preventDefault e)
+                                          (reset! !voice-hold-gesture
+                                                  {:pointer-id (.-pointerId e)
+                                                   :start-x    (.-clientX e)
+                                                   :start-y    (.-clientY e)
+                                                   :started-at (js/Date.now)})
+                                          (reset! !recording-voice? true)))
+                (not is-mobile?)
+                (assoc :on-click (fn []
+                                   (reset! !voice-hold-gesture nil)
+                                   (reset! !recording-voice? true))))
               [icons/mic {:width "20px" :height "20px"}]])
            (when (or (not is-mobile?) has-content?)
              [:button.timeline-send-btn
