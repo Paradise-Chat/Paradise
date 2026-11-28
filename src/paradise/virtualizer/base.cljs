@@ -14,13 +14,14 @@
             [paradise.ui.app]
             [paradise.ui.container.timeline.item]
             [paradise.ui.container.members]
-            [virtualizer.protocol :as proto]
+            [virtualizer.spec :as vspec]
             [virtualizer.worker.ast :as ast]
             [virtualizer.worker.pretext :as pretext]
             [virtualizer.worker.engine :as engine]
             [paradise.virtualizer.spec :as spec]))
 
 (re-frame.loggers/set-loggers! {:warn (fn [& _])})
+
 (ast/install-dom-shims!)
 
 (def !event-cache (atom {}))
@@ -30,7 +31,7 @@
 (defonce !sync-timer (atom nil))
 
 (defn recalculate-and-stream! [room-id source]
-  (let [t-spec       (spec/->ParadiseTimelineSpec source)
+  (let [t-spec       (spec/timeline-layout source)
         raw-events   (get-in @!room-events [room-id source] [])
         ctx          (get @!layout-context room-id {:width 800 :theme {:font "400 15.2px Inter, sans-serif" :line-height 22.8} :measured {}})
         layout       (engine/apply-layout t-spec raw-events (:width ctx) (:theme ctx) (:measured ctx))
@@ -46,6 +47,10 @@
                                   "type"         (:type node)
                                   "ts"           (:ts node)
                                   "unread?"      (:unread? node)
+                                  "is-local?"    (boolean (:is-local? node))
+                                  "is-own?"      (boolean (:is-own? node))
+                                  "send-state"   (when-let [ss (:send-state node)]
+                                                   (if (keyword? ss) (name ss) (str ss)))
                                   "read-by"      (to-array (:read-by node []))
                                   "worker-data"  (:worker-data node)})
                            ast-nodes))
@@ -68,9 +73,15 @@
            (fn []
              (let [changed-ids (ast/check-deferred-components!)]
                (when (seq changed-ids)
-                 (doseq [r-id (keys @!room-events)
-                         src  (keys (get @!room-events r-id))]
-                   (recalculate-and-stream! r-id src))))))))
+                 (doseq [r-id (keys @!room-events)]
+                   (swap! !layout-context update-in [r-id :measured]
+                          (fn [m]
+                            (reduce (fn [acc id]
+                                      (dissoc acc id (keyword id) (str id)))
+                                    (or m {})
+                                    changed-ids)))
+                   (doseq [src (keys (get @!room-events r-id))]
+                     (recalculate-and-stream! r-id src)))))))))
 
 (defn process-timeline-redraw! []
   (ast/flush-ast-cache!)
@@ -79,12 +90,17 @@
     (recalculate-and-stream! room-id source)))
 
 (defn precompile-and-cache-event [t-spec e room-id]
-  (let [eid    (proto/extract-id t-spec e)
+  (let [eid    (vspec/extract-id t-spec e)
         cached (get @!event-cache eid)]
     (if (and cached (= (:raw cached) e))
       cached
-      (let [new-event (proto/precompile-item t-spec e room-id pretext/pretext-api)]
+      (let [new-event (vspec/precompile-item t-spec e room-id pretext/pretext-api)]
         (swap! !event-cache assoc eid (assoc new-event :raw e))
+        (when cached
+          (swap! ast/!item-revisions update eid (fnil inc 0))
+          (swap! ast/!ast-node-cache dissoc eid)
+          (swap! !layout-context update-in [room-id :measured]
+                 dissoc eid (keyword eid) (str eid)))
         new-event))))
 
 (defn process-timeline-events [t-spec events room-id]
@@ -115,9 +131,25 @@
                                           (when (seq edits)
                                             (.postMessage db-port (t/write writer edits)))))
                                       (re-frame/clear-subscription-cache!)
-                                      (queue-defer-check!)))
+                                      (if (or (not= (:locale old-state) (:locale new-state))
+                                              (not= (:dictionary old-state) (:dictionary new-state)))
+                                        (do
+                                          (reset! !event-cache {})
+                                          (process-timeline-redraw!))
+                                        (queue-defer-check!))))
                          (db/set-eve-atom! !local-db)
                          {:status :db-bound-async})))))
+
+(worker/register :cleanup-timeline
+                 (fn [{:keys [room-id source]}]
+                   (if source
+                     (let [src (keyword source)]
+                       (swap! !room-events update room-id dissoc src))
+                     (do
+                       (swap! !room-events dissoc room-id)
+                       (when (contains? @!layout-context room-id)
+                         (swap! !layout-context assoc-in [room-id :measured] {}))))
+                   {:status :success}))
 
 (worker/register :recalculate-timeline
                  (fn [{:keys [room-id]}]
@@ -128,10 +160,18 @@
 (worker/register :set-viewport
                  (fn [{:keys [visible-ids]}]
                    (reset! ast/!visible-active-ids (set visible-ids))
-                   (when (ast/consume-newly-visible-dirty! visible-ids)
-                     (doseq [r-id (keys @!room-events)
-                             src  (keys (get @!room-events r-id))]
-                       (recalculate-and-stream! r-id src)))
+                   (let [dirty-hits (filterv @ast/!dirty-offscreen-ids visible-ids)]
+                     (when (ast/consume-newly-visible-dirty! visible-ids)
+                       (doseq [r-id (keys @!room-events)]
+                         (when (seq dirty-hits)
+                           (swap! !layout-context update-in [r-id :measured]
+                                  (fn [m]
+                                    (reduce (fn [acc id]
+                                              (dissoc acc id (keyword id) (str id)))
+                                            (or m {})
+                                            dirty-hits))))
+                         (doseq [src (keys (get @!room-events r-id))]
+                           (recalculate-and-stream! r-id src)))))
                    {:status :success}))
 
 (worker/register :recalculate-items
@@ -166,15 +206,45 @@
 
 (worker/register :process-timeline-diff
                  (fn [{:keys [events room-id source]}]
-                   (let [t-spec           (spec/->ParadiseTimelineSpec source)
+                   (let [t-spec           (spec/timeline-layout source)
+                         prev-items       (get-in @!room-events [room-id source] [])
+                         prev-merged      (reduce (fn [m it] (assoc m (:id it) (:merge-with-prev? it)))
+                                                  {}
+                                                  prev-items)
                          processed-events (process-timeline-events t-spec events room-id)
-                         enriched-events  (proto/enrich-items t-spec processed-events)]
+                         enriched-events  (vspec/enrich-items t-spec processed-events)
+                         seam-ids         (keep (fn [it]
+                                                  (let [id (:id it)]
+                                                    (when (and (contains? prev-merged id)
+                                                               (not= (get prev-merged id)
+                                                                     (:merge-with-prev? it)))
+                                                      id)))
+                                                enriched-events)]
+                     (when (vspec/validate-specs?)
+                       (let [batch-check (vspec/validate-prepared-batch enriched-events)]
+                         (when-not (:valid? batch-check)
+                           (log/warn "Paradise timeline batch invariant violation"
+                                     {:room-id room-id
+                                      :source  source
+                                      :check   batch-check}))))
+                     (when (seq seam-ids)
+                       (swap! !layout-context update-in [room-id :measured]
+                              (fn [m]
+                                (reduce (fn [acc id]
+                                          (dissoc acc id (keyword id) (str id)))
+                                        (or m {})
+                                        seam-ids))))
                      (swap! !room-events assoc-in [room-id source] enriched-events)
                      (recalculate-and-stream! room-id source)
                      {:status :success})))
 
 (worker/register :eval-virtualizer-plugin
                  (fn [{:keys [plugin-id code]}]
-                   (sci-runner/eval-virtualizer-plugin! plugin-id code)))
+                   (let [res (sci-runner/eval-virtualizer-plugin! plugin-id code)]
+                     (when (= (:status res) :success)
+                       (doseq [r-id (keys @!room-events)]
+                         (swap! !layout-context assoc-in [r-id :measured] {}))
+                       (process-timeline-redraw!))
+                     res)))
 
 (worker/bootstrap)
