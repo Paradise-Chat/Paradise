@@ -1,7 +1,7 @@
 (ns paradise.ui.overlays.messages
   (:require
    [re-frame.core :as re-frame]
-   [paradise.ui.overlays.base :refer [context-menu-component]]
+   [paradise.ui.overlays.base :refer [context-menu-component context-menu-items]]
    [paradise.shared.utils.svg :as icons]
    [paradise.shared.client.state :as state]
    [cljs-workers.core :as main]
@@ -22,49 +22,72 @@
    {}))
 
 (defn build-message-actions [item active-room current-user-id x y tr]
-  (let [msg-id   (:id item)
-        e-t-id   (:event-or-transaction-id item)
-        is-mine? (or (:is-own? item)
-                     (= (:sender item) current-user-id))]
-    (->> [{:id "react"
-           :label (tr [:container.timeline.item/react])
-           :icon [icons/smiley]
-           :dispatch [:ui/open-popover :reaction-picker {:room-id active-room :msg-id e-t-id :x x :y y}]}
+  (let [msg-id       (:id item)
+        e-t-id       (or (:event-or-transaction-id item) msg-id)
+        action-room  (or (:action-room-id item) active-room)
+        input-scope  (or (:input-scope-id item) active-room)
+        in-thread?   (boolean (:in-thread-view? item))
+        th-summary   (:thread-summary item)
+        is-mine?     (or (:is-own? item)
+                         (= (:sender item) current-user-id)
+                         (= (:sender-id item) current-user-id))]
+    (->> [{:id       "react"
+           :label    (tr [:container.timeline.item/react])
+           :icon     [icons/smiley]
+           :dispatch [:ui/open-popover :reaction-picker {:room-id action-room :msg-id e-t-id :x x :y y}]}
 
-          {:id "reply" :label (tr [:container.timeline.item/reply]) :icon [icons/reply]
-           :dispatch [:input/set-context active-room :reply item]}
+          {:id       "reply"
+           :label    (tr [:container.timeline.item/reply])
+           :icon     [icons/reply]
+           :dispatch [:input/set-context input-scope :reply item]}
 
           (when (:is-own? item)
-            {:id "edit" :label (tr [:container.timeline.item/edit-message]) :icon [icons/edit]
-             :dispatch [:input/set-context active-room :edit item]})
+            {:id       "edit"
+             :label    (tr [:container.timeline.item/edit-message])
+             :icon     [icons/edit]
+             :dispatch [:input/set-context action-room :edit item]})
 
-          {:id "thread" :label (tr [:container.timeline.item/start-thread]) :icon [icons/thread] :dispatch [:msg/thread active-room msg-id]}
-          {:id "copy"   :label (tr [:container.timeline.item/copy-text])    :icon [icons/copy]   :dispatch [:ui/copy-to-clipboard (or (get-in item [:content :body]) "")]}
-          {:id "link"   :label (tr [:container.timeline.item/copy-link])    :icon [icons/link]   :dispatch [:ui/copy-permalink msg-id]}
-          {:id "pin"    :label (tr [:container.timeline.item/pin])          :icon [icons/pins]   :dispatch [:msg/toggle-pin active-room msg-id]}
-          {:id "source" :label (tr [:container.timeline.item/source])       :icon [icons/search] :dispatch [:msg/view-source msg-id]}
+          (when-not in-thread?
+            {:id       "thread"
+             :label    (if th-summary
+                         (tr [:container.timeline.item/open-thread])
+                         (tr [:container.timeline.item/start-thread]))
+             :icon     [icons/thread]
+             :dispatch [:msg/thread active-room msg-id th-summary item]})
+          {:id       "copy"
+           :label    (tr [:container.timeline.item/copy-text])
+           :icon     [icons/copy]
+           :dispatch [:ui/copy-to-clipboard
+                      (or (get-in item [:content :inner :content :body])
+                          (get-in item [:content :body])
+                          "")]}
+          {:id       "link"
+           :label    (tr [:container.timeline.item/copy-link])
+           :icon     [icons/link]
+           :dispatch [:ui/copy-permalink msg-id]}
+          (when-not in-thread?
+            {:id       "pin"
+             :label    (tr [:container.timeline.item/pin])
+             :icon     [icons/pins]
+             :dispatch [:msg/toggle-pin action-room msg-id]})
+          {:id       "source"
+           :label    (tr [:container.timeline.item/source])
+           :icon     [icons/search]
+           :dispatch [:msg/view-source msg-id]}
 
           (when is-mine?
-            {:id "delete" :label (tr [:container.timeline.item/delete]) :icon [icons/trash] :class-name "danger"
-             :dispatch [:msg/delete active-room e-t-id]})]
+            {:id         "delete"
+             :label      (tr [:container.timeline.item/delete])
+             :icon       [icons/trash]
+             :class-name "danger"
+             :dispatch   [:msg/delete action-room e-t-id]})]
          (remove nil?)
          (vec))))
 
-(defn ^:ui message-context-menu-content [{:keys [item active-room my-id x y close-fn]}]
+(defn ^:ui message-context-menu-content [{:keys [item active-room my-id x y]}]
   (let [tr    @(re-frame/subscribe [:i18n/tr])
         items (build-message-actions item active-room my-id x y tr)]
-    [:<>
-     (for [{:keys [id label dispatch class-name icon]} items]
-       ^{:key (or id label)}
-       [:div.context-menu-item
-        {:class class-name
-         :on-click (fn [e]
-                     (.stopPropagation e)
-                     (when dispatch
-                       (re-frame/dispatch dispatch))
-                     (re-frame/dispatch [:ui/close-context-menu]))}
-        (when icon [:span.item-icon icon])
-        [:span.item-label label]])]))
+    [context-menu-items items]))
 
 
 (defmethod context-menu-component :message-actions [_]
