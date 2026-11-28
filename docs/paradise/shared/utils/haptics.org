@@ -1,0 +1,53 @@
+#+TITLE: Cross-Platform Haptics Utility
+
+** Cross-Platform Haptics
+
+**** Preface
+
+Dispatches tactile feedback via ~@capacitor/haptics~ on native iOS and Android
+shells, with a graceful fallback to ~navigator.vibrate~ on supporting web
+browsers. Kept isolated from worker bundles so ~@capacitor/haptics~ is only
+imported on the UI main thread.
+
+**** Imports
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/haptics.cljs
+(ns ^:virtualizer/skip paradise.shared.utils.haptics
+  (:require ["@capacitor/haptics" :refer [Haptics ImpactStyle]]
+            [paradise.shared.utils.platform :as platform]))
+#+end_src
+
+**** Haptic Trigger
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/haptics.cljs
+(defn- impact-style-for [kind]
+  (case kind
+    :heavy  (.-Heavy ImpactStyle)
+    :medium (.-Medium ImpactStyle)
+    (.-Light ImpactStyle)))
+
+(defn- vibrate-ms-for [kind]
+  (cond
+    (number? kind) kind
+    (= kind :heavy) 24
+    (= kind :medium) 16
+    (= kind :selection) 10
+    :else 12))
+
+(defn trigger-haptic!
+  "Triggers a short haptic pulse (`:light`, `:medium`, `:heavy`, `:selection`, or ms)."
+  ([]
+   (trigger-haptic! :light))
+  ([kind]
+   (try
+     (if (platform/native-platform?)
+       (if (= kind :selection)
+         (-> (.selectionChanged Haptics)
+             (.catch (fn [_] nil)))
+         (-> (.impact Haptics #js {:style (impact-style-for kind)})
+             (.catch (fn [_] nil))))
+       (when (and (exists? js/navigator) (fn? (.-vibrate js/navigator)))
+         (.vibrate js/navigator (vibrate-ms-for kind))))
+     (catch :default _
+       nil))))
+#+end_src
