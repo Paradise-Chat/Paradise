@@ -46,6 +46,11 @@ just keep this to defining the look and feel itself.
       (.extend #js {:name "emojiTrigger"})
       (.configure #js {:suggestion (emoji-suggestion-options)})))
 
+(def slash-trigger
+  (-> Mention
+      (.extend #js {:name "slashCommand"})
+      (.configure #js {:suggestion (slash-command-options)})))
+
 (def user-trigger
   (-> Mention
       (.extend #js {:name "userMention"
@@ -249,12 +254,13 @@ https://tiptap.dev/docs/editor/core-concepts/extensions
              #js [(new Plugin
                        #js {:key (new PluginKey "fileDropHandler")
                             :props #js {:handleDOMEvents
-                                        #js {:drop (fn [_view event]
+                                        #js {:drop (fn [view event]
                                                      (try
                                                        (let [files (safe-extract-files event)]
                                                          (if (pos? (.-length files))
                                                            (do
                                                              (.preventDefault event)
+                                                             (.focus view)
                                                              (when-let [on-files (.. this -options -onFiles)]
                                                                (on-files files))
                                                              true)
