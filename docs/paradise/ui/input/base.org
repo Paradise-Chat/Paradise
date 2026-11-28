@@ -1373,26 +1373,49 @@ Ideally, we should break this apart more later.
                 [icons/plus {:width "20px" :height "20px"}]]
                [:div.mobile-composer-pill
                 [:div.timeline-editor-container
+                 {:on-pointer-down   (fn []
+                                       (when picker-open?
+                                         (reset! !composer-tapping? true)
+                                         (when (use-css-kb-inset?)
+                                           (arm-to-keyboard-handoff! 1200))))
+                  :on-pointer-cancel (fn []
+                                       (reset! !composer-tapping? false))
+                  :on-click          (fn [e]
+                                       (reset! !composer-tapping? false)
+                                       (when picker-open?
+                                         (.stopPropagation e)
+                                         (handoff-emoji-to-keyboard! @!editor)))
+                  :on-focus          (fn []
+                                       (when (and picker-open?
+                                                  (not @!composer-tapping?)
+                                                  (not= (:handoff @!mobile-kb-state) :to-keyboard))
+                                         (handoff-emoji-to-keyboard! @!editor)))}
                  editor-node]
                 [timeline-emoji-button
-                 {:on-click (fn []
-                              (reset! !mobile-actions-open? false)
-                              (if picker-open?
-                                (re-frame/dispatch [:ui/close-popover])
-                                (re-frame/dispatch [:ui/open-popover :inline-emoji {}])))
+                 {:on-click #(toggle-picker! :emoji)
                   :active?  picker-open?
+                  :title    (tr [:composer/emoji-tooltip])
                   :room-id  active-id}]]
                (if has-content?
                  [timeline-send-button {:submit-message! submit-message!
                                         :active-id       active-id
                                         :class           "is-mobile-cta"}]
                  [:button.timeline-mic-btn.is-mobile-cta
-                  {:type     "button"
-                   :title    (tr [:composer/record-voice-tooltip])
-                   :on-click (fn []
-                               (reset! !mobile-actions-open? false)
-                               (reset! !recording-voice? true))}
-                  [icons/mic {:width "20px" :height "20px"}]])])]
+                  {:type            "button"
+                   :title           (tr [:composer/record-voice-tooltip])
+                   :on-context-menu #(.preventDefault %)
+                   :on-pointer-down (fn [e]
+                                      (.preventDefault e)
+                                      (reset! !mobile-actions-open? false)
+                                      (reset! !voice-hold-gesture
+                                              {:pointer-id (.-pointerId e)
+                                               :start-x    (.-clientX e)
+                                               :start-y    (.-clientY e)
+                                               :started-at (js/Date.now)})
+                                      (reset! !recording-voice? true))}
+                  [icons/mic {:width "20px" :height "20px"}]])])
+            (when picker-open?
+              emoji-board-el)]
            [:div.timeline-input-wrapper
             (when (seq attachments)
               [:div.composer-attachments
@@ -1430,12 +1453,16 @@ Ideally, we should break this apart more later.
                [:button.timeline-mic-btn
                 {:type     "button"
                  :title    (tr [:composer/record-voice-tooltip])
-                 :on-click #(reset! !recording-voice? true)}
+                 :on-click (fn []
+                             (reset! !voice-hold-gesture nil)
+                             (reset! !recording-voice? true))}
                 [icons/mic {:width "20px" :height "20px"}]]
-               [timeline-emoji-button {:on-click #(if picker-open?
-                                                    (re-frame/dispatch [:ui/close-popover])
-                                                    (re-frame/dispatch [:ui/open-popover :inline-emoji {}]))
-                                       :active?  picker-open?
+               [timeline-sticker-button {:on-click #(toggle-picker! :sticker)
+                                         :active?  (and picker-open? (= picker-mode :sticker))
+                                         :title    (tr [:composer/sticker-tooltip])}]
+               [timeline-emoji-button {:on-click #(toggle-picker! :emoji)
+                                       :active?  (and picker-open? (= picker-mode :emoji))
+                                       :title    (tr [:composer/emoji-tooltip])
                                        :room-id  active-id}]
                [timeline-send-button {:submit-message! submit-message!
                                       :active-id       active-id}]])])]))))
