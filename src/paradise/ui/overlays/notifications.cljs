@@ -1,26 +1,31 @@
 (ns paradise.ui.overlays.notifications
   (:require [re-frame.core :as re-frame]
+            [reagent.core :as r]
             [taoensso.timbre :as log]
             [clojure.string :as str]
             [promesa.core :as p]
             [cljs.core.async :refer [go <!]]
             [cljs.core.async.interop :refer-macros [<p!]]
-            ["@capacitor/core" :refer [Capacitor registerPlugin]]
+            ["@capacitor/core" :refer [registerPlugin]]
             ["@capacitor/push-notifications" :refer [PushNotifications]]
             [paradise.shared.client.state :refer [!config] :as state]
             [paradise.shared.client.session-store :as store]
+            [paradise.shared.utils.audio :as audio]
+            [paradise.shared.utils.cache :as mem-cache]
+            [paradise.shared.utils.helpers :refer [base64url->uint8 bytes->base64url]]
+            [paradise.shared.utils.platform :as platform]
+            [paradise.shared.utils.svg :as icons]
+            [paradise.ui.global :refer [avatar]]
             [cljs-workers.mesh :as mesh]))
 
 (def shadow-device (registerPlugin "ShadowDevice"))
 
 (defn- resolve-app-id []
   (let [cfg @!config]
-    (case (.getPlatform Capacitor)
+    (case (platform/current-platform)
       "ios"     (:app-id-ios cfg)
       "android" (:app-id-android cfg)
       (or (:app-id-web cfg) (:app-id cfg)))))
-
-
 
 (defn- strip-source-map [s]
   (when s
@@ -48,7 +53,7 @@
 (re-frame/reg-event-fx
  :push/sync-engine-script
  (fn [_ _]
-   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+   (when (platform/mobile-native?)
      (go
        (try
          (if-let [script-path (<! (active-notification-script))]
@@ -74,6 +79,11 @@
    (assoc db :active-push-user user-id
              :push-status (if user-id :enabled :disabled))))
 
+(re-frame/reg-event-db
+ :push/set-voip-token
+ (fn [db [_ voip-token]]
+   (assoc db :voip-token voip-token)))
+
 (re-frame/reg-sub
  :push/previews-enabled?
  (fn [db _]
@@ -88,7 +98,7 @@
  :push/toggle-previews
  (fn [_ [_ enabled?]]
    (store/set-setting! "show_previews" enabled?)
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (-> (.setPreviewPreferences shadow-device #js {:enabled enabled?})
          (.catch #(log/error "Failed to save native preview prefs:" %))))
    {:dispatch [:push/hydrate-previews-setting enabled?]}))
@@ -97,7 +107,7 @@
 (re-frame/reg-event-fx
  :push/create-sleepy-shadow
  (fn [{:keys [db]} [_ credentials]]
-   (when (contains? #{"ios" "android"} (.getPlatform Capacitor))
+   (when (platform/mobile-native?)
      (log/info "Creating Sleepy Shadow Device...")
      (let [user-id (or (:user-id credentials) (:userId credentials) (:active-user-id db))]
        (go
@@ -122,25 +132,28 @@
  (fn [{:keys [db]} [_ token]]
    (let [active-user (:active-user-id db)
          old-user    (:active-push-user db)
+         voip-token  (:voip-token db)
          app-id      (resolve-app-id)
-         platform    (.getPlatform Capacitor)]
+         plat        (platform/current-platform)]
      (go
        (try
          (when (and old-user (string? old-user) (not= old-user active-user))
            (try
              (<p! (.deactivateShadow shadow-device
                                      #js {:pushToken token
+                                          :voipToken (or voip-token "")
                                           :userId    old-user
                                           :appId     app-id
-                                          :platform  platform}))
+                                          :platform  plat}))
              (catch js/Error e
                (log/warn "Silent deactivate cleanup error:" e))))
          (<p! (.activateShadow shadow-device
                                #js {:pushToken token
+                                    :voipToken (or voip-token "")
                                     :pushUrl   (:push-url @!config)
                                     :userId    active-user
                                     :appId     app-id
-                                    :platform  platform}))
+                                    :platform  plat}))
          (re-frame/dispatch [:push/set-active-user active-user])
          (catch js/Error err
            (log/error "Shadow Activated FAILED:" err)
@@ -153,7 +166,7 @@
    (let [token       (:native-token db)
          target-user (:active-push-user db)
          app-id      (resolve-app-id)
-         platform    (.getPlatform Capacitor)]
+         plat        (platform/current-platform)]
      (when (and target-user (string? target-user))
        (go
          (try
@@ -161,7 +174,7 @@
                                    #js {:pushToken (or token "")
                                         :userId    target-user
                                         :appId     app-id
-                                        :platform  platform}))
+                                        :platform  plat}))
            (catch js/Error e
              (log/error "Shadow Deactivated FAILED:" e)))
          (re-frame/dispatch [:push/hydrate-status nil])))
@@ -170,7 +183,7 @@
 (re-frame/reg-event-fx
  :push/verify-shadow
  (fn [_ [_ user-id recovery-key]]
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (go
        (try
          (let [prep    (<! (mesh/do-with-thread!
@@ -190,7 +203,7 @@
 (re-frame/reg-event-fx
  :push/check-verification-status
  (fn [_ [_ user-id]]
-   (when (.isNativePlatform Capacitor)
+   (when (platform/mobile-native?)
      (-> (.getShadowStatus shadow-device #js {:userId user-id})
          (.then (fn [res]
                   (when (.-isVerified res)
@@ -212,8 +225,26 @@
  (fn [db _]
    (:native-token db)))
 
+(defonce ^:private !electron-notif-wired? (atom false))
+
 (defn init! []
-  (when (.isNativePlatform Capacitor)
+  (audio/init-audio-unlock!)
+  (when (and (platform/electron-platform?)
+             (not @!electron-notif-wired?)
+             (exists? js/window)
+             (some? (.-paradiseNotifications js/window)))
+    (reset! !electron-notif-wired? true)
+    (let [bridge (.-paradiseNotifications js/window)]
+      (when (fn? (.-onClicked bridge))
+        (.onClicked bridge
+                    (fn [^js payload]
+                      (let [rid (when payload (.-roomId payload))
+                            eid (when payload (.-eventId payload))]
+                        (when (and (string? rid) (not (str/blank? rid)))
+                          (if (and (string? eid) (not (str/blank? eid)))
+                            (re-frame/dispatch [:rooms/select rid {:jump-event-id eid}])
+                            (re-frame/dispatch [:rooms/select rid])))))))))
+  (when (mobile-native-platform?)
     (re-frame/dispatch [:push/sync-engine-script])
     (.addListener PushNotifications "registration"
       (fn [token-res]
@@ -234,28 +265,9 @@
             (log/info "User tapped notification:" target)
             (re-frame/dispatch [:nav/route-from-push target])))))))
 
-(defn url-base64->uint8-array [base64-string]
-  (let [padding      (.repeat "=" (mod (- 4 (mod (.-length base64-string) 4)) 4))
-        base64       (-> (.replace base64-string (js/RegExp. "-" "g") "+")
-                         (.replace (js/RegExp. "_" "g") "/")
-                         (str padding))
-        raw-data     (js/atob base64)
-        output-array (js/Uint8Array. (.-length raw-data))]
-    (dotimes [i (.-length raw-data)]
-      (aset output-array i (.charCodeAt raw-data i)))
-    output-array))
+(def url-base64->uint8-array base64url->uint8)
 
-(defn- buf->b64url [buf]
-  (when buf
-    (let [bytes  (js/Uint8Array. buf)
-          len    (.-byteLength bytes)
-          chunks #js []]
-      (dotimes [i len]
-        (.push chunks (js/String.fromCharCode (aget bytes i))))
-      (-> (js/btoa (.join chunks ""))
-          (str/replace "+" "-")
-          (str/replace "/" "_")
-          (str/replace #"=+$" "")))))
+(def ^:private buf->b64url bytes->base64url)
 
 (defn- extract-push-keys [subscription]
   (when subscription
@@ -339,18 +351,21 @@
        (if (= (:status res) "success")
          (do
            (log/info "Successfully eradicated all pushers.")
-           (when-not (.isNativePlatform Capacitor)
+           (when (and (not (mobile-native-platform?))
+                      (not (electron-platform?)))
              (when-let [sw (.-serviceWorker js/navigator)]
                (-> (.-ready sw)
                    (.then (fn [reg]
                             (-> (.. reg -pushManager getSubscription)
                                 (.then (fn [sub]
                                          (when sub (.unsubscribe sub))))))))))
-           (when (.isNativePlatform Capacitor)
+           (when (electron-platform?)
+             (store/set-setting! "desktop_notifs_enabled" false))
+           (when (mobile-native-platform?)
              (let [token       (:native-token db)
                    target-user (:active-push-user db)
                    app-id      (resolve-app-id)
-                   platform    (.getPlatform Capacitor)]
+                   platform    (current-platform)]
                (when target-user
                  (.deactivateShadow shadow-device
                                     #js {:pushToken (or token "")
@@ -390,7 +405,8 @@
 (re-frame/reg-event-fx
  :push/check-status
  (fn [{:keys [db]} _]
-   (if (.isNativePlatform Capacitor)
+   (cond
+     (mobile-native-platform?)
      (go
        (try
          (let [res       (<p! (.getActivePushUser shadow-device))
@@ -399,6 +415,19 @@
            (re-frame/dispatch [:push/hydrate-status safe-user]))
          (catch js/Error e
            (log/error "Failed to check native push status:" e))))
+
+     (electron-platform?)
+     (-> (store/get-setting "desktop_notifs_enabled")
+         (.then (fn [saved]
+                  (let [on? (if (boolean? saved) saved true)]
+                    (re-frame/dispatch
+                     [:push/hydrate-status
+                      (when on? (or (:active-user-id db) "enabled"))]))))
+         (.catch (fn [_]
+                   (re-frame/dispatch
+                    [:push/hydrate-status (or (:active-user-id db) "enabled")]))))
+
+     :else
      (check-web-push-status!
       (fn [is-enabled?]
         (if is-enabled?
@@ -410,7 +439,8 @@
 (re-frame/reg-event-fx
  :push/enable
  (fn [{:keys [db]} _]
-   (if (.isNativePlatform Capacitor)
+   (cond
+     (mobile-native-platform?)
      (go
        (try
          (let [perm (<p! (.requestPermissions PushNotifications))]
@@ -421,6 +451,13 @@
              (log/warn "Native notification permission denied.")))
          (catch js/Error e
            (log/error "Native Push setup failed:" e))))
+
+     (electron-platform?)
+     (let [owner (or (:active-user-id db) "enabled")]
+       (store/set-setting! "desktop_notifs_enabled" true)
+       (re-frame/dispatch [:push/hydrate-status owner]))
+
+     :else
      (if-not (and (exists? js/window.PushManager) (exists? js/navigator.serviceWorker))
        (do (log/error "Push messaging is not supported.") {})
        (-> (p/let [permission (js/Notification.requestPermission)]
@@ -440,8 +477,16 @@
 (re-frame/reg-event-fx
  :push/disable
  (fn [_ _]
-   (if (.isNativePlatform Capacitor)
+   (cond
+     (mobile-native-platform?)
      {:dispatch [:push/deactivate-shadow]}
+
+     (electron-platform?)
+     (do
+       (store/set-setting! "desktop_notifs_enabled" false)
+       {:dispatch [:push/hydrate-status nil]})
+
+     :else
      (do
        (when-let [sw (.-serviceWorker js/navigator)]
          (-> (.-ready sw)
@@ -455,3 +500,299 @@
                                        (.unsubscribe sub))))))))))
        (store/set-setting! "web_push_owner" nil)
        {:dispatch [:push/hydrate-status nil]}))))
+
+(def init-audio-unlock! audio/init-audio-unlock!)
+(def play-notification-sound! audio/play-notification-sound!)
+
+(defonce !in-app-toasts (r/atom []))
+(defonce ^:private !recent-notif-cache
+  (mem-cache/make-ttl-cache {:ttl-ms 8000 :max-entries 200 :session-scoped? true}))
+
+(re-frame/reg-sub
+ :notif/toasts-enabled?
+ (fn [db _]
+   (if (boolean? (:notif/toasts-enabled? db))
+     (:notif/toasts-enabled? db)
+     true)))
+
+(re-frame/reg-sub
+ :notif/sound-enabled?
+ (fn [db _]
+   (if (boolean? (:notif/sound-enabled? db))
+     (:notif/sound-enabled? db)
+     true)))
+
+(re-frame/reg-sub
+ :notif/sound-preset
+ (fn [db _] (keyword (or (:notif/sound-preset db) :chime))))
+
+(re-frame/reg-sub
+ :notif/sound-volume
+ (fn [db _] (let [v (:notif/sound-volume db)] (if (number? v) v 70))))
+
+(re-frame/reg-event-db
+ :notif/hydrate-toasts-enabled
+ (fn [db [_ enabled?]]
+   (assoc db :notif/toasts-enabled? (if (boolean? enabled?) enabled? true))))
+
+(re-frame/reg-event-db
+ :notif/hydrate-sound-enabled
+ (fn [db [_ enabled?]]
+   (assoc db :notif/sound-enabled? (if (boolean? enabled?) enabled? true))))
+
+(re-frame/reg-event-db
+ :notif/hydrate-sound-preset
+ (fn [db [_ preset]]
+   (assoc db :notif/sound-preset (keyword (or preset :chime)))))
+
+(re-frame/reg-event-db
+ :notif/hydrate-sound-volume
+ (fn [db [_ vol]]
+   (assoc db :notif/sound-volume (if (number? vol) (max 0 (min 100 (int vol))) 70))))
+
+(re-frame/reg-event-fx
+ :notif/set-toasts-enabled
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [v (boolean enabled?)]
+     (store/set-setting! "in_app_toasts_enabled" v)
+     {:db (assoc db :notif/toasts-enabled? v)})))
+
+(re-frame/reg-event-fx
+ :notif/set-sound-enabled
+ (fn [{:keys [db]} [_ enabled?]]
+   (let [v (boolean enabled?)]
+     (store/set-setting! "in_app_sound_enabled" v)
+     {:db (assoc db :notif/sound-enabled? v)})))
+
+(re-frame/reg-event-fx
+ :notif/set-sound-preset
+ (fn [{:keys [db]} [_ preset]]
+   (let [kw (keyword (or preset :chime))]
+     (store/set-setting! "in_app_sound_preset" (name kw))
+     {:db (assoc db :notif/sound-preset kw)})))
+
+(re-frame/reg-event-fx
+ :notif/set-sound-volume
+ (fn [{:keys [db]} [_ vol]]
+   (let [v (max 0 (min 100 (int (or vol 70))))]
+     (store/set-setting! "in_app_sound_volume" v)
+     {:db (assoc db :notif/sound-volume v)})))
+
+(re-frame/reg-event-fx
+ :notif/test-sound
+ (fn [{:keys [db]} [_ preset-override]]
+   (audio/play-notification-sound!
+    {:preset   (or preset-override (:notif/sound-preset db) :chime)
+     :volume   (:notif/sound-volume db 70)
+     :mention? false
+     :force?   true})
+   {}))
+
+(defn dismiss-toast! [toast-id]
+  (swap! !in-app-toasts (fn [items] (vec (remove #(= (:id %) toast-id) items)))))
+
+(re-frame/reg-event-fx
+ :notif/clear-toasts
+ (fn [_ _]
+   (reset! !in-app-toasts [])
+   (mem-cache/clear! !recent-notif-cache)
+   {}))
+
+(defn- page-visible-and-focused? []
+  (and (exists? js/document)
+       (= (.-visibilityState js/document) "visible")
+       (or (not (fn? (.-hasFocus js/document)))
+           (.hasFocus js/document))))
+
+(defn- duplicate-notif? [dedupe-key]
+  (mem-cache/prune-expired! !recent-notif-cache)
+  (if (mem-cache/get-fresh !recent-notif-cache dedupe-key)
+    true
+    (do
+      (mem-cache/put! !recent-notif-cache dedupe-key true)
+      false)))
+
+(defn- show-desktop-notification!
+  [{:keys [room-id event-id title body avatar-url desktop-enabled? sound-on?]}]
+  (let [os-silent? (boolean (or (not sound-on?) (audio/audio-playback-ready?)))]
+    (cond
+      (platform/mobile-native?)
+      nil
+
+      (and (platform/electron-platform?)
+           desktop-enabled?
+           (exists? js/window)
+           (some? (.-paradiseNotifications js/window)))
+      (try
+        (.show (.-paradiseNotifications js/window)
+               #js {:title   (or title "Paradise")
+                    :body    (or body "")
+                    :roomId  room-id
+                    :eventId event-id
+                    :silent  os-silent?})
+        (catch :default _ nil))
+
+      (and (or (not (electron-platform?)) desktop-enabled?)
+           (exists? js/Notification)
+           (= (.-permission js/Notification) "granted"))
+      (try
+        (let [opts (clj->js (cond-> {:body (or body "") :silent os-silent?}
+                              (and (string? avatar-url) (not (str/blank? avatar-url)))
+                              (assoc :icon avatar-url)))
+              n    (js/Notification. (or title "Paradise") opts)]
+          (set! (.-onclick n)
+                (fn [_]
+                  (when (and (exists? js/window) (fn? (.-focus js/window)))
+                    (.focus js/window))
+                  (if event-id
+                    (re-frame/dispatch [:rooms/select room-id {:jump-event-id event-id}])
+                    (re-frame/dispatch [:rooms/select room-id]))
+                  (.close n))))
+        (catch :default _ nil)))))
+
+(re-frame/reg-event-fx
+ :notif/push-audio-cue
+ (fn [{:keys [db]} [_ {:keys [room-id event-id is-mention?]}]]
+   (let [rid          (some-> room-id str not-empty)
+         own-status   (keyword (or (:own-status db) :online))
+         dnd?         (= own-status :dnd)
+         focused?     (page-visible-and-focused?)
+         active-same? (and focused? rid (= (str (:active-room-id db)) rid))
+         sound-on?    (if (boolean? (:notif/sound-enabled? db))
+                        (:notif/sound-enabled? db)
+                        true)
+         preset       (keyword (or (:notif/sound-preset db) :chime))
+         volume       (if (number? (:notif/sound-volume db)) (:notif/sound-volume db) 70)
+         dedupe-key   (when (and rid (not-empty (str event-id)))
+                        [rid (str event-id)])]
+     (when (and sound-on?
+                (not dnd?)
+                (not active-same?)
+                (or (nil? dedupe-key)
+                    (not (duplicate-notif? dedupe-key))))
+       (play-notification-sound!
+        {:preset   preset
+         :volume   volume
+         :mention? (boolean is-mention?)})))
+   {}))
+
+(re-frame/reg-event-fx
+ :notif/incoming
+ (fn [{:keys [db]} [_ {:keys [room-id event-id room-name sender-name avatar-url body is-dm? is-mention? ts]}]]
+   (let [rid          (some-> room-id str not-empty)
+         own-status   (keyword (or (:own-status db) :online))
+         dnd?         (= own-status :dnd)
+         focused?     (page-visible-and-focused?)
+         active-same? (and focused? rid (= (str (:active-room-id db)) rid))
+         dedupe-key   [rid (or (not-empty (str event-id))
+                               (str (or ts 0) ":" (subs (str (or body "")) 0 (min 64 (count (str (or body "")))))))]
+         toasts-on?   (if (boolean? (:notif/toasts-enabled? db))
+                        (:notif/toasts-enabled? db)
+                        true)
+         sound-on?    (if (boolean? (:notif/sound-enabled? db))
+                        (:notif/sound-enabled? db)
+                        true)
+         previews-on? (if (boolean? (:push/previews-enabled? db))
+                        (:push/previews-enabled? db)
+                        true)
+         preset       (keyword (or (:notif/sound-preset db) :chime))
+         volume       (if (number? (:notif/sound-volume db)) (:notif/sound-volume db) 70)]
+     (when (and rid
+                (not dnd?)
+                (not active-same?)
+                (not (duplicate-notif? dedupe-key)))
+       (when sound-on?
+         (play-notification-sound!
+          {:preset   preset
+           :volume   volume
+           :mention? (boolean (or is-mention? is-dm?))}))
+       (let [clean-room   (or (not-empty (str/trim (str (or room-name "")))) rid)
+             clean-sender (not-empty (str/trim (str (or sender-name ""))))
+             clean-body   (when previews-on?
+                            (not-empty (str/trim (str (or body "")))))
+             toast        {:id          (str (random-uuid))
+                           :room-id     rid
+                           :event-id    (not-empty (str (or event-id "")))
+                           :room-name   clean-room
+                           :sender-name clean-sender
+                           :avatar-url  avatar-url
+                           :body        clean-body
+                           :is-dm?      (boolean is-dm?)
+                           :is-mention? (boolean is-mention?)
+                           :ts          (or ts (js/Date.now))}]
+         (when toasts-on?
+           (swap! !in-app-toasts
+                  (fn [items]
+                    (->> (conj (vec items) toast)
+                         (take-last 4)
+                         vec))))
+         (when-not focused?
+           (show-desktop-notification!
+            {:room-id          rid
+             :event-id         (:event-id toast)
+             :title            (if (and clean-sender (not is-dm?) (not= clean-sender clean-room))
+                                 (str clean-sender " • " clean-room)
+                                 clean-room)
+             :body             (or clean-body (if is-mention? "Mentioned you" "New message"))
+             :avatar-url       avatar-url
+             :desktop-enabled? (= (:push-status db :enabled) :enabled)
+             :sound-on?        (and sound-on? (not= preset :none) (pos? volume))})))))
+   {}))
+
+(defn ^:ui notif-toast-item [{:keys [id room-id event-id room-name sender-name avatar-url body is-dm? is-mention?]}]
+  (r/with-let [!timer     (atom nil)
+               start-tmr! (fn []
+                            (when-let [t @!timer] (js/clearTimeout t))
+                            (reset! !timer (js/setTimeout #(dismiss-toast! id) 5200)))
+               stop-tmr!  (fn []
+                            (when-let [t @!timer]
+                              (js/clearTimeout t)
+                              (reset! !timer nil)))
+               _          (start-tmr!)]
+    (let [tr           @(re-frame/subscribe [:i18n/tr])
+          show-sender? (and sender-name (not is-dm?) (not= sender-name room-name))
+          shown-body   (or body
+                           (if is-mention?
+                             (tr [:settings.notifications/hidden-preview-mention])
+                             (tr [:settings.notifications/hidden-preview-message])))]
+      [:div.notif-toast
+       {:class          (when is-mention? "is-mention")
+        :on-mouse-enter stop-tmr!
+        :on-mouse-leave start-tmr!
+        :on-click       (fn []
+                          (dismiss-toast! id)
+                          (if event-id
+                            (re-frame/dispatch [:rooms/select room-id {:jump-event-id event-id}])
+                            (re-frame/dispatch [:rooms/select room-id])))}
+       [avatar {:id   room-id
+                :name (or sender-name room-name "?")
+                :url  avatar-url
+                :size 38}]
+       [:div.notif-toast-content
+        [:div.notif-toast-header
+         [:span.notif-toast-title room-name]
+         (cond
+           is-mention?
+           [:span.notif-toast-pill (tr [:settings.notifications/mention-badge])]
+
+           is-dm?
+           [:span.notif-toast-pill (tr [:settings.notifications/dm-badge])])]
+        (when show-sender?
+          [:div.notif-toast-sender sender-name])
+        [:div.notif-toast-body shown-body]]
+       [:button.notif-toast-close
+        {:type     "button"
+         :on-click (fn [e]
+                     (.stopPropagation e)
+                     (dismiss-toast! id))}
+        [icons/exit {:size "14px"}]]])
+    (finally
+      (stop-tmr!))))
+
+(defn ^:ui notification-toast-root []
+  (let [toasts @!in-app-toasts]
+    (when (seq toasts)
+      [:div.notif-toast-stack
+       (for [toast toasts]
+         ^{:key (:id toast)}
+         [notif-toast-item toast])])))
