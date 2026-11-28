@@ -782,6 +782,10 @@ spaces navigation bar.
         active-call-id  @(re-frame/subscribe [:call/active-room])
         audio-on?       @(re-frame/subscribe [:call/audio-enabled?])
         deafened?       @(re-frame/subscribe [:call/deafened?])
+        input-vol       @(re-frame/subscribe [:settings/input-volume])
+        output-vol      @(re-frame/subscribe [:settings/output-volume])
+        mic-muted?      (or (not audio-on?) deafened? (<= (or input-vol 100) 0))
+        out-deafened?   (or deafened? (<= (or output-vol 100) 0))
         video-on?       @(re-frame/subscribe [:call/video-enabled?])
         screen-sharing? @(re-frame/subscribe [:call/screen-sharing?])
         rooms-map       (when active-call-id
@@ -895,17 +899,23 @@ spaces navigation bar.
 
       [:div.floating-profile-controls
        [:div.floating-ctrl-split
-        {:class           (when-not audio-on? "is-muted")
+        {:class           (when mic-muted? "is-muted")
          :on-context-menu #(open-audio-options-menu! :mic-options %)}
         [:button.floating-ctrl-main
          {:type     "button"
-          :title    (if audio-on?
-                      (tr [:container.call/mute])
-                      (tr [:container.call/unmute]))
-          :on-click #(re-frame/dispatch [:call/toggle-audio])}
-         (if audio-on?
-           [icons/mic {:width "16px" :height "16px"}]
-           [icons/mic-off {:width "16px" :height "16px"}])]
+          :title    (if mic-muted?
+                      (tr [:container.call/unmute])
+                      (tr [:container.call/mute]))
+          :on-click (fn []
+                      (if (and audio-on? (not deafened?) (<= (or input-vol 100) 0))
+                        (re-frame/dispatch [:settings/set-input-volume 100])
+                        (do
+                          (when (and mic-muted? (<= (or input-vol 100) 0))
+                            (re-frame/dispatch [:settings/set-input-volume 100]))
+                          (re-frame/dispatch [:call/toggle-audio]))))}
+         (if mic-muted?
+           ^{:key :mic-off} [icons/mic-off {:width "16px" :height "16px"}]
+           ^{:key :mic-on} [icons/mic {:width "16px" :height "16px"}])]
         [:button.floating-ctrl-caret
          {:type     "button"
           :title    (tr [:settings.voice-video.devices/input-label])
@@ -913,17 +923,23 @@ spaces navigation bar.
          [icons/chevron-up {:width "11px" :height "11px"}]]]
 
        [:div.floating-ctrl-split
-        {:class           (when deafened? "is-muted")
+        {:class           (when out-deafened? "is-muted")
          :on-context-menu #(open-audio-options-menu! :deafen-options %)}
         [:button.floating-ctrl-main
          {:type     "button"
-          :title    (if deafened?
+          :title    (if out-deafened?
                       (tr [:container.call/undeafen])
                       (tr [:container.call/deafen]))
-          :on-click #(re-frame/dispatch [:call/toggle-deafen])}
-         (if deafened?
-           [icons/headphones-off {:width "16px" :height "16px"}]
-           [icons/headphones {:width "16px" :height "16px"}])]
+          :on-click (fn []
+                      (if (and (not deafened?) (<= (or output-vol 100) 0))
+                        (re-frame/dispatch [:settings/set-output-volume 100])
+                        (do
+                          (when (and out-deafened? (<= (or output-vol 100) 0))
+                            (re-frame/dispatch [:settings/set-output-volume 100]))
+                          (re-frame/dispatch [:call/toggle-deafen]))))}
+         (if out-deafened?
+           ^{:key :deaf-on} [icons/headphones-off {:width "16px" :height "16px"}]
+           ^{:key :deaf-off} [icons/headphones {:width "16px" :height "16px"}])]
         [:button.floating-ctrl-caret
          {:type     "button"
           :title    (tr [:settings.voice-video.devices/output-label])
