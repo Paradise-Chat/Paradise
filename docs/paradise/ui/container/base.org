@@ -14,6 +14,7 @@ This is more or less where the layout and control of the container's contents wi
    [re-frame.core :as re-frame]
    [paradise.ui.container.call.events]
    [paradise.ui.container.call.call-view :refer [call-view]]
+   [paradise.ui.container.discovery :refer [discovery-view]]
    [paradise.ui.container.timeline.base :refer [timeline]]
    [paradise.ui.container.members :refer [member-list]]
    [paradise.ui.container.search :refer [search]]
@@ -37,9 +38,10 @@ This is more or less where the layout and control of the container's contents wi
         main-focus  @(re-frame/subscribe [:container/main-focus])]
     [:div.main-content
      (case main-focus
-       :call     [call-view active-room]
-       :thread   [threads-forum-view active-room]
-       :timeline [timeline])]))
+       :call      [call-view active-room]
+       :thread    [threads-forum-view active-room]
+       :discovery [discovery-view]
+       :timeline  [timeline])]))
 
 (defn ^:ui side-content [side-panel]
   (let [side-panel    @(re-frame/subscribe [:container/side-panel])
