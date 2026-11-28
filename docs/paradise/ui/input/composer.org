@@ -13,11 +13,14 @@ just keep this to defining the look and feel itself.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (ns paradise.ui.input.composer
   (:require
-   ["@capacitor/core" :refer [Capacitor]]
    [clojure.string :as str]
    [paradise.shared.utils.helpers :refer [clean-shortcode format-shortcode]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.media.component :refer [media]]
-   [paradise.ui.input.autocomplete :refer [user-mention-options emoji-suggestion-options]]
+   [paradise.ui.input.autocomplete :refer [user-mention-options
+                                           emoji-suggestion-options
+                                           slash-command-options
+                                           suggestion-claims-enter?]]
    ["react" :as react]
    [taoensso.timbre :as log]
    [reagent.core :as r]
