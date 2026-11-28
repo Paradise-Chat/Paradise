@@ -1102,6 +1102,7 @@ strings, or raw hiccup vectors).
    :shield       shield
    :lock         lock
    :clock        clock
+   :qr-code      qr-code
    :smiley       smiley
    :sticker      sticker
    :globe        globe
