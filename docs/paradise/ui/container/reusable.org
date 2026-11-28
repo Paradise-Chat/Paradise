@@ -431,6 +431,10 @@ Now we also can supply a reusable container for those events
 as often times these on-off events are useful to be used as a jump-to.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/reusable.cljs
+(defn- event-ts-ms [ev]
+  (normalize-ts-ms
+   (or (:ts ev) (:timestamp ev) (:origin-server-ts ev) (:origin_server_ts ev))))
+
 (defn ^:ui message-preview-item
   ([room-id event]
    [message-preview-item room-id event nil])
