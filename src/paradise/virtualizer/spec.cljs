@@ -1,27 +1,18 @@
 (ns ^:virtualizer/skip paradise.virtualizer.spec
   (:require [clojure.string :as str]
-            [virtualizer.protocol :as proto]
+            [re-frame.db :as rf-db]
+            [virtualizer.spec :as vspec]
             [virtualizer.worker.ast :as ast]
+            [paradise.shared.client.registry :as registry]
             [paradise.virtualizer.state :as state]
             [paradise.ui.container.timeline.item :refer [event-tile-render]]
-            [paradise.shared.utils.helpers :refer [format-divider-date
-                                                   process-raw-event
-                                                   sanitize-custom-html
-                                                   linkify-text]]))
+            [paradise.shared.utils.helpers :refer [extract-first-url
+                                                   format-divider-date
+                                                   linkify-text
+                                                   memoized-sanitize
+                                                   process-raw-event]]))
 
-(defonce !sanitize-cache (atom {}))
 
-(defn memoized-sanitize [html]
-  (if-let [hit (get @!sanitize-cache html)]
-    hit
-    (let [res (sanitize-custom-html html)]
-      (swap! !sanitize-cache
-             (fn [m]
-               (let [m' (assoc m html res)]
-                 (if (> (count m') 300)
-                   (dissoc m' (first (keys m')))
-                   m'))))
-      res)))
 
 (defn get-event-id [e]
   (cond
@@ -47,16 +38,112 @@
         (:event-id e)
         (:internal-id e))))
 
-(defn extract-first-url [text]
-  (when text
-    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
-      (str/replace match #"[.,:;!?]$" ""))))
-
 (defn calc-reply-height [content theme-metrics]
   (if (:in-reply-to content) (:reply-banner-h theme-metrics 32.4) 0))
 
 (defn calc-reaction-height [msg theme-metrics]
   (if (seq (:reactions msg)) (:reaction-row-h theme-metrics 24) 0))
+
+(defn calc-thread-summary-height [msg theme-metrics]
+  (let [summary (:thread-summary msg)]
+    (if (and (map? summary)
+             (not (:in-thread-view? msg))
+             (or (pos? (:reply-count summary 0))
+                 (not-empty (:title summary))
+                 (not-empty (str (:thread-id summary "")))))
+      (:thread-pill-h theme-metrics 32)
+      0)))
+
+(defn calc-send-status-height [msg theme-metrics]
+  (let [ss (:send-state msg)]
+    (if (or (= ss :failed) (= ss "failed"))
+      (:send-failed-bar-h theme-metrics 26)
+      0)))
+
+(defn- previews-enabled-in-db? [db room-id]
+  (let [policy    (get-in db [:settings :media-previews] :off)
+        target-id (or room-id (:active-room-id db))
+        room-meta (when target-id
+                    (or (get-in db [:rooms-unfiltered-cache target-id])
+                        (get-in db [:rooms target-id])
+                        (get-in db [:rooms/data target-id])))
+        private?  (= (:join-rule room-meta) "invite")]
+    (or (= policy :on)
+        (and (= policy :private) private?))))
+
+(defn- msg-supports-link-preview? [msg]
+  (let [content  (:content msg)
+        msg-tag  (or (get-in content [:inner :tag])
+                     (:tag content)
+                     (:content-tag msg))]
+    (and (not (str/blank? (str (:first-url msg))))
+         (contains? #{"Text" "Notice" "Emote" "MsgLike"} msg-tag))))
+
+(defn calc-link-preview-height [msg available-w theme-metrics db]
+  (if-not (and (msg-supports-link-preview? msg)
+               (previews-enabled-in-db? db (:room-id msg)))
+    0
+    (let [url     (:first-url msg)
+          preview (get-in db [:url-previews url])]
+      (cond
+        (or (nil? preview) (= (:status preview) :loading))
+        (:link-preview-skeleton-h theme-metrics 100)
+
+        (= (:status preview) :error)
+        0
+
+        (= (:status preview) :success)
+        (let [{:keys [og:title og:description og:image]} (:data preview)]
+          (if (or og:title og:description)
+            (let [card-w   (min (max 200 available-w) 480)
+                  chars-pl (max 24 (long (/ (- card-w 24) 7.4)))
+                  t-lines  (if og:title (min 2 (max 1 (js/Math.ceil (/ (count (str og:title)) chars-pl)))) 0)
+                  d-lines  (if og:description (min 4 (max 1 (js/Math.ceil (/ (count (str og:description)) chars-pl)))) 0)
+                  thumb-h  (if og:image (min 200 (long (* card-w 0.5))) 0)]
+              (+ 36 (* t-lines 19) (* d-lines 18) thumb-h))
+            0))
+
+        :else 0))))
+
+(defn apply-plugin-height-estimators
+  [msg available-w theme-metrics db base-preview-h supports-preview?]
+  (let [estimators (vals @registry/!height-estimators)]
+    (if (empty? estimators)
+      base-preview-h
+      (let [previews-on? (and supports-preview?
+                              (previews-enabled-in-db? db (:room-id msg)))
+            ctx          {:msg                   msg
+                          :available-w           available-w
+                          :theme-metrics         theme-metrics
+                          :db                    db
+                          :base-preview-h        base-preview-h
+                          :supports-link-preview? supports-preview?
+                          :previews-enabled?     previews-on?}]
+        (loop [rem       estimators
+               preview-h base-preview-h
+               delta-h   0.0]
+          (if (empty? rem)
+            (+ preview-h delta-h)
+            (let [est-fn (:fn (first rem))
+                  res    (try
+                           (when (fn? est-fn) (est-fn ctx))
+                           (catch :default _ nil))]
+              (cond
+                (and (map? res) (number? (:replace-preview-h res)))
+                (recur (rest rem)
+                       (if supports-preview?
+                         (max 0.0 (:replace-preview-h res))
+                         preview-h)
+                       (+ delta-h (or (:delta-h res) 0.0)))
+
+                (and (map? res) (number? (:delta-h res)))
+                (recur (rest rem) preview-h (+ delta-h (:delta-h res)))
+
+                (number? res)
+                (recur (rest rem) preview-h (+ delta-h res))
+
+                :else
+                (recur (rest rem) preview-h delta-h)))))))))
 
 (defn calc-media-height [content actual-tag available-w theme-metrics]
   (let [info          (or (:info content)
@@ -81,6 +168,45 @@
                         0)]
     (+ calc-h media-margin edited-h)))
 
+(defn calc-audio-height [theme-metrics]
+  (:audio-player-h theme-metrics 70))
+
+(defn calc-gallery-height [content theme-metrics]
+  (let [gallery      (or (get-in content [:inner :content])
+                         (:inner content)
+                         content)
+        raw-grid-h   (get-in gallery [:grid-style :height])
+        grid-h       (when raw-grid-h
+                       (let [v (js/parseFloat raw-grid-h)]
+                         (when (and (not (js/isNaN v)) (pos? v))
+                           v)))
+        raw-info-h   (get-in gallery [:info :h])
+        info-h       (when raw-info-h
+                       (let [v (js/parseFloat raw-info-h)]
+                         (when (and (not (js/isNaN v)) (pos? v))
+                           v)))
+        item-cnt     (count (or (:items gallery) (:visible-items gallery)))
+        fallback-h   (case item-cnt
+                       1 240
+                       2 210
+                       3 260
+                       280)
+        base-h       (or grid-h info-h fallback-h)
+        media-margin (:media-margin theme-metrics 0)]
+    (+ base-h media-margin)))
+
+(defn calc-poll-height [content theme-metrics]
+  (let [poll-inner (or (:inner content) content)
+        opt-cnt    (max 1 (count (:answers poll-inner)))]
+    (+ (:poll-chrome-h theme-metrics 118)
+       (* opt-cnt (:poll-option-h theme-metrics 44)))))
+
+(defn calc-poll-result-height [content theme-metrics]
+  (let [res-inner (or (:inner content) content)
+        row-cnt   (max 1 (count (:winners res-inner)))]
+    (+ (:poll-chrome-h theme-metrics 114)
+       (* row-cnt (:poll-option-h theme-metrics 44)))))
+
 (defn calc-text-height [msg available-w theme-metrics pretext-api]
   (let [{:keys [id pretext-prep is-quote? has-code-block? has-html? is-edited-calc?]} msg
         code-pad-x   (if has-code-block? (:code-padding-x theme-metrics 24) 0)
@@ -104,155 +230,226 @@
                        (:text-vertical-tax theme-metrics 0))]
     (+ (:height measured) code-padding edited-tax v-tax)))
 
-(defrecord ParadiseTimelineSpec [source]
-  proto/ILayoutSpec
-  (extract-id [_ raw-item]
-    (extract-event-id raw-item))
+(defn precompile-event [raw-item source room-id pretext-api]
+  (let [processed           (process-raw-event raw-item source room-id)
+        id                  (:id processed)
+        content             (:content processed)
+        inner               (or (get-in content [:inner :content])
+                                (:inner content)
+                                content)
+        body                (or (not-empty (:body inner))
+                                (not-empty (:body content))
+                                (not-empty (:caption inner))
+                                (not-empty (:caption content))
+                                "")
+        html                (or (not-empty (:html inner))
+                                (not-empty (:html content))
+                                "")
+        raw-txt             (str (or (not-empty (:clean-text processed)) body))
+        html-txt            (str (or (not-empty (:clean-html processed)) html))
+        has-code-block?     (or (str/includes? raw-txt "```")
+                                (str/includes? html-txt "<pre>"))
+        txt-str             (if (str/includes? raw-txt "```")
+                              (-> raw-txt
+                                  (str/replace #"```[^\n]*\n?" "")
+                                  (str/replace #"```" "")
+                                  (str/trim))
+                              raw-txt)
+        has-url?            (boolean (re-find #"https?://[^\s]+" txt-str))
+        measure-str         (if has-url?
+                              (str/replace txt-str #"https?://[^\s]+"
+                                           (fn [url-match]
+                                             (let [url (if (coll? url-match) (first url-match) url-match)]
+                                               (str/replace url #"([/=?&._:-])" "$1\u200B"))))
+                              txt-str)
+        is-quote?           (str/includes? html-txt "<blockquote")
+        has-html?           (boolean (seq html-txt))
+        first-url           (extract-first-url raw-txt)
+        is-edited?          (or (:is-edited? content)
+                                (get-in content [:inner :content :is-edited?]))
+        pre-compiled-hiccup (if has-html?
+                              (into [:span.body.formatted] (memoized-sanitize html))
+                              (into [:span.body] (linkify-text body)))
+        font-str            (if has-code-block?
+                              "500 13.68px \"fira code\", monospace"
+                              "400 15.2px Inter, sans-serif")
+        pretext-prep        ((:prepare pretext-api)
+                             measure-str
+                             font-str
+                             {:whiteSpace "pre-wrap" :wordBreak "normal"})
+        pojo-content        (ast/hiccup->pojo pre-compiled-hiccup)]
+    (assoc processed
+           :pre-compiled-hiccup pre-compiled-hiccup
+           :worker-pojo         pojo-content
+           :id                  id
+           :pretext-prep        pretext-prep
+           :first-url           first-url
+           :measure-str         measure-str
+           :is-quote?           is-quote?
+           :has-code-block?     has-code-block?
+           :has-html?           has-html?
+           :has-url?            has-url?
+           :is-edited-calc?     is-edited?)))
 
-  (precompile-item [_ raw-item room-id pretext-api]
-    (let [processed           (process-raw-event raw-item source room-id)
-          id                  (:id processed)
-          content             (:content processed)
-          inner               (or (get-in content [:inner :content])
-                                  (:inner content)
-                                  content)
-          body                (or (not-empty (:body inner))
-                                  (not-empty (:body content))
-                                  (not-empty (:caption inner))
-                                  (not-empty (:caption content))
-                                  "")
-          html                (or (not-empty (:html inner))
-                                  (not-empty (:html content))
-                                  "")
-          raw-txt             (str (or (not-empty (:clean-text processed)) body))
-          html-txt            (str (or (not-empty (:clean-html processed)) html))
-          has-code-block?     (or (str/includes? raw-txt "```")
-                                  (str/includes? html-txt "<pre>"))
-          txt-str             (if (str/includes? raw-txt "```")
-                                (-> raw-txt
-                                    (str/replace #"```[^\n]*\n?" "")
-                                    (str/replace #"```" "")
-                                    (str/trim))
-                                raw-txt)
-          has-url?            (boolean (re-find #"https?://[^\s]+" txt-str))
-          measure-str         (if has-url?
-                                (str/replace txt-str #"https?://[^\s]+"
-                                             (fn [url-match]
-                                               (let [url (if (coll? url-match) (first url-match) url-match)]
-                                                 (str/replace url #"([/=?&._:-])" "$1\u200B"))))
-                                txt-str)
-          is-quote?           (str/includes? html-txt "<blockquote")
-          has-html?           (boolean (seq html-txt))
-          first-url           (extract-first-url raw-txt)
-          is-edited?          (or (:is-edited? content)
-                                  (get-in content [:inner :content :is-edited?]))
-          pre-compiled-hiccup (if has-html?
-                                (into [:span.body.formatted] (memoized-sanitize html))
-                                (into [:span.body] (linkify-text body)))
-          font-str            (if has-code-block?
-                                "500 13.68px \"fira code\", monospace"
-                                "400 15.2px Inter, sans-serif")
-          pretext-prep        ((:prepare pretext-api) measure-str font-str {:whiteSpace "pre-wrap" :wordBreak "normal"})
-          pojo-content        (ast/hiccup->pojo pre-compiled-hiccup)]
-      (assoc processed
-             :pre-compiled-hiccup pre-compiled-hiccup
-             :worker-pojo         pojo-content
-             :id                  id
-             :pretext-prep        pretext-prep
-             :first-url           first-url
-             :measure-str         measure-str
-             :is-quote?           is-quote?
-             :has-code-block?     has-code-block?
-             :has-html?           has-html?
-             :has-url?            has-url?
-             :is-edited-calc?     is-edited?)))
+(defn enrich-timeline-items [items]
+  (loop [remaining items
+         processed (transient [])
+         last-msg  nil
+         unread?   false]
+    (if (empty? remaining)
+      (persistent! processed)
+      (let [curr             (first remaining)
+            curr-kw          (if (map? curr) (update curr :type keyword) curr)
+            is-marker?       (= (:tag curr-kw) "ReadMarker")
+            next-unread?     (or unread? is-marker?)
+            curr-is-msg?     (= (:content-tag curr-kw) "MsgLike")
+            stable-id        (get-event-id curr-kw)
+            can-merge?       (boolean (and curr-is-msg?
+                                           last-msg
+                                           (= (:sender-id curr-kw) (:sender-id last-msg))
+                                           (< (- (:ts curr-kw) (:ts last-msg)) 300000)))
+            apply-unread?    (and next-unread? (not is-marker?))
+            already-correct? (and (= (:id curr-kw) stable-id)
+                                  (= (boolean (:merge-with-prev? curr-kw)) can-merge?)
+                                  (= (boolean (:unread? curr-kw)) apply-unread?))
+            new-item         (if already-correct?
+                               curr-kw
+                               (assoc curr-kw
+                                      :id stable-id
+                                      :merge-with-prev? can-merge?
+                                      :unread? apply-unread?))]
+        (recur (rest remaining)
+               (conj! processed new-item)
+               (if curr-is-msg? new-item nil)
+               next-unread?)))))
 
-  (enrich-items [_ items]
-    (loop [remaining items
-           processed (transient [])
-           last-msg  nil
-           unread?   false]
-      (if (empty? remaining)
-        (persistent! processed)
-        (let [curr             (first remaining)
-              curr-kw          (if (map? curr) (update curr :type keyword) curr)
-              is-marker?       (= (:tag curr-kw) "ReadMarker")
-              next-unread?     (or unread? is-marker?)
-              curr-is-msg?     (= (:content-tag curr-kw) "MsgLike")
-              stable-id        (get-event-id curr-kw)
-              can-merge?       (boolean (and curr-is-msg?
-                                             last-msg
-                                             (= (:sender-id curr-kw) (:sender-id last-msg))
-                                             (< (- (:ts curr-kw) (:ts last-msg)) 300000)))
-              apply-unread?    (and next-unread? (not is-marker?))
-              already-correct? (and (= (:id curr-kw) stable-id)
-                                    (= (boolean (:merge-with-prev? curr-kw)) can-merge?)
-                                    (= (boolean (:unread? curr-kw)) apply-unread?))
-              new-item         (if already-correct?
-                                 curr-kw
-                                 (assoc curr-kw
-                                        :id stable-id
-                                        :merge-with-prev? can-merge?
-                                        :unread? apply-unread?))]
-          (recur (rest remaining)
-                 (conj! processed new-item)
-                 (if curr-is-msg? new-item nil)
-                 next-unread?)))))
+(defn estimate-event-height [msg width theme-metrics pretext-api]
+  (let [type (:type msg)
+        tag  (:content-tag msg)
+        id   (str (:id msg))]
+    (cond
+      (or (= type :virtual)
+          (= type "virtual")
+          (str/starts-with? id "virtual-divider")
+          (= id "read-marker"))
+      (:virtual-divider-h theme-metrics 49)
 
-  (estimate-height [_ msg width theme-metrics pretext-api]
-    (let [type (:type msg)
-          tag  (:content-tag msg)
-          id   (str (:id msg))]
-      (cond
-        (or (= type :virtual)
-            (= type "virtual")
-            (str/starts-with? id "virtual-divider")
-            (= id "read-marker"))
-        (:virtual-divider-h theme-metrics 49)
+      (and tag (not (#{"MsgLike" "Image" "Video" "Audio" "Sticker" "File" "Text" "Poll" "PollResult" "Gallery"} tag)))
+      (:system-event-h theme-metrics 42)
 
-        (and tag (not (#{"MsgLike" "Image" "Video" "Sticker" "File" "Text"} tag)))
-        (:system-event-h theme-metrics 42)
+      :else
+      (let [is-sequence-start? (not (:merge-with-prev? msg))
+            content            (:content msg)
+            avatar-h           (:avatar-h theme-metrics 32)
+            row-w              (:row-w theme-metrics)
+            text-node-w        (:text-node-w theme-metrics)
+            horiz-chrome       (if (and row-w text-node-w (pos? row-w) (pos? text-node-w))
+                                 (- row-w text-node-w)
+                                 86)
+            header-h           (:header-h theme-metrics 19)
+            seq-padding        (:seq-padding theme-metrics 10)
+            merged-padding     (:merged-padding theme-metrics 5)
+            available-w        (max 0 (- width horiz-chrome))
+            reply-h            (calc-reply-height content theme-metrics)
+            reaction-h         (calc-reaction-height msg theme-metrics)
+            thread-h           (calc-thread-summary-height msg theme-metrics)
+            send-status-h      (calc-send-status-height msg theme-metrics)
+            tags-present       #{(:tag content) (get-in content [:inner :tag]) (:content-tag msg)}
+            is-poll?           (contains? tags-present "Poll")
+            is-poll-result?    (contains? tags-present "PollResult")
+            is-audio?          (contains? tags-present "Audio")
+            is-gallery?        (contains? tags-present "Gallery")
+            actual-tag         (first (filter #{"Image" "Video" "Sticker"} tags-present))
+            is-media?          (boolean actual-tag)
+            body-h             (cond
+                                 is-poll?
+                                 (calc-poll-height content theme-metrics)
 
-        :else
-        (let [is-sequence-start? (not (:merge-with-prev? msg))
-              content            (:content msg)
-              avatar-h           (:avatar-h theme-metrics 32)
-              row-w              (:row-w theme-metrics)
-              text-node-w        (:text-node-w theme-metrics)
-              horiz-chrome       (if (and row-w text-node-w (pos? row-w) (pos? text-node-w))
-                                   (- row-w text-node-w)
-                                   86)
-              header-h           (:header-h theme-metrics 19)
-              seq-padding        (:seq-padding theme-metrics 10)
-              merged-padding     (:merged-padding theme-metrics 5)
-              available-w        (max 0 (- width horiz-chrome))
-              reply-h            (calc-reply-height content theme-metrics)
-              reaction-h         (calc-reaction-height msg theme-metrics)
-              tags-present       #{(:tag content) (get-in content [:inner :tag]) (:content-tag msg)}
-              actual-tag         (first (filter #{"Image" "Video" "Sticker"} tags-present))
-              is-media?          (boolean actual-tag)
-              body-h             (if is-media?
-                                   (let [m-h     (calc-media-height content actual-tag available-w theme-metrics)
-                                         caption (when (not= actual-tag "Sticker")
-                                                   (or (not-empty (:caption content))
-                                                       (not-empty (get-in content [:inner :content :caption]))))
-                                         t-h     (if caption
-                                                   (calc-text-height msg available-w theme-metrics pretext-api)
-                                                   0)]
-                                     (+ m-h t-h))
-                                   (calc-text-height msg available-w theme-metrics pretext-api))]
-          (if is-sequence-start?
-            (+ (max avatar-h (+ header-h body-h reply-h)) seq-padding reaction-h)
-            (+ body-h reply-h merged-padding reaction-h))))))
+                                 is-poll-result?
+                                 (calc-poll-result-height content theme-metrics)
 
-  (ast-cache-key [_ item revision]
-    (hash [(:raw item) (:unread? item) (:reactions item) (:merge-with-prev? item) revision]))
+                                 is-audio?
+                                 (let [a-h     (calc-audio-height theme-metrics)
+                                       caption (or (not-empty (:caption content))
+                                                   (not-empty (get-in content [:inner :content :caption])))
+                                       t-h     (if caption
+                                                 (calc-text-height msg available-w theme-metrics pretext-api)
+                                                 0)]
+                                   (+ a-h t-h))
 
-  (render-item-hiccup [_ item]
-    (let [render-fn (or (get @state/!worker-overrides :event-tile-render)
-                        (get @state/!worker-components :event-tile-render)
-                        event-tile-render)
-          outer-res (render-fn item nil false nil nil)]
-      (if (fn? outer-res)
-        (outer-res item nil false nil nil)
-        outer-res))))
+                                 is-gallery?
+                                 (let [g-h     (calc-gallery-height content theme-metrics)
+                                       caption (or (not-empty (:caption content))
+                                                   (not-empty (get-in content [:inner :content :caption])))
+                                       t-h     (if caption
+                                                 (calc-text-height msg available-w theme-metrics pretext-api)
+                                                 0)]
+                                   (+ g-h t-h))
+
+                                 is-media?
+                                 (let [m-h     (calc-media-height content actual-tag available-w theme-metrics)
+                                       caption (when (not= actual-tag "Sticker")
+                                                 (or (not-empty (:caption content))
+                                                     (not-empty (get-in content [:inner :content :caption]))))
+                                       t-h     (if caption
+                                                 (calc-text-height msg available-w theme-metrics pretext-api)
+                                                 0)]
+                                   (+ m-h t-h))
+
+                                 :else
+                                 (calc-text-height msg available-w theme-metrics pretext-api))
+            db                 (or @rf-db/app-db {})
+            supports-preview?  (and (not (or is-poll? is-audio? is-gallery? is-media?))
+                                    (msg-supports-link-preview? msg))
+            base-preview-h     (if supports-preview?
+                                 (calc-link-preview-height msg available-w theme-metrics db)
+                                 0)
+            extra-h            (apply-plugin-height-estimators
+                                msg available-w theme-metrics db base-preview-h supports-preview?)
+            total-body-h       (+ body-h extra-h)]
+        (if is-sequence-start?
+          (+ (max avatar-h (+ header-h total-body-h reply-h)) seq-padding reaction-h thread-h send-status-h)
+          (+ total-body-h reply-h merged-padding reaction-h thread-h send-status-h))))))
+
+(defn timeline-ast-cache-key [item revision]
+  (hash [(:raw item)
+         (get-in item [:content :inner])
+         (:unread? item)
+         (:send-state item)
+         (:send-error item)
+         (:reactions item)
+         (:thread-summary item)
+         (:merge-with-prev? item)
+         revision]))
+
+(defn render-timeline-item [item]
+  (let [render-fn (or (get @state/!worker-overrides :event-tile-render)
+                      (get @state/!worker-components :event-tile-render)
+                      event-tile-render)
+        outer-res (render-fn item nil false nil nil)]
+    (if (fn? outer-res)
+      (outer-res item nil false nil nil)
+      outer-res)))
+
+(defn make-timeline-layout [source]
+  (vspec/define-layout
+   {:id                    :paradise-timeline
+    :meta                  {:source source}
+    :default-theme-metrics {:font "400 15.2px Inter, sans-serif" :line-height 22.8}
+    :hooks                 {:extract-id         extract-event-id
+                            :precompile-item    (fn [raw-item room-id pretext-api]
+                                                  (precompile-event raw-item source room-id pretext-api))
+                            :enrich-items       enrich-timeline-items
+                            :estimate-height    estimate-event-height
+                            :ast-cache-key      timeline-ast-cache-key
+                            :render-item-hiccup render-timeline-item}}))
+
+(defonce !layouts (atom {}))
+
+(defn timeline-layout
+  "Returns a cached, validated `virtualizer.spec` layout map for `source`."
+  [source]
+  (or (get @!layouts source)
+      (let [layout (make-timeline-layout source)]
+        (swap! !layouts assoc source layout)
+        layout)))
