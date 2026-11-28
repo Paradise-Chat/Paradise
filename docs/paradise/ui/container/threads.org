@@ -27,6 +27,9 @@ and Nostr in both layout modes:
                                           format-time
                                           get-file
                                           ok-status?
+                                          revoke-object-url!
+                                          safe-lower
+                                          safe-lower-trim
                                           truncate-name
                                           unregister-file!]]
    [paradise.shared.utils.svg :as icons]
