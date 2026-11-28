@@ -1,0 +1,123 @@
+(ns ^:virtualizer/skip paradise.shared.utils.normalize
+  (:require [clojure.string :as str]
+            [paradise.shared.utils.helpers :refer [first-non-blank]]))
+
+(defn normalize-user
+  "Normalizes a raw user/member/friend map into canonical kebab-case fields."
+  [raw]
+  (when (map? raw)
+    (let [uid   (first-non-blank (:user-id raw) (:userId raw) (:id raw))
+          uname (first-non-blank (:username raw))
+          dname (first-non-blank (:display-name raw) (:displayName raw) (:name raw) uname uid)
+          hdl   (first-non-blank (:handle raw)
+                                 (when uname (str "@" uname))
+                                 uid)
+          av    (first-non-blank (:avatar-url raw) (:avatarUrl raw) (:avatar-uri raw)
+                                 (:avatar-mxc raw) (:avatar raw))]
+      (when uid
+        (cond-> {:user-id      uid
+                 :display-name dname
+                 :username     uname
+                 :handle       hdl
+                 :avatar-url   av
+                 :presence     (:presence raw)}
+          (or (contains? raw :is-friend?) (contains? raw :isFriend))
+          (assoc :is-friend? (boolean (or (:is-friend? raw) (:isFriend raw))))
+
+          (or (:dm-room-id raw) (:dmRoomId raw))
+          (assoc :dm-room-id (first-non-blank (:dm-room-id raw) (:dmRoomId raw)))
+
+          (some? (:power-level raw))
+          (assoc :power-level (:power-level raw))
+
+          (some? (:role-ids raw))
+          (assoc :role-ids (:role-ids raw))
+
+          (some? (:roles raw))
+          (assoc :roles (:roles raw)))))))
+
+(defn normalize-profile
+  "Normalizes a profile map into canonical kebab-case fields."
+  [raw]
+  (when (map? raw)
+    (let [base (or (normalize-user raw) {})]
+      (merge base
+             {:sub-id       (first-non-blank (:sub-id raw) (:subId raw))
+              :bio          (first-non-blank (:bio raw))
+              :pronouns     (first-non-blank (:pronouns raw))
+              :banner-url   (first-non-blank (:banner-url raw) (:bannerUrl raw) (:banner raw))
+              :banner-color (first-non-blank (:banner-color raw) (:bannerColor raw))}))))
+
+(defn normalize-account
+  "Normalizes a stored or active account entry."
+  [raw]
+  (when (map? raw)
+    (let [uid    (first-non-blank (:user-id raw) (:userId raw) (:id raw))
+          eng    (when-let [e (or (:engine raw) (:engine-id raw))]
+                   (name e))
+          uname  (first-non-blank (:username raw))
+          dname  (first-non-blank (:display-name raw) (:displayName raw))
+          lbl    (first-non-blank (:label raw) dname uname uid)
+          av     (first-non-blank (:avatar-url raw) (:avatarUrl raw) (:avatar raw))
+          srv    (first-non-blank (:server-url raw) (:serverUrl raw)
+                                   (:base-url raw) (:server raw))]
+      {:user-id      uid
+       :engine       eng
+       :username     uname
+       :display-name dname
+       :label        lbl
+       :avatar-url   av
+       :server-url   srv})))
+
+(defn format-account-subtitle
+  "Formats a compact `Engine · host` subtitle for an account map."
+  [acct]
+  (let [{:keys [engine server-url]} (normalize-account acct)
+        eng  (some-> engine str/capitalize)
+        host (some-> server-url
+                     (str/replace #"^https?://" "")
+                     (str/replace #"/.*$" "")
+                     not-empty)]
+    (str/join " · " (remove str/blank? [eng host]))))
+
+(defn direct-target-id?
+  "Returns true when `raw` looks like a direct user identifier rather than a search query."
+  [raw]
+  (let [s (str/trim (str (or raw "")))]
+    (boolean
+     (and (seq s)
+          (not (re-find #"\s" s))
+          (or (str/starts-with? s "@")
+              (str/starts-with? s "npub1")
+              (str/starts-with? s "nprofile1")
+              (re-matches #"^[0-9a-fA-F]{64}$" s)
+              (re-matches #"^\d{15,22}$" s))))))
+
+(defn normalize-room
+  "Normalizes a raw room/channel/space summary into canonical kebab-case fields."
+  [raw]
+  (when (map? raw)
+    (let [rid (first-non-blank (:id raw) (:room-id raw) (:roomId raw) (:room_id raw))]
+      (when rid
+        {:id            rid
+         :name          (first-non-blank (:name raw) (:display-name raw) rid)
+         :topic         (first-non-blank (:topic raw) (:description raw))
+         :avatar-url    (first-non-blank (:avatar-url raw) (:avatarUrl raw)
+                                         (:avatar_url raw) (:avatar raw))
+         :banner-url    (first-non-blank (:banner-url raw) (:bannerUrl raw) (:banner raw))
+         :is-space?     (boolean (or (:is-space? raw)
+                                     (:isSpace raw)
+                                     (= "m.space" (:room_type raw))))
+         :is-direct?    (boolean (or (:is-direct? raw) (:isDirect raw) (:is-direct raw)))
+         :is-group-dm?  (boolean (or (:is-group-dm? raw) (:isGroupDm raw)))
+         :parent-id     (first-non-blank (:parent-id raw) (:first-parent-id raw))
+         :member-count  (or (:member-count raw) (:num_joined_members raw))
+         :online-count  (:online-count raw)
+         :membership    (:membership raw)}))))
+
+(defn normalize-space
+  "Normalizes a space summary into canonical `{:id :name :avatar-url :is-space?}`."
+  [raw]
+  (when-let [r (normalize-room raw)]
+    (assoc (select-keys r [:id :name :avatar-url :topic :member-count])
+           :is-space? true)))
