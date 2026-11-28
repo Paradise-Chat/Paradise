@@ -1,29 +1,29 @@
 (ns paradise.ui.container.call.runtime
   (:require
-   [shadow.esm :refer [dynamic-import]]
+   [paradise.shared.utils.helpers :refer [clamp01 ios-runtime?]]
+   [paradise.ui.container.call.audio-processor :as audio-processor]
    [promesa.core :as p]
-   [taoensso.timbre :as log]
-   [paradise.ui.container.call.audio-processor :as audio-processor]))
+   [shadow.esm :refer [dynamic-import]]
+   [taoensso.timbre :as log]))
 
 (defonce !driver-instance (atom nil))
 (defonce !loaded-drivers (atom {}))
+(defonce !encoder-script-cache (atom {}))
 (defonce !encoder-worker (atom nil))
 (defonce !participants (atom []))
 (defonce !pending-crypto-queue (atom []))
 
-(defonce !voice-threshold (atom 0.12))
+(defonce !voice-threshold (atom 0.004))
 (defonce !voice-gate-enabled? (atom true))
 (defonce !noise-suppression-enabled? (atom true))
+(defonce !input-volume (atom 100))
 (defonce !audio-processor (atom nil))
-
-(defn- clamp01 [x]
-  (max 0.0 (min 1.0 (or x 0.0))))
 
 (defn resolve-media-track [^js track]
   (when track
-    (let [candidate (or (.-mediaStreamTrack track)
-                        (some-> (.-track track) .-mediaStreamTrack)
-                        (.-track track)
+    (let [candidate (or (aget track "mediaStreamTrack")
+                        (some-> (aget track "track") (aget "mediaStreamTrack"))
+                        (aget track "track")
                         track)]
       (when (and (exists? js/MediaStreamTrack)
                  (instance? js/MediaStreamTrack candidate))
@@ -40,48 +40,62 @@
              :video-track (resolve-media-track v-track)
              :audio-track (resolve-media-track a-track)))))
 
+(defn- spawn-worker-from-code! [code]
+  (let [blob     (js/Blob. #js [code] #js {:type "application/javascript"})
+        blob-url (js/URL.createObjectURL blob)
+        worker   (js/Worker. blob-url)]
+    (js/URL.revokeObjectURL blob-url)
+    worker))
+
 (defn create-remote-worker! [script-url]
-  (-> (js/fetch script-url)
-      (p/then (fn [resp]
-                (if (.-ok resp)
-                  (.text resp)
-                  (p/rejected (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
-      (p/then (fn [code]
-                (let [blob     (js/Blob. #js [code] #js {:type "application/javascript"})
-                      blob-url (js/URL.createObjectURL blob)
-                      worker   (js/Worker. blob-url)]
-                  (js/URL.revokeObjectURL blob-url)
-                  worker)))))
+  (if-let [cached-code (get @!encoder-script-cache script-url)]
+    (p/resolved (spawn-worker-from-code! cached-code))
+    (-> (js/fetch script-url)
+        (p/then (fn [resp]
+                  (if (.-ok resp)
+                    (.text resp)
+                    (p/rejected
+                     (js/Error. (str "Failed to fetch call encoder script: " (.-status resp)))))))
+        (p/then (fn [code]
+                  (swap! !encoder-script-cache assoc script-url code)
+                  (spawn-worker-from-code! code))))))
 
 (defn- load-driver-module! [driver-url]
   (if-let [cached (get @!loaded-drivers driver-url)]
     (p/resolved cached)
     (-> (dynamic-import driver-url)
         (p/then (fn [mod]
-                  (let [create-fn (or (.-createCallDriver mod)
-                                      (some-> (.-default mod) .-createCallDriver))]
+                  (let [create-fn (or (when mod (aget mod "createCallDriver"))
+                                      (some-> mod (aget "default") (aget "createCallDriver")))]
                     (if create-fn
                       (do
                         (swap! !loaded-drivers assoc driver-url create-fn)
                         create-fn)
-                      (p/rejected (js/Error. (str "Call driver missing createCallDriver export: " driver-url))))))))))
+                      (p/rejected
+                       (js/Error.
+                        (str "Call driver missing createCallDriver export: " driver-url))))))))))
 
 (defn get-or-create-audio-processor! []
   (or @!audio-processor
-      (let [processor (audio-processor/create-processor
-                       {:threshold @!voice-threshold
-                        :gate-enabled? @!voice-gate-enabled?
-                        :hangover-ms 180})]
+      (let [ios?      (ios-runtime?)
+            processor (audio-processor/create-processor
+                       {:threshold     @!voice-threshold
+                        :gate-enabled? (and @!voice-gate-enabled? (not ios?))
+                        :ios-direct?   ios?
+                        :input-gain    (/ @!input-volume 100.0)
+                        :hangover-ms   180})]
         (reset! !audio-processor processor)
-        (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
-          (set-enabled @!noise-suppression-enabled?))
+        (when-not ios?
+          (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
+            (set-enabled @!noise-suppression-enabled?)))
         processor)))
 
 (defn create-test-audio-processor []
   (let [processor (audio-processor/create-processor
-                   {:threshold @!voice-threshold
+                   {:threshold     @!voice-threshold
                     :gate-enabled? @!voice-gate-enabled?
-                    :hangover-ms 180})]
+                    :input-gain    (/ @!input-volume 100.0)
+                    :hangover-ms   180})]
     (when-let [set-enabled (aget processor "setNoiseSuppressionEnabled")]
       (set-enabled @!noise-suppression-enabled?))
     processor))
@@ -103,37 +117,56 @@
 
 (defn start-driver!
   [{:keys [driver-url encoder-url session-config callbacks]}]
-  (p/let [create-driver (load-driver-module! driver-url)
-          encoder       (if encoder-url
-                          (create-remote-worker! encoder-url)
-                          nil)
+  (p/let [[create-driver encoder]
+          (p/all [(load-driver-module! driver-url)
+                  (if encoder-url
+                    (create-remote-worker! encoder-url)
+                    (p/resolved nil))])
           _             (reset! !encoder-worker encoder)
           driver        (create-driver
-                         #js {:sessionConfig (clj->js session-config)
-                              :encoderWorker encoder
-                              :getAudioProcessor get-or-create-audio-processor!
-                              :onParticipantsChanged (fn [js-participants]
-                                                       (let [parsed (into []
-                                                                          (keep normalize-participant-tile)
-                                                                          (array-seq (or js-participants #js [])))]
-                                                         (reset! !participants parsed)
-                                                         (when-let [cb (:on-participants-changed callbacks)]
-                                                           (cb parsed))))
-                              :onLocalMediaChanged (fn [js-state]
-                                                     (when-let [cb (:on-local-media-changed callbacks)]
-                                                       (cb (js->clj js-state :keywordize-keys true))))
-                              :onConnected (fn []
-                                             (when-let [cb (:on-connected callbacks)]
-                                               (cb)))
-                              :onDisconnected (fn [reason]
-                                                (when-let [cb (:on-disconnected callbacks)]
-                                                  (cb reason)))
-                              :onSignalOut (fn [js-payload]
-                                             (when-let [cb (:on-signal-out callbacks)]
-                                               (cb (js->clj js-payload :keywordize-keys true))))
-                              :onError (fn [category err]
-                                         (when-let [cb (:on-error callbacks)]
-                                           (cb (keyword category) err)))})]
+                         #js {:sessionConfig        (clj->js session-config)
+                              :encoderWorker        encoder
+                              :getAudioProcessor    get-or-create-audio-processor!
+                              :onParticipantsChanged
+                              (fn [js-participants]
+                                (let [parsed (into []
+                                                   (keep normalize-participant-tile)
+                                                   (array-seq (or js-participants #js [])))]
+                                  (reset! !participants parsed)
+                                  (when-let [cb (:on-participants-changed callbacks)]
+                                    (cb parsed))))
+                              :onLocalMediaChanged
+                              (fn [js-state]
+                                (when-let [cb (:on-local-media-changed callbacks)]
+                                  (cb (js->clj js-state :keywordize-keys true))))
+                              :onConnected
+                              (fn []
+                                (when-let [cb (:on-connected callbacks)]
+                                  (cb)))
+                              :onDisconnected
+                              (fn [reason]
+                                (when-let [cb (:on-disconnected callbacks)]
+                                  (cb reason)))
+                              :onSignalOut
+                              (fn [js-payload]
+                                (when-let [cb (:on-signal-out callbacks)]
+                                  (cb (js->clj js-payload :keywordize-keys true))))
+                              :onDataReceived
+                              (fn [raw-bytes js-meta]
+                                (when-let [cb (:on-data-received callbacks)]
+                                  (cb raw-bytes js-meta))
+                                (when (exists? js/window)
+                                  (try
+                                    (.dispatchEvent
+                                     js/window
+                                     (js/CustomEvent. "paradise:call-data"
+                                                      #js {:detail #js {:bytes raw-bytes
+                                                                        :meta  js-meta}}))
+                                    (catch :default _ nil))))
+                              :onError
+                              (fn [category err]
+                                (when-let [cb (:on-error callbacks)]
+                                  (cb (keyword category) err)))})]
     (reset! !driver-instance driver)
     (flush-pending-crypto! driver)
     (when-let [connect-fn (aget driver "connect")]
@@ -156,24 +189,93 @@
       (p/resolved nil))
     (p/resolved nil)))
 
+(defn- overconstrained-error? [^js err]
+  (let [err-name (some-> err (aget "name") str)
+        err-msg  (some-> err str)]
+    (or (= err-name "OverconstrainedError")
+        (= err-name "ConstraintNotSatisfiedError")
+        (and err-msg
+             (or (.includes err-msg "OverconstrainedError")
+                 (.includes err-msg "Invalid constraint"))))))
+
+(defn- sink-id-supported? []
+  (try
+    (and (exists? js/document)
+         (fn? (.-setSinkId (.createElement js/document "audio"))))
+    (catch :default _
+      false)))
+
+(defn- device-available? [kind device-id]
+  (cond
+    (and (= kind "audiooutput") (not (sink-id-supported?)))
+    (p/resolved :unsupported)
+
+    (or (empty? device-id) (= device-id "default"))
+    (p/resolved :ok)
+
+    :else
+    (if-let [enum-fn (when (exists? js/navigator)
+                       (some-> (.-mediaDevices js/navigator) .-enumerateDevices))]
+      (-> (.call enum-fn (.-mediaDevices js/navigator))
+          (p/then (fn [devs]
+                    (if (some (fn [^js d]
+                                (and (= (.-kind d) kind)
+                                     (= (.-deviceId d) device-id)))
+                              (array-seq (or devs #js [])))
+                      :ok
+                      :stale)))
+          (p/catch (fn [_] :ok)))
+      (p/resolved :ok))))
+
+(defn switch-device! [kind device-id]
+  (if-let [driver @!driver-instance]
+    (if-let [f (aget driver "switchDevice")]
+      (-> (device-available? kind device-id)
+          (p/then (fn [status]
+                    (case status
+                      :ok          (.call f driver kind device-id)
+                      :unsupported :unsupported-device
+                      :stale       :stale-device))))
+      (p/resolved nil))
+    (p/rejected (js/Error. "No active call driver"))))
+
 (defn set-microphone-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (.setMicrophoneEnabled driver (boolean enabled?))
+    (if-let [f (aget driver "setMicrophoneEnabled")]
+      (-> (.call f driver (boolean enabled?))
+          (p/catch (fn [err]
+                     (if (and enabled? (overconstrained-error? err))
+                       (-> (if-let [sw (aget driver "switchDevice")]
+                             (-> (.call sw driver "audioinput" "default")
+                                 (p/catch (fn [_] nil)))
+                             (p/resolved nil))
+                           (p/then (fn [_]
+                                     (.call f driver true))))
+                       (p/rejected err)))))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-camera-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (.setCameraEnabled driver (boolean enabled?))
+    (if-let [f (aget driver "setCameraEnabled")]
+      (-> (.call f driver (boolean enabled?))
+          (p/catch (fn [err]
+                     (if (and enabled? (overconstrained-error? err))
+                       (-> (if-let [sw (aget driver "switchDevice")]
+                             (-> (.call sw driver "videoinput" "default")
+                                 (p/catch (fn [_] nil)))
+                             (p/resolved nil))
+                           (p/then (fn [_]
+                                     (.call f driver true))))
+                       (p/rejected err)))))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-screen-share-enabled! [enabled?]
   (if-let [driver @!driver-instance]
-    (.setScreenShareEnabled driver (boolean enabled?))
-    (p/rejected (js/Error. "No active call driver"))))
-
-(defn switch-device! [kind device-id]
-  (if-let [driver @!driver-instance]
-    (.switchDevice driver kind device-id)
+    (if-let [f (aget driver "setScreenShareEnabled")]
+      (.call f driver (boolean enabled?))
+      (p/resolved nil))
     (p/rejected (js/Error. "No active call driver"))))
 
 (defn set-noise-suppression-enabled! [enabled?]
@@ -192,9 +294,51 @@
         (set-threshold threshold)))
     threshold))
 
+(defn set-input-volume! [volume]
+  (let [clamped (-> (js/Number (or volume 100)) (max 0) (min 200) js/Math.round)]
+    (reset! !input-volume clamped)
+    (when-let [processor @!audio-processor]
+      (when-let [set-gain (aget processor "setInputGain")]
+        (set-gain (/ clamped 100.0))))
+    clamped))
+
+(defn notify-visibility-changed!
+  "Notifies active audio processors, remote audio/video sinks, and camera capture
+   when the host application transitions between foreground and background."
+  [visible? & [{:keys [video-enabled? connected?]}]]
+  (let [visible? (boolean visible?)]
+    (when-let [processor @!audio-processor]
+      (when-let [set-bg (aget processor "setBackgroundMode")]
+        (set-bg (not visible?)))
+      (when-let [resume-fn (aget processor "resume")]
+        (resume-fn)))
+
+    (when (exists? js/window)
+      (try
+        (.dispatchEvent
+         js/window
+         (js/CustomEvent. "paradise:call-visibility"
+                          #js {:detail #js {:visible visible?}}))
+        (catch :default _ nil)))
+
+    (when (and visible? connected? video-enabled? @!driver-instance)
+      (let [local-cam (some (fn [p]
+                              (when (and (:local? p) (= (:source p) "camera"))
+                                (:video-track p)))
+                            @!participants)
+            dead-cam? (or (nil? local-cam)
+                          (not= (.-readyState ^js local-cam) "live"))]
+        (when dead-cam?
+          (-> (set-camera-enabled! true)
+              (p/catch (fn [err]
+                         (log/debug err "Foreground camera recovery skipped")))))))
+    nil))
+
 (defn disconnect! []
   (if-let [driver @!driver-instance]
-    (.disconnect driver)
+    (if-let [f (aget driver "disconnect")]
+      (.call f driver)
+      (p/resolved nil))
     (p/resolved nil)))
 
 (defn reset-session! []
