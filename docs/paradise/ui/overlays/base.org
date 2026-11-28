@@ -12,6 +12,7 @@ This is where we define our global reusables. They're using multi-methods for ne
    [cljs-workers.mesh :as mesh]
    [cljs.core.async :refer [<! go]]
    [paradise.shared.utils.helpers :refer [copy-to-clipboard! ok-status? resolve-item-label]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.shared.utils.svg :as icons]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
@@ -119,7 +120,7 @@ This allows us to neatly create states and provide a single component to the mai
   [{:keys [id icon label subtitle class-name level close-fn on-click render-children]}]
   (r/with-let [!mobile-open? (r/atom false)]
     (let [lvl         (or level 0)
-          is-mobile?  (<= js/window.innerWidth 768)
+          is-mobile?  (platform/mobile-viewport?)
           sub-stack   @!context-submenus
           desktop-on? (= id (:id (get sub-stack lvl)))
           open?       (if is-mobile? @!mobile-open? desktop-on?)
