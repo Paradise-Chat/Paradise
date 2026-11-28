@@ -1874,11 +1874,18 @@ individual's display name.
    [:span.system-icon icon]
    [:span.system-text text]])
 
-(defn ^:ui date-divider [ts]
-  [:div.timeline-date-separator
-   [:div.separator-line]
-   [:span.separator-text (format-divider-date ts)]
-   [:div.separator-line]])
+(defn ^:ui date-divider [arg]
+  (let [ts       (if (map? arg) (:ts arg) arg)
+        preview? (and (map? arg) (= (:variant arg) :preview))]
+    (if preview?
+      [:div.preview-date-separator
+       [:div.preview-date-line]
+       [:span.preview-date-text (format-divider-date ts)]
+       [:div.preview-date-line]]
+      [:div.timeline-date-separator
+       [:div.separator-line]
+       [:span.separator-text (format-divider-date ts)]
+       [:div.separator-line]])))
 
 
 (defn ^:ui new-message []
