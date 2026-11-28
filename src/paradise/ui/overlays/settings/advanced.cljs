@@ -2,39 +2,135 @@
   (:require
    [paradise.ui.overlays.settings.plugins :as plugins]
    [paradise.ui.overlays.settings.registry :as registry]
+   [paradise.ui.overlays.tray :as tray]
    [re-frame.core :as re-frame]
    [reagent.core :as r]))
 
 (defn ^:ui advanced-preferences-view []
-  (let [tr           @(re-frame/subscribe [:i18n/tr])
-        policy       @(re-frame/subscribe [:settings/media-preview-policy])
-        previews-on? (= policy :on)]
-    [:div.settings-section
-     [:h3.settings-subheading
-      (tr [:settings.advanced/prefs-subheading])]
+  (r/with-let [_ (re-frame/dispatch [:search/refresh-index-status])]
+    (let [tr              @(re-frame/subscribe [:i18n/tr])
+          policy          @(re-frame/subscribe [:settings/media-preview-policy])
+          previews-on?    (= policy :on)
+          submit-enter?   @(re-frame/subscribe [:settings/submit-on-enter?])
+          close-to-tray?  @(re-frame/subscribe [:settings/close-to-tray?])
+          tray-supported? (tray/tray-supported?)
+          crawler-on?     @(re-frame/subscribe [:settings/encrypted-search-crawler])
+          idx-status      @(re-frame/subscribe [:search/index-status])
+          supported?      (:supported? idx-status)
+          idx-count       (:indexed-events idx-status 0)
+          rooms-done      (:rooms-done idx-status 0)
+          rooms-total     (:rooms-total idx-status 0)]
+      [:<>
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr [:settings.advanced/prefs-subheading])]
+        [:div.settings-hub-group-card
+         [:div.settings-card-row.is-toggle
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/submit-on-enter-title])]
+           [:div.settings-row-description
+            (tr [:settings.advanced/submit-on-enter-description])]]
+          [:label.settings-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   (boolean submit-enter?)
+             :on-change #(re-frame/dispatch
+                          [:settings/set-submit-on-enter
+                           (.. % -target -checked)])}]
+           [:div.settings-toggle-track
+            [:div.settings-toggle-knob]]]]
 
-     [:div.settings-row.is-toggle
-      [:div.settings-row-text
-       [:div.settings-row-title
-        (tr [:settings.advanced/link-previews-title])]
-       [:div.settings-row-description
-        (tr [:settings.advanced/link-previews-description])]]
-      [:label.settings-toggle
-       [:input
-        {:type "checkbox"
-         :checked previews-on?
-         :on-change #(re-frame/dispatch
-                      [:settings/update-media-preview-policy
-                       (if (.. % -target -checked)
-                         :on
-                         :off)])}]
-       [:div.settings-toggle-track
-        [:div.settings-toggle-knob]]]]]))
+         [:div.settings-card-row.is-toggle
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/link-previews-title])]
+           [:div.settings-row-description
+            (tr [:settings.advanced/link-previews-description])]]
+          [:label.settings-toggle
+           [:input
+            {:type      "checkbox"
+             :checked   previews-on?
+             :on-change #(re-frame/dispatch
+                          [:settings/update-media-preview-policy
+                           (if (.. % -target -checked)
+                             :on
+                             :off)])}]
+           [:div.settings-toggle-track
+            [:div.settings-toggle-knob]]]]]]
+
+       (when tray-supported?
+         [:div.settings-hub-group
+          [:div.settings-hub-group-label
+           (tr [:settings.advanced/desktop-subheading])]
+          [:div.settings-hub-group-card
+           [:div.settings-card-row.is-toggle
+            [:div.settings-row-text
+             [:div.settings-row-title
+              (tr [:settings.advanced/close-to-tray-title])]
+             [:div.settings-row-description
+              (tr [:settings.advanced/close-to-tray-description])]]
+            [:label.settings-toggle
+             [:input
+              {:type      "checkbox"
+               :checked   (boolean close-to-tray?)
+               :on-change #(re-frame/dispatch
+                            [:settings/set-close-to-tray
+                             (.. % -target -checked)])}]
+             [:div.settings-toggle-track
+              [:div.settings-toggle-knob]]]]]])
+
+       [:div.settings-hub-group
+        [:div.settings-hub-group-label
+         (tr [:settings.advanced/search-subheading])]
+        [:div.settings-hub-group-card
+         (when supported?
+           [:div.settings-card-row.is-toggle
+            [:div.settings-row-text
+             [:div.settings-row-title
+              (tr [:settings.advanced/search-crawler-title])]
+             [:div.settings-row-description
+              (tr [:settings.advanced/search-crawler-description])]]
+            [:label.settings-toggle
+             [:input
+              {:type      "checkbox"
+               :checked   (boolean crawler-on?)
+               :on-change #(re-frame/dispatch
+                            [:search/set-crawler-enabled (.. % -target -checked)])}]
+             [:div.settings-toggle-track
+              [:div.settings-toggle-knob]]]])
+
+         [:div.settings-card-row
+          [:div.settings-row-text
+           [:div.settings-row-title
+            (tr [:settings.advanced/search-status-title])]
+           [:div.settings-row-description
+            (cond
+              (not supported?)
+              (tr [:settings.advanced/search-status-unsupported])
+
+              (pos? rooms-total)
+              (tr [:settings.advanced/search-status-active]
+                  [idx-count rooms-done rooms-total])
+
+              :else
+              (tr [:settings.advanced/search-status-idle]
+                  [idx-count]))]]
+          (when supported?
+            [:div.settings-actions
+             [:button.settings-button.secondary
+              {:type     "button"
+               :on-click #(re-frame/dispatch [:search/clear-index true])}
+              (tr [:settings.advanced/search-rebuild])]
+             [:button.settings-button.destructive
+              {:type     "button"
+               :on-click #(re-frame/dispatch [:search/clear-index false])}
+              (tr [:settings.advanced/search-clear])]])]]]])))
 
 (defn ^:ui advanced-plugins-view []
   (let [tr @(re-frame/subscribe [:i18n/tr])]
     [:<>
-     [:p.settings-description
+     [:p.settings-subview-lead
       (tr [:settings.advanced/description])]
      [plugins/plugins-installer]]))
 
@@ -42,33 +138,30 @@
   [registry/registries-and-engines-panel])
 
 (defn ^:ui advanced-tab []
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
-    (r/with-let [!active-sub-tab (r/atom :preferences)]
+  (r/with-let [!active-sub-tab (r/atom :preferences)]
+    (let [tr  @(re-frame/subscribe [:i18n/tr])
+          sub @!active-sub-tab]
       [:div.settings-tab-content
-       [:div.settings-page-header
-        [:h2.settings-heading
-         (tr [:settings.advanced/title])]]
-
-       [:div.settings-actions.settings-subtabs
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :preferences)
-                   "is-active")
+       [:div.settings-segmented
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :preferences) "is-active")
           :on-click #(reset! !active-sub-tab :preferences)}
          (tr [:settings.advanced/section-prefs])]
 
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :plugins)
-                   "is-active")
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :plugins) "is-active")
           :on-click #(reset! !active-sub-tab :plugins)}
          (tr [:settings.plugins/section-title])]
 
-        [:button.settings-button.settings-subtab
-         {:class (when (= @!active-sub-tab :registries)
-                   "is-active")
+        [:button.settings-segmented-btn
+         {:type     "button"
+          :class    (when (= sub :registries) "is-active")
           :on-click #(reset! !active-sub-tab :registries)}
          (tr [:settings.registry/section-title])]]
 
-       (case @!active-sub-tab
+       (case sub
          :preferences [advanced-preferences-view]
          :plugins     [advanced-plugins-view]
          :registries  [advanced-registries-view])])))
