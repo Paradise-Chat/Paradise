@@ -1,0 +1,159 @@
+(ns ^:virtualizer/skip paradise.shared.client.capacitor-proxy
+  (:require
+   ["@capacitor/core" :refer [Capacitor CapacitorHttp registerPlugin]]
+   [clojure.string :as str]
+   [goog.object :as gobj]
+   [net :as net]
+   [paradise.shared.net.auth :refer [valid-http-url-str]]
+   [paradise.shared.utils.encoding :refer [utf8->base64]]
+   [paradise.shared.utils.platform :as platform]
+   [promesa.core :as p]
+   [re-frame.core :as re-frame]))
+
+(defonce ^:private paradise-proxy-plugin
+  (registerPlugin "ParadiseProxy"))
+
+(defn- call-cap-plugin [plugin method-name & [arg]]
+  (let [fn-ref (when plugin (aget plugin method-name))]
+    (if (fn? fn-ref)
+      (if (some? arg)
+        (.call fn-ref plugin arg)
+        (.call fn-ref plugin))
+      (p/rejected (js/Error. (str "Missing plugin method: " method-name))))))
+
+(defn- native-paradise-proxy-available? []
+  (try
+    (boolean (.isPluginAvailable Capacitor "ParadiseProxy"))
+    (catch :default _ false)))
+
+(defn- call-or-fallback [method-name arg fallback-fn]
+  (if (native-paradise-proxy-available?)
+    (call-cap-plugin paradise-proxy-plugin method-name arg)
+    (fallback-fn)))
+
+(defn- fallback-capacitor-http-request [js-opts]
+  (let [url      (gobj/get js-opts "url")
+        method   (or (gobj/get js-opts "method") "GET")
+        headers  (or (gobj/get js-opts "headers") #js {})
+        body     (gobj/get js-opts "body")
+        req-opts (cond-> {:url              url
+                          :method           method
+                          :headers          (js->clj headers)
+                          :responseType     "blob"
+                          :disableRedirects true}
+                   (some? body) (assoc :data body))]
+    (p/let [res       (.request CapacitorHttp (clj->js req-opts))
+            status    (or (gobj/get res "status") 200)
+            resp-hdrs (or (gobj/get res "headers") #js {})
+            raw-data  (gobj/get res "data")
+            b64-data  (cond
+                        (nil? raw-data)
+                        ""
+
+                        (string? raw-data)
+                        (let [clean (str/replace raw-data #"\s+" "")]
+                          (if (re-matches #"^[A-Za-z0-9+/]*={0,2}$" clean)
+                            clean
+                            (utf8->base64 raw-data)))
+
+                        :else
+                        (utf8->base64 (js/JSON.stringify raw-data)))]
+      #js {"ok"      (and (>= status 200) (< status 300))
+           "status"  status
+           "url"     (or (gobj/get res "url") url)
+           "headers" resp-hdrs
+           "data"    b64-data})))
+
+(defn- build-capacitor-proxy-bridge []
+  (let [cap-browser (some-> (gobj/get js/window "Capacitor")
+                            (gobj/get "Plugins")
+                            (gobj/get "Browser"))
+        can-open?   (and cap-browser (fn? (gobj/get cap-browser "open")))
+        can-close?  (and cap-browser (fn? (gobj/get cap-browser "close")))
+        prep-miss   (fn [opts]
+                      (p/resolved #js {"ok"  false
+                                       "url" (or (some-> opts (gobj/get "url")) "")}))
+        clear-ok    (fn [] (p/resolved #js {"ok" true}))
+        bridge      #js {}]
+    (doto bridge
+      (gobj/set "provider" "capacitor")
+      (gobj/set "version" "1.0")
+      (gobj/set "isSupported" (fn [] (p/resolved true)))
+      (gobj/set "request"
+                (fn [opts]
+                  (call-or-fallback "request" opts #(fallback-capacitor-http-request opts))))
+      (gobj/set "prepareStream"
+                (fn [opts]
+                  (call-or-fallback "prepareStream" opts #(prep-miss opts))))
+      (gobj/set "clearStream"
+                (fn [url-or-host]
+                  (call-or-fallback "clearStream"
+                                    #js {"urlOrHost" (or url-or-host "")}
+                                    clear-ok)))
+      (gobj/set "prepareFrame"
+                (fn [opts]
+                  (call-or-fallback "prepareFrame" opts #(prep-miss opts))))
+      (gobj/set "clearFrame"
+                (fn [url-or-host]
+                  (call-or-fallback "clearFrame"
+                                    #js {"urlOrHost" (or url-or-host "")}
+                                    clear-ok)))
+      (gobj/set "prepareUpload"
+                (fn [opts]
+                  (call-or-fallback "prepareUpload" opts #(prep-miss opts))))
+      (gobj/set "openAuthWindow"
+                (fn [opts]
+                  (if-let [safe-url (valid-http-url-str (some-> opts (gobj/get "url")))]
+                    (call-or-fallback
+                     "openAuthWindow"
+                     (js/Object.assign #js {} opts #js {"url" safe-url})
+                     (fn []
+                       (if can-open?
+                         (-> (.open cap-browser #js {"url" safe-url})
+                             (p/then (fn [_] #js {"ok" true "mode" "capacitor-browser"})))
+                         (p/resolved #js {"ok" false}))))
+                    (p/resolved #js {"ok" false "error" "Invalid auth URL"}))))
+      (gobj/set "closeAuthWindow"
+                (fn []
+                  (call-or-fallback
+                   "closeAuthWindow"
+                   #js {}
+                   (fn []
+                     (if can-close?
+                       (-> (.close cap-browser)
+                           (p/then (fn [_] #js {"ok" true}))
+                           (p/catch (fn [_] #js {"ok" false})))
+                       (p/resolved #js {"ok" true}))))))
+      (gobj/set "openExternal"
+                (fn [url]
+                  (if-let [safe-url (valid-http-url-str (str (or url "")))]
+                    (call-or-fallback
+                     "openExternal"
+                     #js {"url" safe-url}
+                     (fn []
+                       (if can-open?
+                         (-> (.open cap-browser #js {"url" safe-url})
+                             (p/then (fn [_] #js {"ok" true})))
+                         (p/resolved #js {"ok" false}))))
+                    (p/resolved #js {"ok" false "error" "Invalid external URL"})))))
+    bridge))
+
+(defn mount-capacitor-proxy!
+  "Mounts the Capacitor host proxy bridge on `window.paradiseProxy` on iOS/Android."
+  []
+  (when (and (exists? js/window)
+             (not (gobj/get js/window "paradiseProxy"))
+             (platform/capacitor-mobile?))
+    (net/mount-host-proxy! (build-capacitor-proxy-bridge))))
+
+(defonce ^:private !proxy-listener-bound? (atom false))
+
+(defn init!
+  "Mounts the Capacitor proxy (when on mobile) and wires proxy readiness into re-frame."
+  []
+  (mount-capacitor-proxy!)
+  (when (and (exists? js/window)
+             (compare-and-set! !proxy-listener-bound? false true))
+    (net/on-proxy-ready!
+     (fn [{:keys [provider]}]
+       (re-frame/dispatch [:auth/set-proxy-provider provider])))))
