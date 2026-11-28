@@ -1,0 +1,1787 @@
+(ns ^:virtualizer/skip paradise.engine.spec
+  (:require #?(:clj [clojure.spec.alpha :as s]
+               :cljs [cljs.spec.alpha :as s])
+            [clojure.string :as str]))
+
+(defn kw-enum
+  "Builds a spec predicate that accepts either a keyword or string whose
+  keywordized value is a member of `allowed`."
+  [allowed]
+  (fn [x]
+    (cond
+      (keyword? x) (contains? allowed x)
+      (string? x)  (contains? allowed (keyword x))
+      :else        false)))
+
+(defn non-blank-string? [x]
+  (and (string? x) (not (str/blank? x))))
+
+(defn normalize-status
+  "Normalizes a status value (keyword or string) to a keyword, or nil."
+  [status]
+  (cond
+    (keyword? status) status
+    (string? status)  (keyword status)
+    :else             nil))
+
+(defn ok-status?
+  "Returns true when a response map carries a `:success` / `\"success\"` status."
+  [res]
+  (= :success (normalize-status (:status res))))
+
+(s/def ::non-blank-string non-blank-string?)
+(s/def ::id (s/or :string non-blank-string? :keyword keyword?))
+(s/def ::nullable-string (s/nilable string?))
+(s/def ::timestamp-ms (s/and number? #(>= % 0)))
+(s/def ::any some?)
+
+(def valid-statuses
+  #{:success :error :empty :cancelled :redirect :direct :unencrypted :ignored :noop :unsupported})
+
+(s/def ::status (kw-enum valid-statuses))
+(s/def ::msg (s/nilable string?))
+
+(s/def ::presence-status
+  (kw-enum #{:online :away :idle :dnd :offline :invisible}))
+
+(s/def ::recovery-state
+  (kw-enum #{:enabled :disabled :incomplete :unknown :verified}))
+
+(s/def ::media-preview-policy
+  (kw-enum #{:on :off :private}))
+
+(s/def ::timeline-mode
+  (kw-enum #{:live :focused :pins :gallery}))
+
+(s/def ::pagination-direction
+  (kw-enum #{:back :forward}))
+
+(s/def ::room-filter
+  (kw-enum #{:all :people :unread :favourite :invites :other}))
+
+(s/def ::room-type
+  (kw-enum #{:chat :forum :voice}))
+
+(s/def ::permission-model
+  (kw-enum #{:power-levels :role-bitflags :capability-space}))
+
+(s/def ::membership
+  (fn [x]
+    (let [s (cond (keyword? x) (name x) (string? x) x :else nil)]
+      (boolean
+       (and s
+            (contains? #{"joined" "invited" "left" "knocked" "banned" "unknown"
+                         "join" "invite" "leave" "knock" "ban"}
+                       (str/lower-case s)))))))
+
+(def all-capabilities
+  "Canonical set of opt-in engine capabilities."
+  #{:spaces
+    :threads
+    :reactions
+    :pins
+    :redaction
+    :attachments
+    :drafts
+    :polls
+    :voice-messages
+    :emotes
+    :roles-permissions
+    :search
+    :presence
+    :typing
+    :url-previews
+    :e2ee-recovery
+    :push
+    :calling})
+
+(s/def ::capability (kw-enum all-capabilities))
+(s/def ::capabilities (s/coll-of ::capability))
+
+(s/def :manifest/id keyword?)
+(s/def :manifest/name non-blank-string?)
+(s/def :manifest/author non-blank-string?)
+(s/def :manifest/description string?)
+(s/def :manifest/module-id keyword?)
+(s/def :manifest/version non-blank-string?)
+(s/def :manifest/deps-sym symbol?)
+(s/def :manifest/config-key non-blank-string?)
+(s/def :manifest/path non-blank-string?)
+(s/def :manifest/i18n non-blank-string?)
+(s/def :manifest/commit string?)
+(s/def :manifest/hash string?)
+
+(s/def :login-field/id keyword?)
+(s/def :login-field/label non-blank-string?)
+(s/def :login-field/type (kw-enum #{:text :password :action :url :email :select :checkbox :hidden}))
+(s/def :login-field/default (s/nilable string?))
+(s/def :login-field/action-id keyword?)
+(s/def :login-field/placeholder string?)
+(s/def :login-field/hidden? boolean?)
+(s/def :login-field/platform (kw-enum #{:desktop :web :mobile :electron :ios :android}))
+(s/def :login-field/platforms (s/coll-of :login-field/platform))
+
+(s/def ::login-field
+  (s/and (s/keys :req-un [:login-field/id :login-field/label :login-field/type]
+                 :opt-un [:login-field/default
+                          :login-field/action-id
+                          :login-field/placeholder
+                          :login-field/hidden?
+                          :login-field/platforms])
+         (fn [{:keys [type action-id]}]
+           (if (= :action (normalize-status type))
+             (keyword? action-id)
+             true))))
+
+(s/def :auth-challenge/kind (kw-enum #{:qr :code :redirect :confirm}))
+(s/def :auth-challenge/title (s/nilable string?))
+(s/def :auth-challenge/message (s/nilable string?))
+(s/def :auth-challenge/qr-data (s/nilable string?))
+(s/def :auth-challenge/qr-bytes (s/nilable string?))
+(s/def :auth-challenge/qr-ecc (kw-enum #{:L :M :Q :H}))
+(s/def :auth-challenge/qr-image (s/nilable string?))
+(s/def :auth-challenge/code (s/nilable string?))
+(s/def :auth-challenge/url (s/nilable string?))
+(s/def :auth-challenge/expires-at (s/nilable ::epoch-ms))
+(s/def :auth-challenge/action-id (s/nilable keyword?))
+(s/def :auth-challenge/state (kw-enum #{:waiting :scanned :confirming :expired}))
+(s/def :auth-challenge/account-name (s/nilable string?))
+(s/def :auth-challenge/avatar-url (s/nilable string?))
+(s/def :auth-challenge-input/label (s/nilable string?))
+(s/def :auth-challenge-input/placeholder (s/nilable string?))
+(s/def :auth-challenge-input/max-length (s/nilable pos-int?))
+(s/def :auth-challenge-input/input-mode (s/nilable string?))
+(s/def :auth-challenge-input/submit-label (s/nilable string?))
+(s/def :auth-challenge/input
+  (s/nilable (s/keys :opt-un [:auth-challenge-input/label
+                              :auth-challenge-input/placeholder
+                              :auth-challenge-input/max-length
+                              :auth-challenge-input/input-mode
+                              :auth-challenge-input/submit-label])))
+
+(s/def ::auth-challenge
+  (s/keys :opt-un [:auth-challenge/kind
+                   :auth-challenge/title
+                   :auth-challenge/message
+                   :auth-challenge/qr-data
+                   :auth-challenge/qr-bytes
+                   :auth-challenge/qr-ecc
+                   :auth-challenge/qr-image
+                   :auth-challenge/code
+                   :auth-challenge/url
+                   :auth-challenge/expires-at
+                   :auth-challenge/action-id
+                   :auth-challenge/state
+                   :auth-challenge/account-name
+                   :auth-challenge/avatar-url
+                   :auth-challenge/input]))
+
+(s/def :login-register/prompt (s/nilable string?))
+(s/def :login-register/label (s/nilable string?))
+(s/def :login-register/action-id (s/nilable keyword?))
+(s/def :login-register/url (s/nilable string?))
+(s/def :login-register/platforms (s/coll-of :login-field/platform))
+(s/def :login/register
+  (s/nilable (s/keys :opt-un [:login-register/prompt
+                              :login-register/label
+                              :login-register/action-id
+                              :login-register/url
+                              :login-register/platforms])))
+
+(s/def :login/requires-proxy boolean?)
+(s/def :login/fields (s/coll-of ::login-field :kind vector? :min-count 1))
+
+(s/def ::login-config
+  (s/keys :req-un [:login/fields]
+          :opt-un [:login/requires-proxy
+                   :login/register]))
+
+(s/def :notifications/notification-script non-blank-string?)
+(s/def ::notifications-config
+  (s/keys :req-un [:notifications/notification-script]))
+
+(s/def :calling/driver-script non-blank-string?)
+(s/def :calling/encoder-script (s/nilable string?))
+(s/def ::calling-config
+  (s/keys :req-un [:calling/driver-script]
+          :opt-un [:calling/encoder-script]))
+
+(s/def :engine-config/login ::login-config)
+(s/def :engine-config/notifications ::notifications-config)
+(s/def :engine-config/calling ::calling-config)
+(s/def :engine-config/capabilities ::capabilities)
+
+(s/def ::engine-config
+  (s/keys :opt-un [:engine-config/login
+                   :engine-config/notifications
+                   :engine-config/calling
+                   :engine-config/capabilities]))
+
+(s/def :copy-file/from non-blank-string?)
+(s/def :copy-file/to non-blank-string?)
+(s/def ::copy-file
+  (s/keys :req-un [:copy-file/from :copy-file/to]))
+(s/def :manifest/copy-files (s/coll-of ::copy-file))
+
+(s/def :shadow-module/entries (s/coll-of symbol? :kind vector? :min-count 1))
+(s/def :shadow-module/web-worker boolean?)
+(s/def :shadow-module/depends-on (s/coll-of keyword?))
+(s/def :shadow-module/exports (s/map-of symbol? symbol?))
+
+(s/def ::shadow-module
+  (s/keys :req-un [:shadow-module/entries :shadow-module/web-worker :shadow-module/depends-on]
+          :opt-un [:shadow-module/exports]))
+
+(s/def ::manifest
+  (s/keys :req-un [:manifest/id
+                   :manifest/name
+                   :manifest/module-id
+                   :manifest/version
+                   :manifest/deps-sym
+                   :manifest/config-key
+                   :manifest/path
+                   :manifest/shadow-module
+                   :manifest/engine-config]
+          :opt-un [:manifest/author
+                   :manifest/description
+                   :manifest/i18n
+                   :manifest/copy-files
+                   :manifest/commit
+                   :manifest/hash
+                   ::capabilities]))
+
+(s/def :manifest/shadow-module ::shadow-module)
+(s/def :manifest/engine-config ::engine-config)
+
+(s/def :session/userId (s/nilable string?))
+(s/def :session/user-id (s/nilable string?))
+(s/def :session/deviceId (s/nilable string?))
+(s/def :session/accessToken (s/nilable string?))
+(s/def :session/token (s/nilable string?))
+(s/def :session/server-url (s/nilable string?))
+(s/def :session/base-url (s/nilable string?))
+(s/def :session/homeserverUrl (s/nilable string?))
+(s/def :session/auth-media? boolean?)
+(s/def :session/media-paths (s/coll-of string?))
+(s/def :session/thumbnail-template (s/nilable string?))
+
+(s/def ::session-data
+  (s/keys :opt-un [:session/userId
+                   :session/user-id
+                   :session/deviceId
+                   :session/accessToken
+                   :session/token
+                   :session/server-url
+                   :session/base-url
+                   :session/homeserverUrl
+                   :session/auth-media?
+                   :session/media-paths
+                   :session/thumbnail-template]))
+
+(s/def ::account-summary
+  (s/and map?
+         #(or (string? (:userId %)) (string? (:user-id %)))))
+
+(s/def :room/id non-blank-string?)
+(s/def :room/name (s/nilable string?))
+(s/def :room/avatar (s/nilable string?))
+(s/def :room/avatar-url (s/nilable string?))
+(s/def :room/isSpace boolean?)
+(s/def :room/is-space? boolean?)
+(s/def :room/isDirect boolean?)
+(s/def :room/isGroupDm boolean?)
+(s/def :room/isFavourite boolean?)
+(s/def :room/isMarkedUnread boolean?)
+(s/def :room/isBold boolean?)
+(s/def :room/hasRoomCall boolean?)
+(s/def :room/unreadMessagesCount integer?)
+(s/def :room/unreadMentionsCount integer?)
+(s/def :room/unreadNotificationsCount integer?)
+(s/def :room/pinnedEventIds (s/nilable (s/coll-of string?)))
+(s/def :room/activeRoomCallParticipants (s/nilable (s/coll-of any?)))
+(s/def :room/first-parent-id (s/nilable string?))
+(s/def :room/lastMessageTs (s/nilable ::timestamp-ms))
+(s/def :room/membership (s/nilable ::membership))
+
+(s/def ::room-summary
+  (s/keys :req-un [:room/id]
+          :opt-un [:room/name
+                   :room/avatar
+                   :room/avatar-url
+                   :room/isSpace
+                   :room/is-space?
+                   :room/isDirect
+                   :room/isGroupDm
+                   :room/isFavourite
+                   :room/isMarkedUnread
+                   :room/isBold
+                   :room/hasRoomCall
+                   :room/unreadMessagesCount
+                   :room/unreadMentionsCount
+                   :room/unreadNotificationsCount
+                   :room/pinnedEventIds
+                   :room/activeRoomCallParticipants
+                   :room/first-parent-id
+                   :room/lastMessageTs
+                   :room/membership]))
+
+(s/def ::space-summary
+  (s/keys :req-un [:room/id]
+          :opt-un [:room/name :room/avatar :room/avatar-url :room/isSpace :room/is-space?]))
+
+(s/def :space-unread/unread? boolean?)
+(s/def :space-unread/highlight? boolean?)
+(s/def :space-unread/notif-count (s/and integer? #(>= % 0)))
+(s/def :space-unread/mentions (s/and integer? #(>= % 0)))
+(s/def ::space-unread-stats
+  (s/keys :req-un [:space-unread/unread?]
+          :opt-un [:space-unread/highlight?
+                   :space-unread/notif-count
+                   :space-unread/mentions]))
+
+(s/def :dm-pop/id non-blank-string?)
+(s/def :dm-pop/name (s/nilable string?))
+(s/def :dm-pop/avatar-url (s/nilable string?))
+(s/def :dm-pop/is-dm? boolean?)
+(s/def :dm-pop/is-group-dm? boolean?)
+(s/def :dm-pop/recipient-avatars (s/nilable (s/coll-of map?)))
+(s/def :dm-pop/unread? boolean?)
+(s/def :dm-pop/highlight? boolean?)
+(s/def :dm-pop/mentions (s/and integer? #(>= % 0)))
+(s/def :dm-pop/msg-count (s/and integer? #(>= % 0)))
+(s/def ::dm-pop-item
+  (s/keys :req-un [:dm-pop/id]
+          :opt-un [:dm-pop/name
+                   :dm-pop/avatar-url
+                   :dm-pop/is-dm?
+                   :dm-pop/is-group-dm?
+                   :dm-pop/recipient-avatars
+                   :dm-pop/unread?
+                   :dm-pop/highlight?
+                   :dm-pop/mentions
+                   :dm-pop/msg-count]))
+
+(s/def :space-layout-entry/type (kw-enum #{:space :group}))
+(s/def :space-layout-entry/id non-blank-string?)
+(s/def ::space-layout-entry
+  (s/keys :req-un [:space-layout-entry/type :space-layout-entry/id]))
+
+(s/def :space-layout/order (s/coll-of ::space-layout-entry))
+(s/def :space-layout/groups (s/or :map map? :coll (s/coll-of map?)))
+(s/def ::space-layout
+  (s/nilable (s/keys :opt-un [:space-layout/order :space-layout/groups])))
+
+(s/def :room-preview/is-call? boolean?)
+(s/def :room-preview/is-forum? boolean?)
+(s/def ::room-preview
+  (s/keys :opt-un [:room-preview/is-call?
+                   :room-preview/is-forum?
+                   :room/name
+                   :room/avatar-url
+                   :room/membership]))
+
+(s/def :timeline/id non-blank-string?)
+(s/def :timeline/internal-id (s/nilable string?))
+(s/def :timeline/room-id (s/nilable string?))
+(s/def :timeline/sender-id (s/nilable string?))
+(s/def :timeline/sender-name (s/nilable string?))
+(s/def :timeline/sender-avatar (s/nilable string?))
+(s/def :timeline/ts (s/nilable ::timestamp-ms))
+(s/def :timeline/is-own? boolean?)
+(s/def :timeline/is-editable? boolean?)
+(s/def :timeline/content-tag (s/nilable string?))
+(s/def :timeline/tag (s/nilable string?))
+(s/def :timeline/content (s/nilable map?))
+(s/def :timeline/reactions (s/nilable (s/coll-of vector?)))
+(s/def :timeline/read-by (s/nilable (s/coll-of string?)))
+(s/def :timeline/is-local? (s/nilable boolean?))
+(s/def :timeline/send-state (s/nilable (kw-enum #{:pending :failed :sent})))
+(s/def :timeline/send-error (s/nilable string?))
+(s/def :timeline/retry-payload (s/nilable map?))
+
+(s/def :thread/thread-id non-blank-string?)
+(s/def :thread/room-id (s/nilable string?))
+(s/def :thread/root-event-id (s/nilable string?))
+(s/def :thread/title (s/nilable string?))
+(s/def :thread/reply-count (s/nilable integer?))
+(s/def :thread/latest-sender (s/nilable string?))
+(s/def :thread/latest-body (s/nilable string?))
+(s/def :thread/latest-ts (s/nilable ::timestamp-ms))
+(s/def :thread/archived? boolean?)
+
+(s/def ::thread-summary
+  (s/keys :req-un [:thread/thread-id]
+          :opt-un [:thread/room-id
+                   :thread/root-event-id
+                   :thread/title
+                   :thread/reply-count
+                   :thread/latest-sender
+                   :thread/latest-body
+                   :thread/latest-ts
+                   :thread/archived?]))
+
+(s/def :timeline/thread-summary (s/nilable ::thread-summary))
+
+(s/def ::virtual-timeline-item
+  (s/keys :req-un [:timeline/tag]
+          :opt-un [:timeline/id :timeline/ts]))
+
+(s/def ::event-timeline-item
+  (s/keys :opt-un [:timeline/id
+                   :timeline/internal-id
+                   :timeline/room-id
+                   :timeline/sender-id
+                   :timeline/sender-name
+                   :timeline/sender-avatar
+                   :timeline/ts
+                   :timeline/is-own?
+                   :timeline/is-editable?
+                   :timeline/content-tag
+                   :timeline/content
+                   :timeline/reactions
+                   :timeline/read-by
+                   :timeline/is-local?
+                   :timeline/send-state
+                   :timeline/send-error
+                   :timeline/retry-payload
+                   :timeline/thread-summary]))
+
+(s/def ::timeline-item
+  (s/and map?
+         (fn [item]
+           (if (= :virtual (normalize-status (:type item)))
+             (s/valid? ::virtual-timeline-item item)
+             (s/valid? ::event-timeline-item item)))))
+
+(s/def ::timeline-batch
+  (s/keys :req-un [:timeline/room-id ::events ::source]))
+
+(s/def ::events (s/coll-of ::timeline-item))
+(s/def ::source ::timeline-mode)
+
+(s/def :member/user-id non-blank-string?)
+(s/def :member/display-name (s/nilable string?))
+(s/def :member/sort-name (s/nilable string?))
+(s/def :member/avatar-url (s/nilable string?))
+(s/def :member/avatar-mxc (s/nilable string?))
+(s/def :member/membership (s/nilable ::membership))
+(s/def :member/power-level (s/nilable number?))
+(s/def :member/role-ids (s/nilable (s/coll-of string?)))
+(s/def :member/roles (s/nilable (s/coll-of map?)))
+(s/def :member/is-owner? boolean?)
+(s/def :member/presence (s/nilable ::presence-status))
+
+(s/def ::member
+  (s/keys :req-un [:member/user-id]
+          :opt-un [:member/display-name
+                   :member/sort-name
+                   :member/avatar-url
+                   :member/avatar-mxc
+                   :member/membership
+                   :member/power-level
+                   :member/role-ids
+                   :member/roles
+                   :member/is-owner?
+                   :member/presence]))
+
+(s/def :ban/reason (s/nilable string?))
+(s/def ::ban-entry
+  (s/keys :req-un [:member/user-id]
+          :opt-un [:member/display-name :member/avatar-url :ban/reason]))
+
+(s/def :profile-field/key keyword?)
+(s/def :profile-field/type (kw-enum #{:text :textarea :url :email}))
+(s/def :profile-field/max-length pos-int?)
+(s/def ::profile-field
+  (s/keys :req-un [:profile-field/key :profile-field/type]
+          :opt-un [:profile-field/max-length]))
+
+(s/def :profile-schema/fields (s/coll-of ::profile-field))
+(s/def :profile-schema/live-url-preview? boolean?)
+(s/def :profile-schema/display-name-key keyword?)
+(s/def ::profile-schema
+  (s/keys :req-un [:profile-schema/fields]
+          :opt-un [:profile-schema/live-url-preview? :profile-schema/display-name-key]))
+
+(s/def :profile/username (s/nilable string?))
+(s/def :profile/handle (s/nilable string?))
+(s/def :profile/sub-id (s/nilable string?))
+(s/def :profile/bio (s/nilable string?))
+(s/def :profile/pronouns (s/nilable string?))
+(s/def :profile/banner-url (s/nilable string?))
+(s/def :profile/profile-schema (s/nilable ::profile-schema))
+(s/def :profile/profile-schema-edn (s/nilable string?))
+
+(s/def ::profile
+  (s/keys :opt-un [:member/user-id
+                   :member/display-name
+                   :member/avatar-url
+                   :member/presence
+                   :profile/username
+                   :profile/handle
+                   :profile/sub-id
+                   :profile/bio
+                   :profile/pronouns
+                   :profile/banner-url
+                   :profile/profile-schema
+                   :profile/profile-schema-edn]))
+
+(s/def :tab/id (kw-enum #{:overview :notifications :roles :permissions :emotes :members}))
+(s/def ::room-settings-tab
+  (s/keys :req-un [:tab/id]))
+
+(s/def ::notification-mode (kw-enum #{:default :all :mentions :mute}))
+
+(s/def :notif-toggle/id (s/or :kw keyword? :str non-blank-string?))
+(s/def :notif-toggle/label-key keyword?)
+(s/def :notif-toggle/label string?)
+(s/def :notif-toggle/desc-key keyword?)
+(s/def :notif-toggle/desc string?)
+(s/def :notif-toggle/value boolean?)
+(s/def :notif-toggle/disabled? boolean?)
+(s/def ::notification-toggle
+  (s/keys :req-un [:notif-toggle/id :notif-toggle/value]
+          :opt-un [:notif-toggle/label-key
+                   :notif-toggle/label
+                   :notif-toggle/desc-key
+                   :notif-toggle/desc
+                   :notif-toggle/disabled?]))
+
+(s/def :notif/supported? boolean?)
+(s/def :notif/mode ::notification-mode)
+(s/def :notif/default-mode (s/nilable ::notification-mode))
+(s/def :notif/modes (s/coll-of ::notification-mode))
+(s/def :notif/toggles (s/coll-of ::notification-toggle))
+(s/def :notif/is-space? boolean?)
+(s/def :notif/can-edit? boolean?)
+(s/def :notif/note-key (s/nilable keyword?))
+(s/def :notif/note (s/nilable string?))
+(s/def ::room-notification-settings
+  (s/keys :req-un [:notif/supported? :notif/mode :notif/modes]
+          :opt-un [:notif/default-mode
+                   :notif/toggles
+                   :notif/is-space?
+                   :notif/can-edit?
+                   :notif/note-key
+                   :notif/note]))
+
+(s/def :room-config/tabs (s/coll-of ::room-settings-tab))
+(s/def :room-config/can-edit? boolean?)
+(s/def :room-config/can-edit-avatar? boolean?)
+(s/def :room-config/can-edit-topic? boolean?)
+(s/def :room-config/can-manage-emotes? boolean?)
+(s/def :room-config/topic (s/nilable string?))
+
+(s/def ::room-config
+  (s/keys :req-un [:room/id]
+          :opt-un [:room/name
+                   :room-config/topic
+                   :room/avatar-url
+                   :room/is-space?
+                   :room-config/can-edit?
+                   :room-config/can-edit-avatar?
+                   :room-config/can-edit-topic?
+                   :room-config/can-manage-emotes?
+                   :room-config/tabs]))
+
+(s/def :room-option/id non-blank-string?)
+(s/def :room-option/command map?)
+(s/def :room-option/divider? boolean?)
+(s/def ::room-option
+  (s/or :divider (s/keys :req-un [:room-option/divider?])
+        :item    (s/keys :req-un [:room-option/id]
+                         :opt-un [:room-option/command])))
+
+(s/def ::member-option ::room-option)
+
+(s/def :creation-options/room-types (s/coll-of ::room-type))
+(s/def :creation-options/show-visibility? boolean?)
+(s/def :creation-options/show-history? boolean?)
+(s/def :creation-options/show-encryption? boolean?)
+(s/def :creation-options/default-encrypted? boolean?)
+(s/def ::creation-options
+  (s/keys :req-un [:creation-options/room-types]
+          :opt-un [:creation-options/show-visibility?
+                   :creation-options/show-history?
+                   :creation-options/show-encryption?
+                   :creation-options/default-encrypted?]))
+
+(s/def :emote-caps/supports-packs? boolean?)
+(s/def :emote-caps/supports-usage? boolean?)
+(s/def :emote-caps/requires-server? boolean?)
+(s/def ::emote-capabilities
+  (s/keys :opt-un [:emote-caps/supports-packs?
+                   :emote-caps/supports-usage?
+                   :emote-caps/requires-server?]))
+
+(s/def :emote-pack/pack-id ::id)
+(s/def :emote-pack/data map?)
+(s/def ::emote-pack
+  (s/keys :req-un [:emote-pack/pack-id :emote-pack/data]))
+
+(s/def :search-doc/id non-blank-string?)
+(s/def :search-doc/room-id non-blank-string?)
+(s/def :search-doc/sender-id (s/nilable string?))
+(s/def :search-doc/sender-name (s/nilable string?))
+(s/def :search-doc/sender-avatar (s/nilable string?))
+(s/def :search-doc/ts ::timestamp-ms)
+(s/def :search-doc/body non-blank-string?)
+(s/def :search-doc/html (s/nilable string?))
+(s/def :search-doc/msg-tag (s/nilable string?))
+(s/def :search-doc/is-edited? boolean?)
+
+(s/def ::search-doc
+  (s/keys :req-un [:search-doc/id :search-doc/room-id :search-doc/body]
+          :opt-un [:search-doc/sender-id
+                   :search-doc/sender-name
+                   :search-doc/sender-avatar
+                   :search-doc/ts
+                   :search-doc/html
+                   :search-doc/msg-tag
+                   :search-doc/is-edited?]))
+
+(s/def ::search-hit ::search-doc)
+
+(s/def :directory/id non-blank-string?)
+(s/def :directory/name (s/nilable string?))
+(s/def :directory/topic (s/nilable string?))
+(s/def :directory/avatar (s/nilable string?))
+(s/def :directory/banner (s/nilable string?))
+(s/def :directory/member-count (s/nilable integer?))
+(s/def :directory/online-count (s/nilable integer?))
+(s/def :directory/is-space? boolean?)
+(s/def :directory/joined? boolean?)
+(s/def :directory/alias (s/nilable string?))
+(s/def :directory/join-rule (s/nilable string?))
+(s/def :directory/server (s/nilable string?))
+(s/def :directory/invite-code (s/nilable string?))
+(s/def :directory/relay-url (s/nilable string?))
+(s/def :directory/via (s/nilable (s/coll-of string?)))
+
+(s/def ::directory-item
+  (s/keys :req-un [:directory/id]
+          :opt-un [:directory/name
+                   :directory/topic
+                   :directory/avatar
+                   :directory/banner
+                   :directory/member-count
+                   :directory/online-count
+                   :directory/is-space?
+                   :directory/joined?
+                   :directory/alias
+                   :directory/join-rule
+                   :directory/server
+                   :directory/invite-code
+                   :directory/relay-url
+                   :directory/via]))
+
+(s/def :search-idx/supported? boolean?)
+(s/def :search-idx/enabled? boolean?)
+(s/def :search-idx/running? boolean?)
+(s/def :search-idx/indexed-events integer?)
+(s/def :search-idx/rooms-done integer?)
+(s/def :search-idx/rooms-total integer?)
+(s/def ::search-index-status
+  (s/keys :req-un [:search-idx/supported?]
+          :opt-un [:search-idx/enabled?
+                   :search-idx/running?
+                   :search-idx/indexed-events
+                   :search-idx/rooms-done
+                   :search-idx/rooms-total]))
+
+(s/def ::rpc-args-any (s/nilable map?))
+
+(s/def ::rpc-ret-base
+  (s/keys :req-un [::status]
+          :opt-un [::msg]))
+
+(s/def :arg/room-id non-blank-string?)
+(s/def :arg/space-id non-blank-string?)
+(s/def :arg/user-id non-blank-string?)
+(s/def :arg/event-id non-blank-string?)
+(s/def :arg/thread-id non-blank-string?)
+(s/def :arg/poll-id non-blank-string?)
+(s/def :arg/url non-blank-string?)
+(s/def :arg/query string?)
+(s/def :arg/action-id (s/or :kw keyword? :str non-blank-string?))
+(s/def :arg/enabled? boolean?)
+
+(s/def ::args-room-id (s/keys :req-un [:arg/room-id]))
+(s/def :update-notif/toggles
+  (s/nilable (s/map-of (s/or :kw keyword? :str non-blank-string?) boolean?)))
+(s/def ::args-update-room-notifications
+  (s/keys :req-un [:arg/room-id]
+          :opt-un [:notif/mode :update-notif/toggles]))
+(s/def ::args-space-id (s/keys :req-un [:arg/space-id]))
+(s/def ::args-user-id (s/keys :req-un [:arg/user-id]))
+(s/def ::args-room-user (s/keys :req-un [:arg/room-id :arg/user-id]))
+(s/def ::args-member-options
+  (s/keys :req-un [:arg/user-id]
+          :opt-un [:arg/room-id]))
+(s/def ::args-login-action (s/keys :req-un [:arg/action-id]))
+(s/def ::args-set-presence (s/keys :req-un [::presence-status-arg]))
+(s/def ::presence-status-arg ::presence-status)
+
+(s/def ::args-room-and-event
+  (s/and map?
+         #(non-blank-string? (:room-id %))
+         #(or (non-blank-string? (:event-id %))
+              (non-blank-string? (:msg-id %)))))
+
+(s/def ::args-set-presence-map
+  (s/and map? #(s/valid? ::presence-status (:status %))))
+
+(s/def ::args-set-media-preview-policy
+  (s/and map? #(s/valid? ::media-preview-policy (:policy %))))
+
+(s/def ::args-paginate-timeline
+  (s/keys :req-un [:arg/room-id]
+          :opt-un [::direction]))
+(s/def ::direction ::pagination-direction)
+
+(s/def ::args-search-room
+  (s/keys :req-un [:arg/query]
+          :opt-un [:arg/room-id]))
+
+(s/def ::args-space-child
+  (s/keys :req-un [:arg/space-id :arg/child-id]))
+(s/def :arg/child-id non-blank-string?)
+
+(s/def ::args-create-poll
+  (s/keys :req-un [:arg/room-id :poll/question :poll/answers]))
+(s/def :poll/question non-blank-string?)
+(s/def :poll/answers (s/coll-of string? :min-count 1))
+
+(s/def ::args-vote-poll
+  (s/keys :req-un [:arg/room-id :arg/poll-id :poll/answer-ids]))
+(s/def :poll/answer-ids (s/coll-of string?))
+
+(s/def ::args-end-poll
+  (s/keys :req-un [:arg/room-id :arg/poll-id]))
+
+(s/def ::args-get-url-preview
+  (s/keys :req-un [:arg/url]))
+
+(s/def ::ret-session-auth
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status user-id]}]
+           (if (= :success (normalize-status status))
+             (non-blank-string? user-id)
+             true))))
+
+(s/def ::ret-client-context
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status session]}]
+           (if (= :success (normalize-status status))
+             (s/valid? ::session-data session)
+             true))))
+
+(s/def ::ret-i18n
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status dictionary dictionary-edn]}]
+           (if (= :success (normalize-status status))
+             (or (map? dictionary) (string? dictionary-edn))
+             true))))
+
+(s/def ::ret-profile
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status profile]}]
+           (if (= :success (normalize-status status))
+             (s/valid? ::profile profile)
+             true))))
+
+(s/def ::ret-members
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status members]}]
+           (if (= :success (normalize-status status))
+             (s/valid? (s/coll-of ::member) members)
+             true))))
+
+(s/def ::ret-room-config
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status config config-edn]}]
+           (if (= :success (normalize-status status))
+             (or (s/valid? ::room-config config) (string? config-edn))
+             true))))
+
+(s/def ::ret-room-notifications
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status notifications notifications-edn]}]
+           (if (= :success (normalize-status status))
+             (or (s/valid? ::room-notification-settings notifications)
+                 (string? notifications-edn))
+             true))))
+
+(s/def ::ret-room-options
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status options options-edn]}]
+           (if (= :success (normalize-status status))
+             (or (s/valid? (s/coll-of ::room-option) options) (string? options-edn))
+             true))))
+
+(s/def ::ret-member-options
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status options options-edn]}]
+           (if (= :success (normalize-status status))
+             (or (s/valid? (s/coll-of ::member-option) options) (string? options-edn))
+             true))))
+
+(s/def ::ret-creation-options
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status options]}]
+           (if (= :success (normalize-status status))
+             (s/valid? ::creation-options options)
+             true))))
+
+(s/def ::ret-emotes
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status packs]}]
+           (if (= :success (normalize-status status))
+             (s/valid? (s/coll-of ::emote-pack) packs)
+             true))))
+
+(s/def ::ret-search-directory
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status items]}]
+           (if (= :success (normalize-status status))
+             (s/valid? (s/coll-of ::directory-item) items)
+             true))))
+
+(s/def ::ret-join-room
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status room-id]}]
+           (if (= :success (normalize-status status))
+             (or (nil? room-id) (non-blank-string? room-id))
+             true))))
+
+(s/def ::ret-search-index
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status] :as res}]
+           (if (= :success (normalize-status status))
+             (s/valid? ::search-index-status res)
+             true))))
+
+(s/def ::ret-call-session
+  (s/and ::rpc-ret-base
+         (fn [{:keys [status driver-url session-config url token]}]
+           (if (= :success (normalize-status status))
+             (and (non-blank-string? driver-url)
+                  (or (map? session-config)
+                      (and (string? url) (string? token))))
+             true))))
+
+(def handler-aliases
+  "Legacy RPC handler aliases mirrored automatically by `define-engine!`."
+  {:get-permissions-panel :fetch-roles-and-permissions
+   :fetch-power-level-tags :fetch-role-tags
+   :call/request-sfu-token :call/request-session})
+
+(def rpc-specs
+  "Canonical specification table for every Paradise engine RPC handler.
+  `:capability` is `:core` (required), `:core-optional` (optional with default),
+  or one of `all-capabilities`."
+  {;; Lifecycle, auth, metadata (core)
+   :load-sessions
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :bootstrap
+   {:capability :core :args ::rpc-args-any :ret ::ret-session-auth}
+   :login
+   {:capability :core :args ::rpc-args-any :ret ::ret-session-auth}
+   :login-action
+   {:capability       :core-optional
+    :args             ::args-login-action
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Login action not supported by this engine."}}
+   :cancel-login
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :preload
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :start-sync
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-client-context
+   {:capability :core :args ::rpc-args-any :ret ::ret-client-context}
+   :suspend-session
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :logout-client
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-i18n
+   {:capability :core :auto-provided? true :args ::rpc-args-any :ret ::ret-i18n}
+   :get-asset-urls
+   {:capability :core :auto-provided? true :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-capabilities
+   {:capability :core :auto-provided? true :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-available-accounts
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-account-data
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :data nil}}
+
+   ;; Profiles & members (core)
+   :fetch-profile
+   {:capability :core :args ::rpc-args-any :ret ::ret-profile}
+   :update-profile
+   {:capability :core :args ::rpc-args-any :ret ::ret-profile}
+   :fetch-user-mutuals
+   {:capability       :core-optional
+    :args             ::args-user-id
+    :ret              ::rpc-ret-base
+    :default-response {:status         "success"
+                       :mutual-rooms   []
+                       :mutual-friends []}}
+   :search-users
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status            "success"
+                       :users             []
+                       :supports-group-dm? false
+                       :supports-e2ee?    false}}
+   :create-dm
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "error"
+                       :msg    "Direct message creation is not supported by this engine."}}
+   :search-directory
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::ret-search-directory
+    :default-response {:status            "success"
+                       :items             []
+                       :next-batch        nil
+                       :supports-servers? false
+                       :servers           []
+                       :categories        []}}
+   :fetch-room-members
+   {:capability :core :args ::args-room-id :ret ::ret-members}
+   :get-member-options
+   {:capability       :core-optional
+    :args             ::args-member-options
+    :ret              ::ret-member-options
+    :default-response {:status "ignored" :msg "Member options are not customized by this engine."}}
+
+   ;; Rooms & config (core)
+   :set-room-filter
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :paginate-room-list
+   {:capability       :core-optional
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :get-room-preview
+   {:capability       :core-optional
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :preview {:is-call? false :is-forum? false}}}
+   :fetch-room-membership
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :fetch-room-security
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :create-room
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :join-room
+   {:capability :core :args ::rpc-args-any :ret ::ret-join-room}
+   :leave-room
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :invite-user
+   {:capability       :core-optional
+    :args             ::args-room-user
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Inviting users is not supported by this engine."}}
+   :knock-room
+   {:capability       :core-optional
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored" :msg "Knocking is not supported by this engine."}}
+   :copy-room-link
+   {:capability       :core-optional
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response (fn [{:keys [room-id]}] {:status "success" :link (str room-id)})}
+   :fetch-room-config
+   {:capability :core :args ::args-room-id :ret ::ret-room-config}
+   :update-room-config
+   {:capability :core :args ::args-room-id :ret ::ret-room-config}
+   :fetch-room-notifications
+   {:capability       :core-optional
+    :args             ::args-room-id
+    :ret              ::ret-room-notifications
+    :default-response {:status        "success"
+                       :notifications {:supported? false
+                                       :mode       :default
+                                       :modes      []}}}
+   :update-room-notifications
+   {:capability       :core-optional
+    :args             ::args-update-room-notifications
+    :ret              ::ret-room-notifications
+    :default-response {:status "error"
+                       :msg    "Notification settings are not supported by this engine."}}
+   :get-creation-options
+   {:capability :core :args ::rpc-args-any :ret ::ret-creation-options}
+   :get-room-options
+   {:capability :core :args ::rpc-args-any :ret ::ret-room-options}
+
+   ;; Timeline & messaging (core)
+   :boot-timeline
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :cleanup-timeline
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :paginate-timeline
+   {:capability :core :args ::args-paginate-timeline :ret ::rpc-ret-base}
+   :send-message
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :mark-read
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :send-receipt
+   {:capability :core :args ::args-room-id :ret ::rpc-ret-base}
+   :get-event
+   {:capability :core :args ::args-room-and-event :ret ::rpc-ret-base}
+
+   ;; Media worker (core)
+   :set-media-session
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :clear-media-session
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+   :get-media
+   {:capability :core :args ::rpc-args-any :ret ::rpc-ret-base}
+
+   ;; Capability: :spaces
+   :paginate-space
+   {:capability       :spaces
+    :args             ::args-space-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :fetch-space-hierarchy
+   {:capability       :spaces
+    :args             ::args-space-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :rooms []}}
+   :space-add-child
+   {:capability       :spaces
+    :args             ::args-space-child
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Spaces are not supported by this engine."}}
+   :space-remove-child
+   {:capability       :spaces
+    :args             ::args-space-child
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Spaces are not supported by this engine."}}
+   :save-space-layout
+   {:capability       :spaces
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "noop"}}
+
+   ;; Capability: :threads
+   :list-threads
+   {:capability       :threads
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :boot-thread
+   {:capability       :threads
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :paginate-thread
+   {:capability       :threads
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :cleanup-thread
+   {:capability       :threads
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :send-thread-message
+   {:capability       :threads
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Threads are not supported by this engine."}}
+   :create-forum-thread
+   {:capability       :threads
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Forum threads are not supported by this engine."}}
+
+   ;; Capability: :reactions
+   :toggle-reaction
+   {:capability       :reactions
+    :args             ::args-room-and-event
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+
+   ;; Capability: :pins
+   :toggle-pin
+   {:capability       :pins
+    :args             ::args-room-and-event
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :get-pinned-events
+   {:capability       :pins
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+
+   ;; Capability: :redaction
+   :redact-event
+   {:capability       :redaction
+    :args             ::args-room-and-event
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Message deletion is not supported by this engine."}}
+
+   ;; Capability: :attachments
+   :upload-media
+   {:capability       :attachments
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Media uploads are not supported by this engine."}}
+   :send-attachments
+   {:capability       :attachments
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Attachments are not supported by this engine."}}
+   :send-raw-sticker
+   {:capability       :attachments
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Stickers are not supported by this engine."}}
+
+   ;; Capability: :drafts
+   :persist-draft
+   {:capability       :drafts
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :load-draft
+   {:capability       :drafts
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :draft nil}}
+
+   ;; Capability: :polls
+   :create-poll
+   {:capability       :polls
+    :args             ::args-create-poll
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Polls are not supported by this engine."}}
+   :vote-poll
+   {:capability       :polls
+    :args             ::args-vote-poll
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Polls are not supported by this engine."}}
+   :end-poll
+   {:capability       :polls
+    :args             ::args-end-poll
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Polls are not supported by this engine."}}
+
+   ;; Capability: :voice-messages
+   :send-voice-message
+   {:capability       :voice-messages
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Voice messages are not supported by this engine."}}
+
+   ;; Capability: :emotes
+   :fetch-emotes
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::ret-emotes
+    :default-response {:status       "success"
+                       :packs        []
+                       :capabilities {:supports-packs?  false
+                                      :supports-usage?  false
+                                      :requires-server? false}}}
+   :upsert-emote
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Custom emotes are not supported by this engine."}}
+   :delete-emote
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Custom emotes are not supported by this engine."}}
+   :save-emote-pack-meta
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :fetch-frequent-emotes
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status   "success"
+                       :items    []
+                       :stickers []}}
+   :record-emote-usage
+   {:capability       :emotes
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status   "success"
+                       :items    []
+                       :stickers []}}
+
+   ;; Capability: :roles-permissions
+   :fetch-role-tags
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :tags {}}}
+   :fetch-power-level-tags
+   {:capability       :roles-permissions
+    :alias-of         :fetch-role-tags
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :tags {}}}
+   :fetch-roles-and-permissions
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status                  "success"
+                       :roles                   []
+                       :can-manage-roles?       false
+                       :can-manage-permissions? false
+                       :can-assign-roles?       false
+                       :can-kick?               false
+                       :can-ban?                false}}
+   :get-permissions-panel
+   {:capability       :roles-permissions
+    :alias-of         :fetch-roles-and-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status                  "success"
+                       :roles                   []
+                       :can-manage-roles?       false
+                       :can-manage-permissions? false
+                       :can-assign-roles?       false
+                       :can-kick?               false
+                       :can-ban?                false}}
+   :upsert-role
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Roles are not supported by this engine."}}
+   :delete-role
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Roles are not supported by this engine."}}
+   :reorder-roles
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Roles are not supported by this engine."}}
+   :update-room-permissions
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Permissions editing is not supported by this engine."}}
+   :set-member-roles
+   {:capability       :roles-permissions
+    :args             ::args-room-user
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Role assignment is not supported by this engine."}}
+   :kick-member
+   {:capability       :roles-permissions
+    :args             ::args-room-user
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Moderation is not supported by this engine."}}
+   :ban-member
+   {:capability       :roles-permissions
+    :args             ::args-room-user
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Moderation is not supported by this engine."}}
+   :unban-member
+   {:capability       :roles-permissions
+    :args             ::args-room-user
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Moderation is not supported by this engine."}}
+   :fetch-bans
+   {:capability       :roles-permissions
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :bans []}}
+
+   ;; Capability: :search
+   :search-room
+   {:capability       :search
+    :args             ::args-search-room
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :results []}}
+   :search-index-status
+   {:capability       :search
+    :args             ::rpc-args-any
+    :ret              ::ret-search-index
+    :default-response {:status         "success"
+                       :supported?     false
+                       :enabled?       false
+                       :running?       false
+                       :indexed-events 0
+                       :rooms-done     0
+                       :rooms-total    0}}
+   :search-crawler-set-enabled
+   {:capability       :search
+    :args             ::rpc-args-any
+    :ret              ::ret-search-index
+    :default-response {:status     "success"
+                       :supported? false
+                       :enabled?   false
+                       :running?   false}}
+   :search-index-clear
+   {:capability       :search
+    :args             ::rpc-args-any
+    :ret              ::ret-search-index
+    :default-response {:status     "success"
+                       :supported? false}}
+
+   ;; Capability: :presence
+   :set-presence
+   {:capability       :presence
+    :args             ::args-set-presence-map
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+
+   ;; Capability: :typing
+   :send-typing
+   {:capability       :typing
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+
+   ;; Capability: :url-previews
+   :get-url-preview
+   {:capability       :url-previews
+    :args             ::args-get-url-preview
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :set-media-preview-policy
+   {:capability       :url-previews
+    :args             ::args-set-media-preview-policy
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+
+   ;; Capability: :e2ee-recovery
+   :recover-session
+   {:capability       :e2ee-recovery
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "error" :msg "Session recovery is not supported by this engine."}}
+   :prepare-push-verification
+   {:capability       :e2ee-recovery
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+
+   ;; Capability: :push
+   :register-pusher
+   {:capability       :push
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :remove-pusher
+   {:capability       :push
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :clear-all-pushers
+   {:capability       :push
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :resolve-push-notification
+   {:capability       :push
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored" :msg "Push notifications are not supported by this engine."}}
+
+   ;; Capability: :calling
+   :call/start-crypto-driver
+   {:capability       :calling
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :call/request-session
+   {:capability       :calling
+    :args             ::args-room-id
+    :ret              ::ret-call-session
+    :default-response {:status "error" :msg "Calling is not supported by this engine."}}
+   :call/request-sfu-token
+   {:capability       :calling
+    :alias-of         :call/request-session
+    :args             ::args-room-id
+    :ret              ::ret-call-session
+    :default-response {:status "error" :msg "Calling is not supported by this engine."}}
+   :call/leave-sfu
+   {:capability       :calling
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+   :call/broadcast-e2ee-key
+   {:capability       :calling
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :call/rotate-e2ee-keys
+   {:capability       :calling
+    :args             ::args-room-id
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :call/driver-signal
+   {:capability       :calling
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :teardown-widget
+   {:capability       :calling
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+
+   :submit-login-challenge
+   {:capability       :core
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :scan-qr-code
+   {:capability       :core
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored" :msg "QR sign-in is not supported by this engine."}}
+   :confirm-qr-scan
+   {:capability       :core
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}
+   :cancel-qr-scan
+   {:capability       :core
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success"}}
+
+   :gif-categories
+   {:capability       :emotes
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :categories []}}
+   :gif-search
+   {:capability       :emotes
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :results []}}
+   :gif-trending
+   {:capability       :emotes
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :results []}}
+   :gif-favorites
+   {:capability       :emotes
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "success" :results []}}
+   :gif-favorite-toggle
+   {:capability       :emotes
+    :optional-in-cap? true
+    :args             ::rpc-args-any
+    :ret              ::rpc-ret-base
+    :default-response {:status "ignored"}}})
+
+(defn core-required-handlers
+  "Returns the set of strictly required core RPC handler keywords."
+  []
+  (into #{}
+        (keep (fn [[k {:keys [capability auto-provided? optional-in-cap?]}]]
+                (when (and (= capability :core)
+                           (not auto-provided?)
+                           (not optional-in-cap?))
+                  k)))
+        rpc-specs))
+
+(defn handlers-for-capability
+  "Returns the set of handler keywords required when an engine declares `cap`."
+  [cap]
+  (let [cap-kw (normalize-status cap)]
+    (into #{}
+          (keep (fn [[k {:keys [capability alias-of optional-in-cap?]}]]
+                  (when (and (= capability cap-kw)
+                             (not alias-of)
+                             (not optional-in-cap?))
+                    k)))
+          rpc-specs)))
+
+(defn required-handlers-for
+  "Returns the complete set of handler keywords an engine must supply given its
+  declared `capabilities`."
+  [capabilities]
+  (reduce (fn [acc cap]
+            (into acc (handlers-for-capability cap)))
+          (core-required-handlers)
+          capabilities))
+
+(defn default-response-for
+  "Evaluates the spec-defined fallback response for `handler-key` given `args`."
+  [handler-key args]
+  (let [resp (get-in rpc-specs [handler-key :default-response])]
+    (cond
+      (fn? resp)  (resp args)
+      (map? resp) resp
+      :else       {:status "ignored"})))
+
+(defmulti stream-event-spec
+  (fn [ev]
+    (let [t (:type ev)]
+      (cond
+        (string? t)  t
+        (keyword? t) (name t)
+        :else        ::unknown))))
+
+(s/def :stream/type non-blank-string?)
+(s/def :stream/engine-id (s/nilable ::id))
+(s/def :stream/room-id non-blank-string?)
+(s/def :stream/space-id non-blank-string?)
+(s/def :stream/rooms (s/coll-of ::room-summary))
+(s/def :stream/upserts (s/coll-of ::room-summary))
+(s/def :stream/removals (s/coll-of string?))
+(s/def :stream/spaces (s/coll-of ::space-summary))
+(s/def :stream/space-unreads (s/map-of any? ::space-unread-stats))
+(s/def :stream/patch? boolean?)
+(s/def :stream/dms (s/coll-of ::dm-pop-item))
+(s/def :stream/layout ::space-layout)
+(s/def :stream/first-parent-id (s/nilable string?))
+(s/def :stream/preview ::room-preview)
+(s/def :stream/loading? boolean?)
+(s/def :stream/users (s/coll-of string?))
+(s/def :stream/presences (s/map-of any? ::presence-status))
+(s/def :stream/status ::presence-status)
+(s/def :stream/state ::recovery-state)
+(s/def :stream/policy ::media-preview-policy)
+(s/def :stream/pinned-ids (s/coll-of string?))
+(s/def :stream/event ::timeline-item)
+(s/def :stream/threads (s/coll-of ::thread-summary))
+(s/def :stream/has-more? boolean?)
+(s/def :stream/thread-id non-blank-string?)
+(s/def :stream/prev-thread-id (s/nilable string?))
+(s/def :stream/title (s/nilable string?))
+(s/def :stream/root-event (s/nilable ::timeline-item))
+(s/def :stream/events (s/coll-of ::timeline-item))
+(s/def :stream/participant-id non-blank-string?)
+(s/def :stream/key-index integer?)
+(s/def :stream/key-array some?)
+(s/def :stream/payload map?)
+(s/def :stream/data some?)
+(s/def :stream/items (s/coll-of map?))
+(s/def :notif-ev/event-id (s/nilable string?))
+(s/def :notif-ev/room-name (s/nilable string?))
+(s/def :notif-ev/sender-name (s/nilable string?))
+(s/def :notif-ev/avatar-url (s/nilable string?))
+(s/def :notif-ev/body (s/nilable string?))
+(s/def :notif-ev/is-dm? boolean?)
+(s/def :notif-ev/is-mention? boolean?)
+(s/def :notif-ev/ts (s/nilable integer?))
+
+(defmethod stream-event-spec "home-rooms-diff" [_]
+  (s/keys :req-un [:stream/type :stream/rooms] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "bg-rooms-diff" [_]
+  (s/keys :req-un [:stream/type :stream/rooms] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "bg-rooms-patch" [_]
+  (s/keys :req-un [:stream/type :stream/upserts :stream/removals] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "global-spaces-diff" [_]
+  (s/keys :req-un [:stream/type :stream/spaces] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "space-layout-sync" [_]
+  (s/keys :req-un [:stream/type :stream/layout] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "space-rooms-diff" [_]
+  (s/keys :req-un [:stream/type :stream/space-id :stream/rooms] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "space-unreads-sync" [_]
+  (s/keys :req-un [:stream/type :stream/space-unreads]
+          :opt-un [:stream/engine-id :stream/patch? :stream/removals]))
+
+(defmethod stream-event-spec "dm-pops-sync" [_]
+  (s/keys :req-un [:stream/type :stream/dms] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "in-app-notification" [_]
+  (s/keys :req-un [:stream/type :stream/room-id]
+          :opt-un [:stream/engine-id
+                   :notif-ev/event-id
+                   :notif-ev/room-name
+                   :notif-ev/sender-name
+                   :notif-ev/avatar-url
+                   :notif-ev/body
+                   :notif-ev/is-dm?
+                   :notif-ev/is-mention?
+                   :notif-ev/ts]))
+
+(defmethod stream-event-spec "room-parent-resolved" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/first-parent-id] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "room-preview-resolved" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/preview] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "timeline-ready" [_]
+  (s/keys :req-un [:stream/type :stream/room-id] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "widget-message" [_]
+  (s/keys :req-un [:stream/type :stream/data] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "recovery-state-update" [_]
+  (s/keys :req-un [:stream/type :stream/state] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "timeline-loading" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/loading?] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "typing-update" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/users] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "presence-sync" [_]
+  (s/keys :req-un [:stream/type :stream/presences] :opt-un [:stream/engine-id]))
+
+(s/def :stream/status-msg (s/nilable string?))
+
+(defmethod stream-event-spec "own-presence-sync" [_]
+  (s/keys :req-un [:stream/type :stream/status] :opt-un [:stream/engine-id :stream/status-msg]))
+
+(defmethod stream-event-spec "pagination-status" [_]
+  (s/keys :req-un [:stream/type :stream/room-id] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "media-preview-config" [_]
+  (s/keys :req-un [:stream/type :stream/policy] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "pins-sync" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/pinned-ids] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "pin-update" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/event] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "call-keys-update" [_]
+  (s/keys :req-un [:stream/type :stream/participant-id :stream/key-index :stream/key-array]
+          :opt-un [:stream/engine-id :stream/room-id]))
+
+(defmethod stream-event-spec "call-engine-signal" [_]
+  (s/keys :req-un [:stream/type :stream/payload] :opt-un [:stream/engine-id]))
+
+(defmethod stream-event-spec "search-index-progress" [_]
+  (s/merge (s/keys :req-un [:stream/type] :opt-un [:stream/engine-id])
+           ::search-index-status))
+
+(defmethod stream-event-spec "threads-list-sync" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/threads]
+          :opt-un [:stream/engine-id :stream/has-more? :stream/loading?]))
+
+(defmethod stream-event-spec "thread-timeline-sync" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/thread-id :stream/events]
+          :opt-un [:stream/engine-id
+                   :stream/prev-thread-id
+                   :stream/title
+                   :stream/root-event
+                   :stream/has-more?
+                   :stream/loading?]))
+
+(defmethod stream-event-spec "gallery-sync" [_]
+  (s/keys :req-un [:stream/type :stream/room-id :stream/items] :opt-un [:stream/engine-id]))
+
+(s/def ::stream-event (s/multi-spec stream-event-spec :type))
+
+(s/def :engine-def/id keyword?)
+(s/def :engine-def/capabilities ::capabilities)
+(s/def :engine-def/i18n (s/nilable map?))
+(s/def :engine-def/assets (s/nilable (s/map-of keyword? (s/nilable string?))))
+(s/def :engine-def/handlers (s/map-of keyword? fn?))
+(s/def :engine-def/on-bootstrap (s/nilable fn?))
+(s/def :engine-def/on-preload (s/nilable fn?))
+(s/def :engine-def/strict? boolean?)
+
+(s/def ::engine-definition
+  (s/keys :req-un [:engine-def/id :engine-def/handlers]
+          :opt-un [:engine-def/capabilities
+                   :engine-def/i18n
+                   :engine-def/assets
+                   :engine-def/on-bootstrap
+                   :engine-def/on-preload
+                   :engine-def/strict?]))
+
+(defn- explain-result [spec-kw val]
+  (if (s/valid? spec-kw val)
+    {:valid? true :explain nil}
+    {:valid?  false
+     :explain (s/explain-str spec-kw val)
+     :data    (s/explain-data spec-kw val)}))
+
+(defn validate-manifest
+  "Validates an engine `config.edn` / `manifest.edn` map against `::manifest`."
+  [manifest]
+  (explain-result ::manifest manifest))
+
+(defn validate-engine-definition
+  "Validates a `define-engine!` descriptor map against `::engine-definition`."
+  [descriptor]
+  (explain-result ::engine-definition descriptor))
+
+(defn validate-rpc-args
+  "Validates incoming arguments for `handler-key`."
+  [handler-key args]
+  (if-let [args-spec (get-in rpc-specs [handler-key :args])]
+    (explain-result args-spec args)
+    {:valid? true :explain nil}))
+
+(defn validate-rpc-ret
+  "Validates a resolved RPC response map for `handler-key`."
+  [handler-key ret]
+  (if-let [ret-spec (get-in rpc-specs [handler-key :ret])]
+    (explain-result ret-spec ret)
+    {:valid? true :explain nil}))
+
+(defn validate-stream-event
+  "Validates a stream payload map against `::stream-event`."
+  [event]
+  (explain-result ::stream-event event))
+
+(defn validate-timeline-batch
+  "Validates a `:process-timeline-diff` payload sent to `:virtualizer-pool`."
+  [batch]
+  (explain-result ::timeline-batch batch))
+
+(defn audit-engine-handlers
+  "Checks an engine definition's `:handlers` map against `rpc-specs` and its
+  declared `:capabilities`. Returns `{:valid? :missing :unknown :capabilities}`."
+  [{:keys [capabilities handlers]}]
+  (let [caps      (into #{} (map normalize-status) capabilities)
+        provided  (set (keys handlers))
+        ;; Expand provided aliases in reverse so supplying either key counts.
+        effective (reduce (fn [acc [alias-k target-k]]
+                            (cond
+                              (contains? acc alias-k)  (conj acc target-k)
+                              (contains? acc target-k) (conj acc alias-k)
+                              :else                    acc))
+                          provided
+                          handler-aliases)
+        required  (required-handlers-for caps)
+        missing   (sort (remove effective required))
+        known     (set (keys rpc-specs))
+        unknown   (sort (remove known provided))]
+    {:valid?       (empty? missing)
+     :missing      (vec missing)
+     :unknown      (vec unknown)
+     :capabilities caps}))
