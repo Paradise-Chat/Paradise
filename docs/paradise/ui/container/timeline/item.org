@@ -423,26 +423,58 @@ to alert other users they read the message.
 We want to make sure we observe just the messages in the viewport to deliver
 read receipts. This prevents any sort of spamming to the home server.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
+(defn- drain-hidden-visible! []
+  (when (and (page-visible?) (seq @!hidden-visible-queue))
+    (let [queued @!hidden-visible-queue]
+      (reset! !hidden-visible-queue [])
+      (re-frame/dispatch [:msg/mark-visible-batch queued])
+      (re-frame/dispatch [:msg/flush-receipts]))))
+
+(defonce ^:private visibility-resume-listener
+  (when (exists? js/document)
+    (.addEventListener js/document "visibilitychange"
+                       (fn []
+                         (when (page-visible?)
+                           (drain-hidden-visible!)
+                           (re-frame/dispatch [:msg/flush-receipts]))))
+    (when (exists? js/window)
+      (.addEventListener js/window "focus"
+                         (fn []
+                           (when (page-visible?)
+                             (drain-hidden-visible!)
+                             (re-frame/dispatch [:msg/flush-receipts])))))
+    true))
+
 (defonce visibility-observer
   (delay
     (js/IntersectionObserver.
-    (fn [entries observer]
-       (let [visible-ids (reduce
+     (fn [entries observer]
+       (let [visible?    (page-visible?)
+             visible-evs (reduce
                           (fn [acc entry]
                             (if (.-isIntersecting entry)
                               (let [target   (.-target entry)
-                                    event-id (.getAttribute target "data-event-id")]
-                                (if (and event-id (str/starts-with? event-id "$"))
+                                    event-id (.getAttribute target "data-event-id")
+                                    room-id  (.getAttribute target "data-room-id")
+                                    raw-ts   (.getAttribute target "data-ts")
+                                    ts-num   (let [n (js/Number raw-ts)]
+                                               (if (js/isNaN n) 0 n))]
+                                (if (trackable-event-id? event-id)
                                   (do
-                                    (.unobserve observer target)
-                                    (conj acc event-id))
+                                    (when visible?
+                                      (.unobserve observer target))
+                                    (conj acc {:room-id  (when (seq room-id) room-id)
+                                               :event-id event-id
+                                               :ts       ts-num}))
                                   acc))
                               acc))
                           []
                           entries)]
-         (when (seq visible-ids)
-           (re-frame/dispatch [:msg/mark-visible-batch visible-ids]))))
-     #js {:threshold 0.5})))
+         (when (seq visible-evs)
+           (if visible?
+             (re-frame/dispatch [:msg/mark-visible-batch visible-evs])
+             (swap! !hidden-visible-queue into visible-evs)))))
+     #js {:threshold 0.1})))
 #+end_src
 
 
