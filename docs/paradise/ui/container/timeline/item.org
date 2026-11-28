@@ -2209,23 +2209,41 @@ library itself some context of deferred components...
 ******* TODO Need to improve read receipt consistency
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
-(defn event-tile [layout-node]
-  (let [id         (:id layout-node)
-        unread?    (:unread? layout-node)
-        pojo       (:worker-data layout-node)
-        react-tree (get-cached-react-tree id pojo)]
-
-    (react/createElement "div"
-                         #js {:key id
-                              :data-event-id id
-                              :style #js {:width "100%"}
-                              :ref (fn [node]
-                                     (when @visibility-observer
-                                       (if (and node unread?)
-                                         (.observe @visibility-observer node)
-                                         (when node
-                                           (.unobserve @visibility-observer node)))))}
-                         react-tree)))
+(defn event-tile
+  ([layout-node]
+   (event-tile layout-node nil))
+  ([layout-node room-id]
+   (let [id          (:id layout-node)
+         ts          (:ts layout-node)
+         item-type   (:type layout-node)
+         is-local?   (boolean (:is-local? layout-node))
+         send-state  (:send-state layout-node)
+         unsent?     (or is-local?
+                         (#{:pending :failed "pending" "failed"} send-state))
+         pojo        (:worker-data layout-node)
+         react-tree  (get-cached-react-tree id pojo)
+         eff-room-id (or room-id (:active-room-id @db/app-db))
+         trackable?  (and (not unsent?)
+                          (trackable-event-id? id)
+                          (not= item-type :virtual)
+                          (not= item-type "virtual"))
+         obs-key     (when trackable? (str (or eff-room-id "") "|" id))]
+     (react/createElement "div"
+                          #js {:key           id
+                               :data-event-id id
+                               :data-room-id  (or eff-room-id "")
+                               :data-ts       (if (some? ts) (str ts) "0")
+                               :style         #js {:width "100%"}
+                               :ref           (fn [node]
+                                                (when-let [^js obs @visibility-observer]
+                                                  (if (and node trackable?)
+                                                    (when (not= (goog.object/get node "__paradiseObservedKey") obs-key)
+                                                      (goog.object/set node "__paradiseObservedKey" obs-key)
+                                                      (.observe obs node))
+                                                    (when node
+                                                      (goog.object/set node "__paradiseObservedKey" nil)
+                                                      (.unobserve obs node)))))}
+                          react-tree))))
 
 #+end_src
 
