@@ -621,6 +621,368 @@ forward.
 
 (defn inline-emoji-open? []
   (= (:id @!active-popover) :inline-emoji))
+
+(defn inline-emoji-mode []
+  (when (inline-emoji-open?)
+    (or (get-in @!active-popover [:props :default-mode]) :emoji)))
+
+(defonce ^:private !mobile-kb-state
+  (r/atom {:visible?          false
+           :viewport-shrunk?  false
+           :height            0
+           :last-height       nil
+           :handoff           nil
+           :handoff-mode      nil
+           :handoff-timer     nil
+           :height-locked?    false
+           :unlock-timer      nil
+           :tracker-ready?    false}))
+
+(defn- use-css-kb-inset? []
+  (and (platform/capacitor-mobile?)
+       (not (:native-resize-detected? @!mobile-kb-state))))
+
+(defn- set-mobile-keyboard-inset! [px]
+  (when (exists? js/document)
+    (when-let [doc-el (.-documentElement js/document)]
+      (let [v (if (and (number? px) (pos? px)) (Math/round px) 0)]
+        (.setProperty (.-style doc-el) "--mobile-keyboard-inset" (str v "px"))
+        (if (pos? v)
+          (.add (.-classList doc-el) "has-native-kb")
+          (.remove (.-classList doc-el) "has-native-kb"))))))
+
+(defn- clear-kb-handoff! []
+  (when-let [t (:handoff-timer @!mobile-kb-state)]
+    (js/clearTimeout t))
+  (swap! !mobile-kb-state assoc
+         :handoff       nil
+         :handoff-mode  nil
+         :handoff-timer nil))
+
+(defn- arm-to-keyboard-handoff! [& [timeout-ms]]
+  (clear-kb-handoff!)
+  (let [css-inset? (use-css-kb-inset?)
+        ms         (or timeout-ms (if css-inset? 1200 450))
+        timer      (js/setTimeout
+                    (fn []
+                      (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+                        (when css-inset?
+                          (when-let [h (:height @!mobile-kb-state)]
+                            (when (> h 100)
+                              (set-mobile-keyboard-inset! h))))
+                        (clear-kb-handoff!)
+                        (when (exists? js/document)
+                          (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+                            (set! (.. sheet -style -display) "none")))
+                        (when (inline-emoji-open?)
+                          (re-frame/dispatch-sync [:ui/close-popover])
+                          (r/flush))))
+                    ms)]
+    (swap! !mobile-kb-state assoc
+           :handoff       :to-keyboard
+           :handoff-timer timer)))
+
+(defn- unlock-app-root-height! []
+  (when-let [t (:unlock-timer @!mobile-kb-state)]
+    (js/clearTimeout t))
+  (when (:height-locked? @!mobile-kb-state)
+    (swap! !mobile-kb-state assoc
+           :height-locked? false
+           :unlock-timer   nil)
+    (when (exists? js/document)
+      (when-let [app-root (.querySelector js/document ".app-root")]
+        (set! (.. app-root -style -height) "")))))
+
+(defn- lock-app-root-height! [target-h & [timeout-ms]]
+  (when (and (exists? js/document) (number? target-h) (> target-h 200))
+    (when-let [app-root (.querySelector js/document ".app-root")]
+      (when-let [prev-t (:unlock-timer @!mobile-kb-state)]
+        (js/clearTimeout prev-t))
+      (set! (.. app-root -style -height) (str (Math/round target-h) "px"))
+      (let [timer (js/setTimeout #(unlock-app-root-height!) (or timeout-ms 900))]
+        (swap! !mobile-kb-state assoc
+               :height-locked? true
+               :unlock-timer   timer)))))
+
+(defn- current-viewport-height []
+  (let [doc-h (when (and (exists? js/document) (.-body js/document))
+                (.-clientHeight (.-body js/document)))
+        win-h (when (exists? js/window)
+                (.-innerHeight js/window))
+        vv-h  (when (and (exists? js/window) (.-visualViewport js/window))
+                (.-height (.-visualViewport js/window)))]
+    (or (when (and (number? doc-h) (pos? doc-h)
+                   (number? win-h) (< doc-h (- win-h 50)))
+          doc-h)
+        (when (and (number? win-h) (pos? win-h)) win-h)
+        (when (and (number? doc-h) (pos? doc-h)) doc-h)
+        (when (and (number? vv-h) (pos? vv-h)) vv-h)
+        0)))
+
+(defn- finish-to-keyboard-handoff! []
+  (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+    (clear-kb-handoff!)
+    (when (exists? js/document)
+      (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+        (set! (.. sheet -style -display) "none")))
+    (when (inline-emoji-open?)
+      (re-frame/dispatch-sync [:ui/close-popover])
+      (r/flush))))
+
+(defn- lock-and-close-emoji-for-keyboard!
+  "On iOS ResizeNative, keyboardDidShow fires when the opaque native keyboard
+   already covers the bottom of the screen, ~200ms BEFORE Capacitor shrinks the
+   WKWebView frame. Lock .app-root to the exact height above the emoji sheet
+   and unmount the sheet synchronously in one frame so that when WKWebView
+   later shrinks its frame, the emoji sheet is already gone and nothing jumps."
+  []
+  (when (= (:handoff @!mobile-kb-state) :to-keyboard)
+    (clear-kb-handoff!)
+    (let [app-root (when (exists? js/document)
+                     (.querySelector js/document ".app-root"))
+          sheet    (when (exists? js/document)
+                     (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet"))]
+      (when (and app-root sheet (not (:viewport-shrunk? @!mobile-kb-state)))
+        (let [root-h   (.-clientHeight app-root)
+              sheet-h  (.-offsetHeight sheet)
+              margin-t (or (when (exists? js/getComputedStyle)
+                             (let [v (js/parseFloat (.-marginTop (js/getComputedStyle sheet)))]
+                               (when-not (js/isNaN v) v)))
+                           0)
+              locked-h (Math/round (- root-h (+ sheet-h margin-t)))]
+          (lock-app-root-height! locked-h 900)))
+      (when sheet
+        (set! (.. sheet -style -display) "none"))
+      (when (inline-emoji-open?)
+        (re-frame/dispatch-sync [:ui/close-popover])
+        (r/flush)))))
+
+(defn- finish-to-emoji-handoff! []
+  (when (= (:handoff @!mobile-kb-state) :to-emoji)
+    (let [mode (or (:handoff-mode @!mobile-kb-state) :emoji)]
+      (clear-kb-handoff!)
+      (unlock-app-root-height!)
+      (re-frame/dispatch-sync [:ui/open-popover :inline-emoji
+                               {:default-mode   mode
+                                :from-keyboard? true}])
+      (r/flush))))
+
+(defn- on-mobile-kb-event! [visible? raw-height & [authoritative?]]
+  (let [h (when (and (number? raw-height) (> raw-height 100))
+            (Math/round raw-height))]
+    (swap! !mobile-kb-state
+           (fn [cur]
+             (cond-> (assoc cur
+                            :visible? (boolean visible?)
+                            :height   (if visible? (or h (:height cur) 0) 0))
+               (and visible? h (or authoritative? (nil? (:last-height cur))))
+               (assoc :last-height h))))))
+
+(defn ensure-mobile-keyboard-tracker! []
+  (when-not (:tracker-ready? @!mobile-kb-state)
+    (swap! !mobile-kb-state assoc :tracker-ready? true)
+    (let [native?  (platform/native-platform?)
+          ios?     (platform/ios-native?)
+          !full-h  (atom (current-viewport-height))
+          !prev-h  (atom @!full-h)
+          on-frame-resize!
+          (fn []
+            (when-not ios?
+              (let [cur-h  (current-viewport-height)
+                    prev-h @!prev-h]
+                (when (> cur-h @!full-h)
+                  (reset! !full-h cur-h))
+                (reset! !prev-h cur-h)
+                (let [diff    (- @!full-h cur-h)
+                      shrank? (and (> diff 100) (< cur-h (- prev-h 40)))
+                      grew?   (and (< diff 80) (> cur-h (+ prev-h 40)))]
+                  (cond
+                    shrank?
+                    (do
+                      (swap! !mobile-kb-state assoc
+                             :viewport-shrunk?        true
+                             :native-resize-detected? true)
+                      (set-mobile-keyboard-inset! 0)
+                      (on-mobile-kb-event! true diff true)
+                      (unlock-app-root-height!)
+                      (finish-to-keyboard-handoff!))
+
+                    grew?
+                    (do
+                      (swap! !mobile-kb-state assoc :viewport-shrunk? false)
+                      (on-mobile-kb-event! false 0 true)
+                      (if (= (:handoff @!mobile-kb-state) :to-emoji)
+                        (finish-to-emoji-handoff!)
+                        (unlock-app-root-height!))))))))]
+      (when (and native? (exists? Keyboard) (fn? (.-addListener Keyboard)))
+        (try
+          (.addListener Keyboard "keyboardWillShow"
+                        (fn [^js info]
+                          (let [raw-h (some-> info .-keyboardHeight)
+                                eff-h (if (and (number? raw-h) (> raw-h 100))
+                                        (Math/round raw-h)
+                                        0)]
+                            (if (use-css-kb-inset?)
+                              (if (= (:handoff @!mobile-kb-state) :to-keyboard)
+                                (do
+                                  (arm-to-keyboard-handoff! 850)
+                                  (swap! !mobile-kb-state assoc
+                                         :visible? true
+                                         :height   eff-h))
+                                (do
+                                  (on-mobile-kb-event! true eff-h true)
+                                  (set-mobile-keyboard-inset! eff-h)))
+                              (on-mobile-kb-event! true eff-h)))))
+          (.addListener Keyboard "keyboardDidShow"
+                        (fn [^js info]
+                          (let [raw-h (some-> info .-keyboardHeight)
+                                eff-h (if (and (number? raw-h) (> raw-h 100))
+                                        (Math/round raw-h)
+                                        0)]
+                            (if (use-css-kb-inset?)
+                              (do
+                                (on-mobile-kb-event! true eff-h true)
+                                (if (= (:handoff @!mobile-kb-state) :to-keyboard)
+                                  (do
+                                    (clear-kb-handoff!)
+                                    (set-mobile-keyboard-inset! eff-h)
+                                    (when (exists? js/document)
+                                      (when-let [sheet (.querySelector js/document ".emoji-popover.is-mobile-docked-sheet")]
+                                        (set! (.. sheet -style -display) "none")))
+                                    (when (inline-emoji-open?)
+                                      (re-frame/dispatch-sync [:ui/close-popover])
+                                      (r/flush)))
+                                  (set-mobile-keyboard-inset! eff-h)))
+                              (do
+                                (on-mobile-kb-event! true eff-h)
+                                (finish-to-keyboard-handoff!))))))
+          (.addListener Keyboard "keyboardWillHide"
+                        (fn []
+                          (on-mobile-kb-event! false 0)
+                          (if (use-css-kb-inset?)
+                            (set-mobile-keyboard-inset! 0)
+                            (when-not (= (:handoff @!mobile-kb-state) :to-emoji)
+                              (unlock-app-root-height!)))))
+          (.addListener Keyboard "keyboardDidHide"
+                        (fn []
+                          (on-mobile-kb-event! false 0)
+                          (if (use-css-kb-inset?)
+                            (do
+                              (set-mobile-keyboard-inset! 0)
+                              (when (= (:handoff @!mobile-kb-state) :to-emoji)
+                                (clear-kb-handoff!)))
+                            (if (= (:handoff @!mobile-kb-state) :to-emoji)
+                              (finish-to-emoji-handoff!)
+                              (unlock-app-root-height!)))))
+          (catch :default _ nil)))
+      (when-not ios?
+        (when (exists? js/window)
+          (.addEventListener js/window "resize" on-frame-resize!)
+          (when-let [vv (.-visualViewport js/window)]
+            (.addEventListener vv "resize" on-frame-resize!)))
+        (when (and (exists? js/ResizeObserver)
+                   (exists? js/document)
+                   (.-body js/document))
+          (try
+            (let [obs (js/ResizeObserver. (fn [_] (on-frame-resize!)))]
+              (.observe obs (.-body js/document))
+              (when-let [doc-el (.-documentElement js/document)]
+                (.observe obs doc-el)))
+            (catch :default _ nil)))))))
+
+(defn- hide-mobile-keyboard! [ed]
+  (try
+    (when (and ed (.-commands ed) (fn? (.. ed -commands -blur)))
+      (.blur (.-commands ed)))
+    (catch :default _ nil))
+  (try
+    (when-let [active-el (and (exists? js/document) (.-activeElement js/document))]
+      (when (fn? (.-blur active-el))
+        (.blur active-el)))
+    (catch :default _ nil))
+  (try
+    (when (and (platform/native-platform?)
+               (exists? Keyboard)
+               (fn? (.-hide Keyboard)))
+      (-> (.hide Keyboard)
+          (.catch (fn [_] nil))))
+    (catch :default _ nil)))
+
+(defn- show-mobile-keyboard! [ed]
+  (try
+    (when-let [dom-el (or (and ed (.-view ed) (.. ed -view -dom))
+                          (when (exists? js/document)
+                            (.querySelector js/document ".timeline-input-outer .ProseMirror")))]
+      (when (fn? (.-focus dom-el))
+        (.focus dom-el)))
+    (catch :default _ nil))
+  (try
+    (when (and ed (.-commands ed) (fn? (.. ed -commands -focus)))
+      (.focus (.-commands ed) "end"))
+    (catch :default _ nil))
+  (try
+    (when (and (platform/native-platform?)
+               (not (platform/ios-native?))
+               (exists? Keyboard)
+               (fn? (.-show Keyboard)))
+      (-> (.show Keyboard)
+          (.catch (fn [_] nil))))
+    (catch :default _ nil)))
+
+(defn- handoff-emoji-to-keyboard! [ed]
+  (let [css-inset? (use-css-kb-inset?)]
+    (if (and (not css-inset?) (:viewport-shrunk? @!mobile-kb-state))
+      (do
+        (clear-kb-handoff!)
+        (show-mobile-keyboard! ed)
+        (when (inline-emoji-open?)
+          (re-frame/dispatch-sync [:ui/close-popover])))
+      (do
+        (arm-to-keyboard-handoff! (if css-inset? 1200 450))
+        (show-mobile-keyboard! ed)))))
+
+(defn- handoff-keyboard-to-emoji! [ed mode]
+  (clear-kb-handoff!)
+  (let [css-inset?  (use-css-kb-inset?)
+        active-el   (when (exists? js/document) (.-activeElement js/document))
+        ed-focused? (or (:visible? @!mobile-kb-state)
+                        (and active-el
+                             (some-> (.-classList active-el) (.contains "ProseMirror"))))]
+    (cond
+      (and css-inset? ed-focused?)
+      (let [timer (js/setTimeout #(clear-kb-handoff!) 650)]
+        (swap! !mobile-kb-state assoc
+               :handoff       :to-emoji
+               :handoff-mode  mode
+               :handoff-timer timer)
+        (set-mobile-keyboard-inset! 0)
+        (re-frame/dispatch-sync [:ui/open-popover :inline-emoji
+                                 {:default-mode   mode
+                                  :from-keyboard? true}])
+        (r/flush)
+        (hide-mobile-keyboard! ed))
+
+      ed-focused?
+      (let [app-root (when (exists? js/document)
+                       (.querySelector js/document ".app-root"))
+            _        (when app-root
+                       (lock-app-root-height! (.-clientHeight app-root) 600))
+            timer    (js/setTimeout
+                      (fn []
+                        (finish-to-emoji-handoff!))
+                      220)]
+        (swap! !mobile-kb-state assoc
+               :handoff       :to-emoji
+               :handoff-mode  mode
+               :handoff-timer timer)
+        (hide-mobile-keyboard! ed))
+
+      :else
+      (do
+        (hide-mobile-keyboard! ed)
+        (re-frame/dispatch [:ui/open-popover :inline-emoji
+                            {:default-mode   mode
+                             :from-keyboard? false}])))))
 #+end_src
 
 
