@@ -24,16 +24,19 @@ too much detail it is headless, so we can theme and customize it without much fr
             [paradise.ui.input.drafts :refer [attachment-preview]]
             [paradise.ui.input.composer :refer [tiptap-component extract-editor-payload prepare-html-for-editor]]
             [paradise.ui.input.emotes :refer [emoji-sticker-board]]
-            [paradise.ui.input.autocomplete :refer [suggestion-menu]]
+            [paradise.ui.input.autocomplete :refer [suggestion-menu suggestion-active? parse-slash-command slash-commands]]
+            [paradise.ui.overlays.base :refer [modal-component]]
             [paradise.ui.global :refer [request-item-redraw! !active-popover]]
             [reagent.core :as r]
-            [paradise.shared.utils.helpers :refer [clean-shortcode unregister-file! file->array-buffer register-file! get-file truncate-name extract-metadata]]
+            [paradise.shared.utils.helpers :refer [clean-shortcode unregister-file! file->array-buffer register-file! get-file revoke-object-url! truncate-name extract-metadata]]
+            [paradise.shared.utils.platform :as platform]
             [paradise.shared.utils.svg :as icons]
             [cljs.core.async :refer [go <!]]
             [cljs-workers.core :as main]
             [cljs-workers.mesh :as mesh]
             [paradise.shared.client.state :as state]
-            [paradise.shared.plugins :as plugins]))
+            [paradise.shared.plugins :as plugins]
+            ["@capacitor/keyboard" :refer [Keyboard]]))
 #+end_src
 
 
