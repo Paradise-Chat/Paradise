@@ -174,52 +174,381 @@ another space (unless the user has made them set as global).
 
 **** System Emojis
 
-So we just use the unicode-emoji-json package as it is just a bunch of mappings.
-
-We then initialize them as a 'pack'
+Standard Unicode emojis and searchable shortcodes are loaded from
+~emojibase-data~ (combining Emojibase and JoyPixels shortcode sets) and grouped
+into categorized packs matching the custom emote pack schema.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/emotes.cljs
+(defn- unwrap-json-module [mod]
+  (if (and mod (.-default mod)) (.-default mod) mod))
+
+(defn- normalize-shortcode-list [v]
+  (cond
+    (string? v) [v]
+    (sequential? v) (vec (filter string? v))
+    :else []))
+
+(defonce ^:private merged-unicode-shortcodes
+  (let [jp (js->clj (unwrap-json-module joypixels-shortcodes))
+        eb (js->clj (unwrap-json-module emojibase-shortcodes))]
+    (reduce-kv
+     (fn [acc hex raw-v]
+       (let [existing (get acc hex [])
+             added    (normalize-shortcode-list raw-v)]
+         (assoc acc hex (vec (distinct (concat existing added))))))
+     (reduce-kv (fn [acc hex raw-v]
+                  (assoc acc hex (normalize-shortcode-list raw-v)))
+                {}
+                jp)
+     eb)))
+
 (defonce categorized-system-packs
-  (let [unwrap     (fn [mod] (if (and mod (.-default mod)) (.-default mod) mod))
-        raw-data   (js->clj (unwrap emoji-data) :keywordize-keys true)
-        group-meta {0 {:name "Smileys & Emotion" :icon "😀"}
-                    1 {:name "People & Body"     :icon "👋"}
-                    3 {:name "Animals & Nature"  :icon "🐶"}
-                    4 {:name "Food & Drink"      :icon "🍔"}
-                    5 {:name "Travel & Places"   :icon "✈️"}
-                    6 {:name "Activities"        :icon "⚽"}
-                    7 {:name "Objects"           :icon "💡"}
-                    8 {:name "Symbols"           :icon "💖"}
-                    9 {:name "Flags"             :icon "🚩"}}]
+  (let [raw-data   (js->clj (unwrap-json-module emoji-data) :keywordize-keys true)
+        group-meta {0 {:name-key :composer.emotes/cat-smileys    :icon "😀"}
+                    1 {:name-key :composer.emotes/cat-people     :icon "👋"}
+                    3 {:name-key :composer.emotes/cat-animals    :icon "🐶"}
+                    4 {:name-key :composer.emotes/cat-food       :icon "🍔"}
+                    5 {:name-key :composer.emotes/cat-travel     :icon "✈️"}
+                    6 {:name-key :composer.emotes/cat-activities :icon "⚽"}
+                    7 {:name-key :composer.emotes/cat-objects    :icon "💡"}
+                    8 {:name-key :composer.emotes/cat-symbols    :icon "💖"}
+                    9 {:name-key :composer.emotes/cat-flags      :icon "🚩"}}]
     (->> raw-data
          (group-by :group)
-         (reduce-kv (fn [acc group-id emojis]
-                      (if (or (nil? group-id) (= group-id 9))
-                        acc
-                        (let [meta    (get group-meta group-id {:name "Other" :icon "📦"})
-                              pack-id (str "system-" group-id)]
-                          (assoc acc pack-id
-                                 {:name            (:name meta)
-                                  :hero-icon       (:icon meta)
-                                  :is-unicode?     true
-                                  :system-priority group-id
-                                  :images          (into {}
-                                                         (for [e emojis
-                                                               :let [char (or (:emoji e) (:unicode e))
-                                                                     slug (or (first (:shortcodes e))
-                                                                              (:annotation e)
-                                                                              (:name e)
-                                                                              (:hexcode e))
-                                                                     sc   (clean-shortcode slug)
-                                                                     search-string (str/lower-case
-                                                                                     (str (:name e) " " (:annotation e) " " (str/join " " (:tags e))))]
-                                                               :when (and char (seq sc))]
-                                                           [sc {:id          (str "unicode:" sc)
-                                                                :shortcode   sc
-                                                                :unicode     (str char)
-                                                                :is-unicode? true
-                                                                :search-text search-string}]))}))))
-                    {}))))
+         (reduce-kv
+          (fn [acc group-id emojis]
+            (if (or (nil? group-id) (= group-id 9))
+              acc
+              (let [meta    (get group-meta group-id {:name-key :composer.emotes/cat-other :icon "📦"})
+                    pack-id (str "system-" group-id)]
+                (assoc acc pack-id
+                       {:name-key        (:name-key meta)
+                        :hero-icon       (:icon meta)
+                        :is-unicode?     true
+                        :system-priority group-id
+                        :images
+                        (into {}
+                              (for [e emojis
+                                    :let [ch           (or (:emoji e) (:unicode e))
+                                          hex          (:hexcode e)
+                                          raw-scs      (get merged-unicode-shortcodes hex)
+                                          clean-scs    (->> raw-scs
+                                                            (map clean-shortcode)
+                                                            (filter seq)
+                                                            distinct
+                                                            vec)
+                                          label        (or (:label e) (:annotation e) (:name e))
+                                          primary-slug (or (first clean-scs)
+                                                           (some-> label
+                                                                   str/lower-case
+                                                                   (str/replace #"[^a-z0-9_+-]+" "_")
+                                                                   (str/replace #"^_+|_+$" ""))
+                                                           hex)
+                                          sc           (clean-shortcode primary-slug)
+                                          all-scs      (vec (distinct (cons sc clean-scs)))
+                                          search-str   (str/lower-case
+                                                        (str/join " "
+                                                                  (concat all-scs
+                                                                          [label]
+                                                                          (:tags e))))]
+                                    :when (and ch (seq sc))]
+                                [sc {:id          (str "unicode:" sc)
+                                     :shortcode   sc
+                                     :shortcodes  all-scs
+                                     :label       label
+                                     :unicode     (str ch)
+                                     :is-unicode? true
+                                     :group       group-id
+                                     :search-text search-str}]))}))))
+          {}))))
+
+(defonce all-unicode-emojis
+  (->> categorized-system-packs
+       vals
+       (sort-by :system-priority)
+       (mapcat (fn [pack] (vals (:images pack))))
+       vec))
+
+(defonce unicode-by-char
+  (into {} (map (fn [item] [(:unicode item) item]) all-unicode-emojis)))
+
+(defonce unicode-by-shortcode
+  (reduce
+   (fn [acc item]
+     (let [primary (some-> (:shortcode item) clean-shortcode str/lower-case)
+           aliases (map #(some-> % clean-shortcode str/lower-case) (:shortcodes item))]
+       (reduce (fn [m sc]
+                 (if (and (seq sc) (not (contains? m sc)))
+                   (assoc m sc item)
+                   m))
+               (if (seq primary) (assoc acc primary item) acc)
+               aliases)))
+   {}
+   all-unicode-emojis))
+
+(def ^:private max-tracked-emojis 60)
+
+(defn emoji-usage-key [item]
+  (cond
+    (string? item)
+    (when (seq item) (str "u:" item))
+
+    (= (keyword (:kind item)) :sticker)
+    (when-let [k (or (:sticker-id item) (:id item) (:uri item) (:url item) (:shortcode item))]
+      (str "s:" k))
+
+    (:is-unicode? item)
+    (when-let [u (or (:unicode item)
+                     (:unicode (get unicode-by-shortcode
+                                    (some-> (:shortcode item) clean-shortcode str/lower-case))))]
+      (str "u:" u))
+
+    :else
+    (when-let [k (or (:emote-id item) (:id item) (:uri item) (:url item) (:shortcode item))]
+      (str "c:" k))))
+
+(defn frecency-score [{:keys [count last-used score]} now]
+  (if (and (number? score) (pos? score))
+    (double score)
+    (let [cnt       (max 1 (or count 1))
+          ts        (or last-used 0)
+          age-hours (/ (max 0 (- now ts)) 3600000.0)
+          weight    (cond
+                      (< age-hours 2)   4.0
+                      (< age-hours 24)  2.5
+                      (< age-hours 168) 1.5
+                      :else             1.0)]
+      (+ (* cnt weight) (/ 1.0 (+ 1.0 (/ age-hours 24.0)))))))
+
+(defn- resolve-unicode-entry [entry]
+  (let [u-raw (some-> (:unicode entry) str not-empty)
+        sc-l  (some-> (:shortcode entry) clean-shortcode str/lower-case not-empty)
+        found (or (when u-raw (get unicode-by-char u-raw))
+                  (when sc-l (get unicode-by-shortcode sc-l)))]
+    (cond
+      found
+      (merge entry found {:is-unicode? true})
+
+      u-raw
+      (assoc entry
+             :unicode     u-raw
+             :shortcode   (or (not-empty (clean-shortcode (or (:shortcode entry) ""))) u-raw)
+             :is-unicode? true)
+
+      :else nil)))
+
+(defn- normalize-engine-frequent-items [raw-items]
+  (->> (or raw-items [])
+       (keep (fn [entry]
+               (when (map? entry)
+                 (let [clj-e (if (map? entry) entry (js->clj entry :keywordize-keys true))]
+                   (if (:is-unicode? clj-e)
+                     (resolve-unicode-entry clj-e)
+                     (let [uri (or (:uri clj-e) (:url clj-e))]
+                       (when (or uri (:emote-id clj-e) (:sticker-id clj-e) (:id clj-e) (seq (:shortcode clj-e)))
+                         (assoc clj-e
+                                :is-unicode? false
+                                :shortcode   (clean-shortcode (or (:shortcode clj-e) (:body clj-e) ""))
+                                :uri         uri
+                                :url         uri))))))))
+       vec))
+
+(re-frame/reg-event-db
+ :emoji/set-frequent-items
+ [(state/guard-session-gen second)]
+ (fn [db [_ _gen payload]]
+   (let [items    (if (map? payload) (:items payload) payload)
+         stickers (when (map? payload) (:stickers payload))]
+     (cond-> db
+       (some? items)    (assoc :emoji/frequent-items (normalize-engine-frequent-items items))
+       (some? stickers) (assoc :emoji/frequent-stickers
+                               (mapv #(assoc % :kind :sticker)
+                                     (normalize-engine-frequent-items stickers)))))))
+
+(re-frame/reg-event-fx
+ :emoji/record-usage
+ (fn [{:keys [db]} [_ raw-item]]
+   (let [sticker? (= (keyword (when (map? raw-item) (:kind raw-item))) :sticker)
+         item     (cond
+                    (string? raw-item)
+                    (or (get unicode-by-char raw-item)
+                        (get unicode-by-shortcode (str/lower-case (str (or (clean-shortcode raw-item) ""))))
+                        {:id          (str "unicode:" raw-item)
+                         :shortcode   raw-item
+                         :unicode     raw-item
+                         :is-unicode? true})
+
+                    (map? raw-item)
+                    (if (and (not sticker?) (:is-unicode? raw-item))
+                      (or (resolve-unicode-entry raw-item) raw-item)
+                      raw-item)
+
+                    :else nil)
+         k        (when item (emoji-usage-key item))]
+     (if-not k
+       {}
+       (let [now        (js/Date.now)
+             gen        (:session/gen db)
+             db-key     (if sticker? :emoji/frequent-stickers :emoji/frequent-items)
+             cur-items  (vec (or (get db db-key) []))
+             existing   (first (filter #(= (emoji-usage-key %) k) cur-items))
+             others     (remove #(= (emoji-usage-key %) k) cur-items)
+             next-count (inc (or (:count existing) 0))
+             next-entry (cond-> {:key         k
+                                 :kind        (if sticker? :sticker :emoji)
+                                 :count       next-count
+                                 :last-used   now
+                                 :is-unicode? (and (not sticker?) (boolean (:is-unicode? item)))
+                                 :shortcode   (clean-shortcode (or (:shortcode item) (:body item) (:shortcode existing) ""))
+                                 :id          (or (:id item) (:id existing) k)}
+                          (:emote-id item)   (assoc :emote-id (:emote-id item))
+                          (:sticker-id item) (assoc :sticker-id (:sticker-id item))
+                          (:body item)       (assoc :body (:body item))
+                          (:unicode item)    (assoc :unicode (:unicode item))
+                          (:label item)      (assoc :label (:label item))
+                          (or (:uri item) (:url item))
+                          (assoc :uri (or (:uri item) (:url item))
+                                 :url (or (:uri item) (:url item)))
+                          (:info item)       (assoc :info (:info item)))
+             optimistic (->> (cons next-entry others)
+                             (sort-by #(- (frecency-score % now)))
+                             (take max-tracked-emojis)
+                             vec)]
+         (when-let [pool @state/!engine-pool]
+           (go
+             (let [res (<! (main/do-with-pool! pool
+                                               {:handler   :record-emote-usage
+                                                :arguments (select-keys next-entry
+                                                                        [:key :kind :is-unicode? :unicode
+                                                                         :shortcode :body :id :emote-id
+                                                                         :sticker-id :uri :url :info])}))]
+               (when (#{"success" :success} (:status res))
+                 (re-frame/dispatch [:emoji/set-frequent-items
+                                     gen
+                                     {:items    (:items res)
+                                      :stickers (:stickers res)}])))))
+         {:db (assoc db db-key optimistic)})))))
+
+(re-frame/reg-sub
+ :emoji/frequent-raw
+ (fn [db _]
+   (or (:emoji/frequent-items db) [])))
+
+(re-frame/reg-sub
+ :emoji/frequent-stickers-raw
+ (fn [db _]
+   (or (:emoji/frequent-stickers db) [])))
+
+(re-frame/reg-sub
+ :emoji/frequent-items
+ :<- [:emoji/frequent-raw]
+ :<- [:emoji/active-set]
+ (fn [[raw-items custom-packs] _]
+   (when (seq raw-items)
+     (let [all-live     (for [pack (vals custom-packs)
+                              [sc item] (:images pack)
+                              :let [uri (or (:uri item) (:url item))]
+                              :when (and uri (not= (:can-emoji? item) false))]
+                          (assoc item
+                                 :shortcode        (clean-shortcode (or (:shortcode item) sc))
+                                 :pack-name        (:name pack)
+                                 :uri              uri
+                                 :url              uri
+                                 :is-unicode?      false
+                                 :is-sticker-pack? (:is-sticker-pack? pack)))
+           live-by-uri  (into {} (map (fn [i] [(:uri i) i]) all-live))
+           live-by-id   (into {} (keep (fn [i] (when (:id i) [(:id i) i])) all-live))
+           live-by-eid  (into {} (keep (fn [i] (when (:emote-id i) [(str (:emote-id i)) i])) all-live))
+           live-by-sc   (into {} (keep (fn [i]
+                                         (when-let [sc (not-empty (str (or (:shortcode i) "")))]
+                                           [(str/lower-case sc) i]))
+                                       all-live))]
+       (->> raw-items
+            (keep (fn [entry]
+                    (if (:is-unicode? entry)
+                      (when-let [resolved (resolve-unicode-entry entry)]
+                        [(:shortcode resolved) resolved])
+                      (let [eid     (some-> (or (:emote-id entry) (:id entry)) str)
+                            uri     (or (:uri entry) (:url entry))
+                            sc-l    (some-> (:shortcode entry) clean-shortcode str/lower-case not-empty)
+                            live    (or (when eid (get live-by-eid eid))
+                                        (when (:id entry) (get live-by-id (:id entry)))
+                                        (when uri (get live-by-uri uri))
+                                        (when sc-l (get live-by-sc sc-l)))
+                            eff-uri (or (:uri live) (:url live) uri)]
+                        (when eff-uri
+                          (let [merged (merge entry live)
+                                sc     (clean-shortcode (or (:shortcode merged) "emote"))]
+                            [sc (assoc merged
+                                       :shortcode   sc
+                                       :uri         eff-uri
+                                       :url         eff-uri
+                                       :is-unicode? false)]))))))
+            (take 36)
+            vec)))))
+
+(re-frame/reg-sub
+ :emoji/frequent-stickers
+ :<- [:emoji/frequent-stickers-raw]
+ :<- [:emoji/active-set]
+ (fn [[raw-stickers custom-packs] _]
+   (when (seq raw-stickers)
+     (let [all-live     (for [pack (vals custom-packs)
+                              [sc item] (:images pack)
+                              :let [uri (or (:uri item) (:url item))]
+                              :when (and uri (:can-sticker? item))]
+                          (assoc item
+                                 :shortcode   (clean-shortcode (or (:shortcode item) sc))
+                                 :pack-name   (:name pack)
+                                 :uri         uri
+                                 :url         uri
+                                 :is-unicode? false
+                                 :kind        :sticker))
+           live-by-sid  (into {} (keep (fn [i] (when (:sticker-id i) [(str (:sticker-id i)) i])) all-live))
+           live-by-id   (into {} (keep (fn [i] (when (:id i) [(:id i) i])) all-live))
+           live-by-uri  (into {} (map (fn [i] [(:uri i) i]) all-live))]
+       (->> raw-stickers
+            (keep (fn [entry]
+                    (let [sid     (some-> (or (:sticker-id entry) (:id entry)) str)
+                          uri     (or (:uri entry) (:url entry))
+                          live    (or (when sid (get live-by-sid sid))
+                                      (when (:id entry) (get live-by-id (:id entry)))
+                                      (when uri (get live-by-uri uri)))
+                          eff-uri (or (:uri live) (:url live) uri)]
+                      (when eff-uri
+                        (let [merged (merge entry live)
+                              sc     (clean-shortcode (or (:body merged) (:shortcode merged) "sticker"))]
+                          [sc (assoc merged
+                                     :kind        :sticker
+                                     :shortcode   sc
+                                     :body        (or (:body merged) sc)
+                                     :uri         eff-uri
+                                     :url         eff-uri
+                                     :is-unicode? false)])))))
+            (take 24)
+            vec)))))
+
+(re-frame/reg-sub
+ :emoji/usage
+ :<- [:emoji/frequent-raw]
+ (fn [raw-items _]
+   (reduce (fn [acc entry]
+             (if-let [k (emoji-usage-key entry)]
+               (assoc acc k entry)
+               acc))
+           {}
+           raw-items)))
+
+(re-frame/reg-sub
+ :emoji/sticker-usage
+ :<- [:emoji/frequent-stickers-raw]
+ (fn [raw-stickers _]
+   (reduce (fn [acc entry]
+             (if-let [k (emoji-usage-key (assoc entry :kind :sticker))]
+               (assoc acc k entry)
+               acc))
+           {}
+           raw-stickers)))
 #+end_src
 
 
