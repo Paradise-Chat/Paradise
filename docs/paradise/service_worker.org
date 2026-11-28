@@ -17,9 +17,9 @@ most web applications, not just web-based Matrix clients.
 
 ***** Imports
 
-Now workbox-precaching is set up through Vite (but is its own npm package mind you).
-This is an elegant way to ensure our caching mechanism is working well.
-We do not want the user to download the WASM ever again unless we change it.
+Now workbox-precaching is set up through Vite (but is its own npm package mind
+you). This precaches hashed app-shell assets while heavy engine WASM modules are
+cached and version-purged in IndexedDB by ~worker-loader~.
 #+begin_src clojurescript :tangle ../../src/service_worker.cljs
 (ns service-worker
   (:require [clojure.string :as str]
