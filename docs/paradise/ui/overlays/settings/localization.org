@@ -12,6 +12,7 @@ between the i18n options for example.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/localization.cljs
 (ns paradise.ui.overlays.settings.localization
   (:require
+   [clojure.string :as str]
    [paradise.shared.utils.svg :as icons]
    [re-frame.core :as re-frame]))
 #+end_src
@@ -21,9 +22,57 @@ between the i18n options for example.
 
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/localization.cljs
+(def ^:private known-locale-names
+  {:en    ["English" "English"]
+   :es    ["Spanish" "Español"]
+   :fr    ["French" "Français"]
+   :de    ["German" "Deutsch"]
+   :it    ["Italian" "Italiano"]
+   :pt    ["Portuguese" "Português"]
+   :pt-br ["Portuguese (Brazil)" "Português (Brasil)"]
+   :nl    ["Dutch" "Nederlands"]
+   :pl    ["Polish" "Polski"]
+   :ru    ["Russian" "Русский"]
+   :uk    ["Ukrainian" "Українська"]
+   :sv    ["Swedish" "Svenska"]
+   :tr    ["Turkish" "Türkçe"]
+   :ja    ["Japanese" "日本語"]
+   :ko    ["Korean" "한국어"]
+   :zh    ["Chinese" "中文"]
+   :zh-cn ["Chinese (Simplified)" "简体中文"]
+   :zh-tw ["Chinese (Traditional)" "繁體中文"]
+   :ar    ["Arabic" "العربية"]
+   :vi    ["Vietnamese" "Tiếng Việt"]
+   :th    ["Thai" "ไทย"]
+   :lorem ["Lorem Ipsum" "Lorem Ipsum"]})
+
+(defn- resolve-available-locales [dict engine-dict current-locale]
+  (let [all-keys (->> (concat [:en]
+                              (when (map? dict) (keys dict))
+                              (when (map? engine-dict) (keys engine-dict))
+                              (when (keyword? current-locale) [current-locale]))
+                      (filter keyword?)
+                      (remove #{:meta})
+                      distinct
+                      (sort-by (fn [k]
+                                 [(cond (= k :en) 0 (= k :lorem) 2 :else 1)
+                                  (name k)])))]
+    (mapv (fn [id]
+            (let [meta-map         (or (get-in dict [id :meta])
+                                       (get-in engine-dict [id :meta]))
+                  [k-lbl k-native] (get known-locale-names id)
+                  fallback         (str/upper-case (name id))
+                  label            (or (:label meta-map) k-lbl fallback)
+                  native           (or (:native meta-map) k-native label)]
+              [id label native]))
+          all-keys)))
+
 (defn ^:ui language-time-tab []
-  (let [tr     @(re-frame/subscribe [:i18n/tr])
-        locale @(re-frame/subscribe [:i18n/locale])]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        locale      @(re-frame/subscribe [:i18n/locale])
+        dict        @(re-frame/subscribe [:i18n/dictionary])
+        engine-dict @(re-frame/subscribe [:i18n/engine-dictionary])
+        locales     (resolve-available-locales dict engine-dict locale)]
     [:div.settings-tab-content
      [:p.settings-subview-lead
       (tr [:settings.language-time/description])]
@@ -32,9 +81,7 @@ between the i18n options for example.
       [:div.settings-hub-group-label
        (tr [:settings.language-time/system-label])]
       [:div.settings-list
-       (for [[id label native]
-             [[:en "English" "English"]
-              [:lorem "Lorem Ipsum" "Lorem Ipsum"]]]
+       (for [[id label native] locales]
          ^{:key id}
          [:div.settings-list-item.is-clickable
           {:class    (when (= locale id) "is-active")
