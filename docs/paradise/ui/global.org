@@ -20,6 +20,8 @@ them collected together
    [paradise.ui.overlays.base :as overlays-base
     :refer [modal-component popover-component context-menu-component]]
    [paradise.shared.utils.helpers :refer [local-media-url?]]
+   [paradise.shared.utils.haptics :refer [trigger-haptic!]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.shared.utils.svg :as icons]
    [paradise.media.component :refer [media]]))
 #+end_src
