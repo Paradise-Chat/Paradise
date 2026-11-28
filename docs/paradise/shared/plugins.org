@@ -285,9 +285,9 @@ component slots
    (let [current (:plugins/custom-registries db [])
          updated (vec (remove #(= % url) current))]
      (swap! reg/!registry-indices dissoc url)
-     (refresh-registry-state! updated)
-     {:db (assoc db :plugins/custom-registries updated)
-      :dispatch [:settings/save "custom_registries" (clj->js updated)]})))
+     (-> (store/set-setting! "custom_registries" updated)
+         (p/then #(refresh-registry-state! updated {:force? true})))
+     {:db (assoc db :plugins/custom-registries updated)})))
 
 (rf/reg-event-fx
  :plugins/hydrate-urls
@@ -295,7 +295,7 @@ component slots
    (let [clj-urls   (js->clj urls)
          valid-urls (if (coll? clj-urls) (vec clj-urls) [])]
      {:db         (assoc db :plugins/installed-urls valid-urls)
-      :dispatch-n (mapv (fn [url] [:plugins/fetch-and-boot url nil]) valid-urls)})))
+      :dispatch-n (mapv (fn [url] [:plugins/fetch-and-boot url nil {:hydrated? true}]) valid-urls)})))
 
 (rf/reg-sub
  :plugins/disabled-urls
@@ -342,47 +342,82 @@ component slots
      (when (not enabled?)
        (cleanup-plugin-resources! plugin-id))
 
-     {:db (assoc db :plugins/disabled-urls new-disabled)
-      :fx (cond-> [[:dispatch [:settings/save "disabled_plugin_urls" (clj->js (vec new-disabled))]]]
-            enabled? (conj [:dispatch [:plugins/execute-boot-sequence url plugin]]))})))
+     {:db (cond-> (assoc db :plugins/disabled-urls new-disabled)
+            enabled? (update :plugins/failed-urls dissoc url))
+      :fx (cond-> [[:dispatch [:settings/save "disabled_plugin_urls" (vec new-disabled)]]]
+            (and enabled? plugin)
+            (conj [:dispatch [:plugins/execute-boot-sequence url plugin]])
+
+            (and enabled? (nil? plugin))
+            (conj [:dispatch [:plugins/fetch-and-boot url nil]]))})))
 
 (rf/reg-event-fx
  :plugins/install-from-url
  (fn [{:keys [db]} [_ url]]
-   {:db (assoc db :plugins/installing? true)
-    :dispatch [:plugins/fetch-and-boot url nil]}))
+   (let [clean-url (str/trim (str url))]
+     (if (str/blank? clean-url)
+       {}
+       {:db (-> db
+                (assoc :plugins/installing? true
+                       :plugins/last-install-error nil)
+                (update :plugins/failed-urls dissoc clean-url))
+        :dispatch [:plugins/fetch-and-boot clean-url nil]}))))
+
+(rf/reg-event-db
+ :plugins/clear-install-error
+ (fn [db _]
+   (assoc db :plugins/last-install-error nil)))
 
 (rf/reg-event-fx
  :plugins/installation-success
  (fn [{:keys [db]} [_ source-url plugin-map]]
    (let [engine-owned? (some? (:provided-by plugin-map))
          current-urls  (:plugins/installed-urls db [])
+         user-owned?   (or (not engine-owned?)
+                           (boolean (some #(= % source-url) current-urls)))
          new-urls      (if engine-owned?
                          current-urls
-                         (vec (distinct (conj current-urls source-url))))]
+                         (vec (distinct (conj current-urls source-url))))
+         entry         (cond-> (assoc plugin-map :source-url source-url)
+                         (and engine-owned? user-owned?) (dissoc :provided-by))]
      {:db (-> db
               (assoc :plugins/pending-security-approval nil
                      :plugins/installing? false
+                     :plugins/last-install-error nil
                      :plugins/installed-urls new-urls)
+              (update :plugins/failed-urls dissoc source-url)
               (update-in [:plugins/active (:id plugin-map)]
-                         (constantly (assoc plugin-map :source-url source-url))))
+                         (constantly entry)))
       :fx (cond-> []
             (not engine-owned?)
-            (conj [:dispatch [:settings/save "plugin_urls" (clj->js new-urls)]]))})))
+            (conj [:dispatch [:settings/save "plugin_urls" new-urls]]))})))
 
 (rf/reg-event-fx
  :plugins/uninstall-url
  (fn [{:keys [db]} [_ url]]
-   (let [current-urls (:plugins/installed-urls db [])
-         new-urls     (vec (remove #(= % url) current-urls))
-         plugin       (->> (:plugins/active db) (vals) (filter #(= (:source-url %) url)) first)
-         plugin-id    (:id plugin)]
-     (cleanup-plugin-resources! plugin-id)
+   (let [current-urls   (:plugins/installed-urls db [])
+         new-urls       (vec (remove #(= % url) current-urls))
+         disabled-urls  (set (:plugins/disabled-urls db #{}))
+         was-disabled?  (contains? disabled-urls url)
+         new-disabled   (disj disabled-urls url)
+         matching       (->> (:plugins/active db) (vals) (filter #(= (:source-url %) url)))
+         matching-ids   (keep :id matching)
+         pending        (:plugins/pending-security-approval db)
+         clear-pending? (= (:url pending) url)]
+     (doseq [pid matching-ids]
+       (cleanup-plugin-resources! pid))
 
-     {:db (-> db
-              (assoc :plugins/installed-urls new-urls)
-              (update :plugins/active dissoc plugin-id))
-      :dispatch [:settings/save "plugin_urls" (clj->js new-urls)]})))
+     {:db (cond-> (-> db
+                      (assoc :plugins/installed-urls new-urls
+                             :plugins/disabled-urls new-disabled)
+                      (update :plugins/failed-urls dissoc url)
+                      (update :plugins/active
+                              (fn [m]
+                                (apply dissoc (or m {}) matching-ids))))
+            clear-pending? (assoc :plugins/pending-security-approval nil))
+      :fx (cond-> [[:dispatch [:settings/save "plugin_urls" new-urls]]]
+            was-disabled?
+            (conj [:dispatch [:settings/save "disabled_plugin_urls" (vec new-disabled)]]))})))
 
 (rf/reg-event-db
  :plugins/hydrate-disabled-urls
@@ -393,7 +428,7 @@ component slots
 
 (rf/reg-event-fx
  :plugins/fetch-and-boot
- (fn [{:keys [db]} [_ url & [provided-by-engine]]]
+ (fn [{:keys [db]} [_ url & [provided-by-engine opts]]]
    (-> (js/fetch url)
        (.then (fn [resp]
                 (if (.-ok resp) (.text resp)
@@ -403,16 +438,19 @@ component slots
                       plugin-map    (cond-> raw-map
                                       provided-by-engine (assoc :provided-by provided-by-engine))
                       disabled-urls (:plugins/disabled-urls db #{})
-                      disabled?     (contains? disabled-urls url)]
+                      disabled?     (contains? disabled-urls url)
+                      hydrated?     (boolean (:hydrated? opts))]
                   (if disabled?
                     (rf/dispatch [:plugins/installation-success url plugin-map])
-                    (if (seq (:external-scripts plugin-map))
+                    (if (and (seq (:external-scripts plugin-map)) (not hydrated?))
                       (rf/dispatch [:plugins/prompt-security-warning url plugin-map])
                       (rf/dispatch [:plugins/execute-boot-sequence url plugin-map]))))))
        (.catch (fn [err]
                  (js/console.error "Plugin boot failed for" url "-" err)
                  (rf/dispatch [:plugins/installation-failed url (str err)]))))
-   {:db (assoc db :plugins/installing? true)}))
+   {:db (-> db
+            (assoc :plugins/installing? true)
+            (update :plugins/failed-urls dissoc url))}))
 
 (rf/reg-event-fx
  :plugins/execute-boot-sequence
@@ -469,28 +507,78 @@ component slots
 
 (rf/reg-event-db
  :plugins/installation-failed
- (fn [db [_ _ _]]
-   (assoc db :plugins/pending-security-approval nil
-             :plugins/installing? false)))
+ (fn [db [_ url err-msg]]
+   (let [installed? (some #(= % url) (:plugins/installed-urls db []))
+         msg        (or (not-empty (str err-msg)) "Failed to load plugin")]
+     (cond-> (assoc db
+                    :plugins/pending-security-approval nil
+                    :plugins/installing? false
+                    :plugins/last-install-error {:url url :error msg})
+       (and (string? url) (or installed? (not (str/blank? msg))))
+       (assoc-in [:plugins/failed-urls url] msg)))))
 
 (rf/reg-event-db
  :plugins/prompt-security-warning
  (fn [db [_ url plugin-map]]
    (assoc db :plugins/pending-security-approval {:url url :plugin-map plugin-map})))
 
+(rf/reg-event-fx
+ :plugins/approve-security-warning
+ (fn [{:keys [db]} _]
+   (if-let [{:keys [url plugin-map]} (:plugins/pending-security-approval db)]
+     {:db       (assoc db :plugins/pending-security-approval nil)
+      :dispatch [:plugins/execute-boot-sequence url plugin-map]}
+     {})))
+
 (rf/reg-event-db
  :plugins/cancel-install
  (fn [db _]
-   (assoc db :plugins/pending-security-approval nil
-             :plugins/installing? false)))
+   (let [pending-url (get-in db [:plugins/pending-security-approval :url])
+         installed?  (and pending-url (some #(= % pending-url) (:plugins/installed-urls db [])))]
+     (cond-> (assoc db
+                    :plugins/pending-security-approval nil
+                    :plugins/installing? false)
+       installed?
+       (assoc-in [:plugins/failed-urls pending-url] "Pending security approval")))))
 
 (rf/reg-sub
  :plugins/active-list
  (fn [db _]
    (vals (:plugins/active db {}))))
 
+(rf/reg-sub
+ :plugins/failed-urls
+ (fn [db _]
+   (:plugins/failed-urls db {})))
+
+(rf/reg-sub
+ :plugins/managed-list
+ (fn [db _]
+   (let [active-plugins (vec (vals (:plugins/active db {})))
+         active-urls    (set (keep :source-url active-plugins))
+         installed-urls (:plugins/installed-urls db [])
+         failed-urls    (:plugins/failed-urls db {})
+         reg-by-url     (into {}
+                              (keep (fn [p]
+                                      (when-let [u (:manifest-url p)]
+                                        [u p])))
+                              (vals (:plugins/registry-plugins db (reg/resolve-plugins))))
+         unloaded       (for [u installed-urls
+                              :when (and (string? u) (not (contains? active-urls u)))
+                              :let [reg-meta (get reg-by-url u)
+                                    err-msg  (get failed-urls u)]]
+                          {:id          (or (:id reg-meta) (keyword (str "unloaded-" (hash u))))
+                           :name        (or (:name reg-meta) u)
+                           :version     (:version reg-meta)
+                           :description (or (:description reg-meta) u)
+                           :source-url  u
+                           :loaded?     false
+                           :error       err-msg})]
+     (into (mapv #(assoc % :loaded? true) active-plugins) unloaded))))
+
 (rf/reg-sub :plugins/installed-urls (fn [db _] (:plugins/installed-urls db [])))
 (rf/reg-sub :plugins/pending-security-approval (fn [db _] (:plugins/pending-security-approval db)))
+(rf/reg-sub :plugins/last-install-error (fn [db _] (:plugins/last-install-error db)))
 #+end_src
 
 
