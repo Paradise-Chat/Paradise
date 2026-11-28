@@ -7,7 +7,7 @@
                         :out-dir         "src-gen"
                         :registry-ns     virtualizer.registry
                         :skip-namespaces #{virtualizer.registry
-                                           virtualizer.protocol
+                                           virtualizer.spec
                                            virtualizer.core
                                            virtualizer.scroll
                                            virtualizer.metrics
