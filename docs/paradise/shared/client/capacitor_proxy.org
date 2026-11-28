@@ -21,7 +21,9 @@ proxy provider across Electron, Capacitor, and browser extensions.
    [clojure.string :as str]
    [goog.object :as gobj]
    [net :as net]
+   [paradise.shared.net.auth :refer [valid-http-url-str]]
    [paradise.shared.utils.encoding :refer [utf8->base64]]
+   [paradise.shared.utils.platform :as platform]
    [promesa.core :as p]
    [re-frame.core :as re-frame]))
 #+end_src
@@ -49,14 +51,6 @@ proxy provider across Electron, Capacitor, and browser extensions.
   (if (native-paradise-proxy-available?)
     (call-cap-plugin paradise-proxy-plugin method-name arg)
     (fallback-fn)))
-
-(defn- valid-http-url-str [raw]
-  (when (and (string? raw) (not (str/blank? raw)))
-    (try
-      (let [u (js/URL. (str/trim raw))]
-        (when (#{"http:" "https:"} (.-protocol u))
-          (.-href u)))
-      (catch :default _ nil))))
 
 (defn- fallback-capacitor-http-request [js-opts]
   (let [url      (gobj/get js-opts "url")
@@ -125,6 +119,9 @@ proxy provider across Electron, Capacitor, and browser extensions.
                   (call-or-fallback "clearFrame"
                                     #js {"urlOrHost" (or url-or-host "")}
                                     clear-ok)))
+      (gobj/set "prepareUpload"
+                (fn [opts]
+                  (call-or-fallback "prepareUpload" opts #(prep-miss opts))))
       (gobj/set "openAuthWindow"
                 (fn [opts]
                   (if-let [safe-url (valid-http-url-str (some-> opts (gobj/get "url")))]
@@ -167,7 +164,7 @@ proxy provider across Electron, Capacitor, and browser extensions.
   []
   (when (and (exists? js/window)
              (not (gobj/get js/window "paradiseProxy"))
-             (contains? #{"ios" "android"} (.getPlatform Capacitor)))
+             (platform/capacitor-mobile?))
     (net/mount-host-proxy! (build-capacitor-proxy-bridge))))
 
 (defonce ^:private !proxy-listener-bound? (atom false))
