@@ -19,10 +19,13 @@
        (let [sym (second x)]
          (if (:defer (meta sym))
            (let [clean-sym (with-meta sym (dissoc (meta sym) :defer))
-                 clean-x   (cons (first x) (cons clean-sym (drop 2 x)))]
+                 clean-x   (cons (first x) (cons clean-sym (drop 2 x)))
+                 local-sym (if (= (first x) 'defoverride)
+                             (symbol (name clean-sym))
+                             clean-sym)]
              (list 'do
                    clean-x
-                   (list 'clojure.core/aset clean-sym "$defer_boundary" true)))
+                   (list 'clojure.core/aset local-sym "$defer_boundary" true)))
            x))
        x))
    form))
@@ -114,6 +117,9 @@
         :else x))
     form))
 
+
+
+
 (defn custom-macro? [sym]
   (when (symbol? sym)
     (let [macro-var (ns-resolve 'paradise.shared.utils.macros (symbol (name sym)))]
@@ -121,22 +127,93 @@
            (:macro (meta macro-var))
            (= (ns-name (:ns (meta macro-var))) 'paradise.shared.utils.macros)))))
 
+(defn extract-promesa-aliases [form]
+  (let [aliases (atom #{"promesa.core"})
+        refers  (atom #{})]
+    (walk/prewalk
+     (fn [x]
+       (when (and (vector? x) (= (first x) 'promesa.core))
+         (let [opts (apply hash-map (rest x))]
+           (when-let [a (:as opts)]
+             (swap! aliases conj (name a)))
+           (when-let [rs (:refer opts)]
+             (doseq [r rs]
+               (swap! refers conj (name r))))))
+       x)
+     form)
+    {:aliases @aliases :refers @refers}))
+
+(defn- wrap-body [body]
+  (if (= 1 (count body))
+    (first body)
+    (cons 'do body)))
+
+(defn- expand-promesa-let [bindings body]
+  (let [pairs (partition 2 bindings)
+        inner (reduce (fn [acc [lhs rhs]]
+                        (list 'promesa.core/then
+                              (list 'promesa.core/promise rhs)
+                              (list 'fn [lhs] acc)))
+                      (wrap-body body)
+                      (reverse pairs))]
+    (list 'promesa.core/then
+          (list 'promesa.core/promise nil)
+          (list 'fn ['_] inner))))
+
+(defn- expand-promesa-do [exprs]
+  (if (empty? exprs)
+    (list 'promesa.core/promise nil)
+    (let [inner (reduce (fn [acc expr]
+                          (list 'promesa.core/then
+                                (list 'promesa.core/promise expr)
+                                (list 'fn ['_] acc)))
+                        (last exprs)
+                        (reverse (butlast exprs)))]
+      (list 'promesa.core/then
+            (list 'promesa.core/promise nil)
+            (list 'fn ['_] inner)))))
+
+(defn- expand-promesa-plet [bindings body]
+  (let [pairs (vec (partition 2 bindings))]
+    (if (empty? pairs)
+      (list 'promesa.core/then
+            (list 'promesa.core/promise nil)
+            (list 'fn ['_] (wrap-body body)))
+      (list 'promesa.core/then
+            (list 'promesa.core/all
+                  (mapv (fn [[_ rhs]] (list 'promesa.core/promise rhs)) pairs))
+            (list 'fn [(mapv first pairs)] (wrap-body body))))))
+
+(defn- match-promesa-macro [sym {:keys [aliases refers]}]
+  (when (symbol? sym)
+    (let [ns-part (namespace sym)
+          nm-part (name sym)]
+      (cond
+        (and ns-part (contains? aliases ns-part) (#{"let" "do" "plet"} nm-part))
+        nm-part
+
+        (and (nil? ns-part) (contains? refers nm-part) (#{"let" "do" "plet"} nm-part))
+        nm-part
+
+        :else nil))))
+
 
 (defn expand-macros [form]
-  (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
-    (walk/prewalk
-      (fn [x]
-        (if (seq? x)
-          (let [sym (first x)]
-            (cond
-              (#{'go 'cljs.core.async/go} sym)
-              (let [unrolled-promises (walk/prewalk
+  (let [promesa-info (extract-promesa-aliases form)]
+    (with-redefs [clojure.tools.analyzer.passes.jvm.validate/validate identity]
+      (walk/prewalk
+       (fn [x]
+         (if (seq? x)
+           (let [sym (first x)]
+             (cond
+               (#{'go 'cljs.core.async/go} sym)
+               (let [unrolled-promises (walk/prewalk
                                         (fn [node]
                                           (if (and (seq? node) (= (first node) '<p!))
                                             (list '<! (list 'cljs.core.async.interop/p->c (second node)))
                                             node))
                                         (rest x))
-                    qualified         (walk/prewalk
+                     qualified         (walk/prewalk
                                         #(case %
                                            <! 'clojure.core.async/<!
                                            cljs.core.async/<! 'clojure.core.async/<!
@@ -148,15 +225,21 @@
                                            cljs.core.async/alts! 'clojure.core.async/alts!
                                            %)
                                         unrolled-promises)
-                    expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
-                (scrub-jvm-artifacts expanded))
+                     expanded          (macroexpand-1 `(clojure.core.async/go ~@qualified))]
+                 (scrub-jvm-artifacts expanded))
 
-              (custom-macro? sym)
-              (let [qualified-macro (symbol "paradise.shared.utils.macros" (name sym))]
-                (macroexpand-1 (cons qualified-macro (rest x))))
-              :else x))
-          x))
-      form)))
+               (match-promesa-macro sym promesa-info)
+               (case (match-promesa-macro sym promesa-info)
+                 "let"  (expand-promesa-let (second x) (drop 2 x))
+                 "do"   (expand-promesa-do (rest x))
+                 "plet" (expand-promesa-plet (second x) (drop 2 x)))
+
+               (custom-macro? sym)
+               (let [qualified-macro (symbol "paradise.shared.utils.macros" (name sym))]
+                 (macroexpand-1 (cons qualified-macro (rest x))))
+               :else x))
+           x))
+       form))))
 
 (defn read-cljs [s]
   (binding [*data-readers* tags/*cljs-data-readers*]
@@ -194,6 +277,7 @@
                :target target
                :code expanded}))
           cljs-files)))
+
 
 (defn -main [& args]
   (let [raw-meta      (edn/read-string (slurp "manifest.edn"))
