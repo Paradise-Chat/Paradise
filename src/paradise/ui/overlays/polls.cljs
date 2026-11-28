@@ -4,20 +4,15 @@
    [cljs.core.async :refer [<! go]]
    [clojure.string :as str]
    [paradise.shared.client.state :as state]
-   [paradise.shared.utils.helpers :refer [uint8->base64]]
    [paradise.shared.utils.svg :as icons]
-   [paradise.ui.container.call.audio-processor :as audio-processor]
-   [paradise.ui.container.call.runtime :as call-rtc]
    [paradise.ui.overlays.base :refer [modal-component]]
-   [promesa.core :as p]
    [re-frame.core :as re-frame]
-   [re-frame.db :as rf-db]
    [reagent.core :as r]
    [taoensso.timbre :as log]))
 
 (re-frame/reg-event-fx
  :polls/create
- (fn [_ [_ {:keys [room-id question answers max-selections undisclosed? on-done on-error]}]]
+ (fn [{:keys [db]} [_ {:keys [room-id question answers max-selections undisclosed? on-done on-error]}]]
    (when (and room-id @state/!engine-pool)
      (let [pool @state/!engine-pool]
        (go
@@ -40,7 +35,9 @@
            (catch :default e
              (log/error "Exception creating poll:" e)
              (when on-error (on-error)))))))
-   {}))
+   (if (= (get-in db [:input-context room-id :mode]) :reply)
+     {:db (update db :input-context dissoc room-id)}
+     {})))
 
 
 (defn ^:ui create-poll-content [{:keys [room-id]}]
