@@ -1,0 +1,510 @@
+* QR Code Encoder
+
+Pure ClojureScript ISO/IEC 18004 QR code generator (versions 1-40, error
+correction levels L/M/Q/H, numeric/alphanumeric/byte modes, automatic mask
+selection, and SVG path rendering) with zero external npm dependencies.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/qr.cljs
+(ns paradise.shared.utils.qr
+  (:require [clojure.string :as str]))
+
+(def ^:private ecc-levels
+  {:l [0 1]
+   :m [1 0]
+   :q [2 3]
+   :h [3 2]})
+
+(def ^:private ecc-codewords-per-block
+  [[-1  7 10 15 20 26 18 20 24 30 18 20 24 26 30 22 24 28 30 28 28 28 28 30 30 26 28 30 30 30 30 30 30 30 30 30 30 30 30 30 30]
+   [-1 10 16 26 18 24 16 18 22 22 26 30 22 22 24 24 28 28 26 26 26 26 28 28 28 28 28 28 28 28 28 28 28 28 28 28 28 28 28 28 28]
+   [-1 13 22 18 26 18 24 18 22 20 24 28 26 24 20 30 24 28 28 26 30 28 30 30 30 30 28 30 30 30 30 30 30 30 30 30 30 30 30 30 30]
+   [-1 17 28 22 16 22 28 26 26 24 28 24 28 22 24 24 30 28 28 26 28 30 24 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30]])
+
+(def ^:private num-ecc-blocks
+  [[-1 1 1 1 1 1 2 2 2 2 4 4 4 4 4 6 6 6 6 7 8 8 9 9 10 12 12 12 13 14 15 16 17 18 19 19 20 21 22 24 25]
+   [-1 1 1 1 2 2 4 4 4 5 5 5 8 9 9 10 10 11 13 14 16 17 17 18 20 21 23 25 26 28 29 31 33 35 37 38 40 43 45 47 49]
+   [-1 1 1 2 2 4 4 6 6 8 8 8 10 12 16 12 17 16 18 21 20 23 23 25 27 29 34 34 35 38 40 43 45 48 51 53 56 59 62 65 68]
+   [-1 1 1 2 4 4 4 5 6 8 8 11 11 16 16 18 16 19 21 25 25 25 34 30 32 35 37 40 42 45 48 51 54 57 60 63 66 70 74 77 81]])
+
+(def ^:private alphanumeric-charset
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:")
+
+(def ^:private mode-numeric [1 10 12 14])
+(def ^:private mode-alphanumeric [2 9 11 13])
+(def ^:private mode-byte [4 8 16 16])
+
+(defn- bit-set-at? [x i]
+  (not (zero? (bit-and (unsigned-bit-shift-right x i) 1))))
+
+(defn- append-bits! [bb val nbits]
+  (loop [i (dec nbits)]
+    (when (>= i 0)
+      (.push bb (bit-and (unsigned-bit-shift-right val i) 1))
+      (recur (dec i)))))
+
+(defn- num-char-count-bits [mode ver]
+  (nth mode (inc (js/Math.floor (/ (+ ver 7) 17)))))
+
+(defn- num-raw-data-modules [ver]
+  (let [base (+ (* (+ (* 16 ver) 128) ver) 64)]
+    (if (< ver 2)
+      base
+      (let [num-align (+ (js/Math.floor (/ ver 7)) 2)
+            after-al  (- base (- (* (- (* 25 num-align) 10) num-align) 55))]
+        (if (>= ver 7)
+          (- after-al 36)
+          after-al)))))
+
+(defn- num-data-codewords [ver ecl]
+  (let [ord (first ecl)]
+    (- (js/Math.floor (/ (num-raw-data-modules ver) 8))
+       (* (get-in ecc-codewords-per-block [ord ver])
+          (get-in num-ecc-blocks [ord ver])))))
+
+(defn- rs-mul [x y]
+  (loop [i 7
+         z 0]
+    (if (< i 0)
+      z
+      (let [z1 (bit-xor (bit-shift-left z 1) (* (unsigned-bit-shift-right z 7) 285))
+            z2 (bit-xor z1 (* (bit-and (unsigned-bit-shift-right y i) 1) x))]
+        (recur (dec i) z2)))))
+
+(defn- rs-divisor [degree]
+  (let [res (js/Array. degree)]
+    (dotimes [i (dec degree)] (aset res i 0))
+    (aset res (dec degree) 1)
+    (loop [i    0
+           root 1]
+      (when (< i degree)
+        (dotimes [j degree]
+          (let [v (rs-mul (aget res j) root)]
+            (aset res j (if (< (inc j) degree)
+                          (bit-xor v (aget res (inc j)))
+                          v))))
+        (recur (inc i) (rs-mul root 2))))
+    res))
+
+(defn- rs-remainder [data divisor]
+  (let [deg (.-length divisor)
+        res (js/Array. deg)]
+    (dotimes [i deg] (aset res i 0))
+    (dotimes [di (.-length data)]
+      (let [factor (bit-xor (aget data di) (.shift res))]
+        (.push res 0)
+        (dotimes [j deg]
+          (aset res j (bit-xor (aget res j) (rs-mul (aget divisor j) factor))))))
+    res))
+
+(defn- alignment-positions [ver size]
+  (if (= ver 1)
+    []
+    (let [num-align (+ (js/Math.floor (/ ver 7)) 2)
+          step      (if (= ver 32)
+                      26
+                      (* (js/Math.ceil (/ (+ (* ver 4) 4) (- (* num-align 2) 2))) 2))
+          res       #js [6]]
+      (loop [pos (- size 7)]
+        (when (< (.-length res) num-align)
+          (.splice res 1 0 pos)
+          (recur (- pos step))))
+      (vec res))))
+
+(defn- make-bytes-segment [bytes]
+  (let [bb  #js []
+        len (.-length bytes)]
+    (dotimes [i len]
+      (append-bits! bb (aget bytes i) 8))
+    {:mode mode-byte :num-chars len :bits bb}))
+
+(defn- make-numeric-segment [s]
+  (let [bb  #js []
+        len (.-length s)]
+    (loop [i 0]
+      (when (< i len)
+        (let [n (min (- len i) 3)]
+          (append-bits! bb (js/parseInt (.substring s i (+ i n)) 10) (inc (* n 3)))
+          (recur (+ i n)))))
+    {:mode mode-numeric :num-chars len :bits bb}))
+
+(defn- make-alphanumeric-segment [s]
+  (let [bb  #js []
+        len (.-length s)]
+    (loop [i 0]
+      (cond
+        (<= (+ i 2) len)
+        (let [v (+ (* (.indexOf alphanumeric-charset (.charAt s i)) 45)
+                   (.indexOf alphanumeric-charset (.charAt s (inc i))))]
+          (append-bits! bb v 11)
+          (recur (+ i 2)))
+
+        (< i len)
+        (append-bits! bb (.indexOf alphanumeric-charset (.charAt s i)) 6)))
+    {:mode mode-alphanumeric :num-chars len :bits bb}))
+
+(defn- string->utf8-bytes [s]
+  (.encode (js/TextEncoder.) s))
+
+(defn- make-segments [data]
+  (cond
+    (instance? js/Uint8Array data)
+    (if (zero? (.-length data)) [] [(make-bytes-segment data)])
+
+    (array? data)
+    (if (zero? (.-length data)) [] [(make-bytes-segment data)])
+
+    :else
+    (let [s (str data)]
+      (cond
+        (= s "")                                  []
+        (re-matches #"^\d*$" s)                   [(make-numeric-segment s)]
+        (re-matches #"^[A-Z0-9 $%*+\-./:]*$" s)   [(make-alphanumeric-segment s)]
+        :else                                     [(make-bytes-segment (string->utf8-bytes s))]))))
+
+(defn- total-bits [segs ver]
+  (reduce (fn [acc {:keys [mode num-chars bits]}]
+            (if (= acc js/Infinity)
+              acc
+              (let [ccbits (num-char-count-bits mode ver)]
+                (if (>= num-chars (bit-shift-left 1 ccbits))
+                  js/Infinity
+                  (+ acc 4 ccbits (.-length bits))))))
+          0
+          segs))
+
+(defn- add-ecc-and-interleave [data-cw ver ecl]
+  (let [ord              (first ecl)
+        num-blocks       (get-in num-ecc-blocks [ord ver])
+        block-ecc-len    (get-in ecc-codewords-per-block [ord ver])
+        raw-cw           (js/Math.floor (/ (num-raw-data-modules ver) 8))
+        num-short-blocks (- num-blocks (mod raw-cw num-blocks))
+        short-block-len  (js/Math.floor (/ raw-cw num-blocks))
+        rs-div           (rs-divisor block-ecc-len)
+        blocks           #js []]
+    (loop [i 0
+           k 0]
+      (when (< i num-blocks)
+        (let [dat-len (+ (- short-block-len block-ecc-len) (if (< i num-short-blocks) 0 1))
+              dat     (.slice data-cw k (+ k dat-len))
+              ecc     (rs-remainder dat rs-div)]
+          (when (< i num-short-blocks)
+            (.push dat 0))
+          (.push blocks (.concat dat ecc))
+          (recur (inc i) (+ k dat-len)))))
+    (let [out     #js []
+          max-len (.-length (aget blocks 0))]
+      (dotimes [i max-len]
+        (dotimes [j num-blocks]
+          (when (or (not= i (- short-block-len block-ecc-len))
+                    (>= j num-short-blocks))
+            (.push out (aget (aget blocks j) i)))))
+      out)))
+
+(defn- set-fn-mod! [mods fn-mask x y dark?]
+  (aset (aget mods y) x (boolean dark?))
+  (aset (aget fn-mask y) x true))
+
+(defn- draw-format-bits! [mods fn-mask size ecl mask]
+  (let [data (bit-or (bit-shift-left (second ecl) 3) mask)
+        rem  (loop [i 0 r data]
+               (if (< i 10)
+                 (recur (inc i) (bit-xor (bit-shift-left r 1) (* (unsigned-bit-shift-right r 9) 1335)))
+                 r))
+        bits (bit-xor (bit-or (bit-shift-left data 10) rem) 21522)]
+    (dotimes [i 6] (set-fn-mod! mods fn-mask 8 i (bit-set-at? bits i)))
+    (set-fn-mod! mods fn-mask 8 7 (bit-set-at? bits 6))
+    (set-fn-mod! mods fn-mask 8 8 (bit-set-at? bits 7))
+    (set-fn-mod! mods fn-mask 7 8 (bit-set-at? bits 8))
+    (loop [i 9]
+      (when (< i 15)
+        (set-fn-mod! mods fn-mask (- 14 i) 8 (bit-set-at? bits i))
+        (recur (inc i))))
+    (dotimes [i 8]
+      (set-fn-mod! mods fn-mask (- size 1 i) 8 (bit-set-at? bits i)))
+    (loop [i 8]
+      (when (< i 15)
+        (set-fn-mod! mods fn-mask 8 (+ (- size 15) i) (bit-set-at? bits i))
+        (recur (inc i))))
+    (set-fn-mod! mods fn-mask 8 (- size 8) true)))
+
+(defn- draw-version! [mods fn-mask ver size]
+  (when (>= ver 7)
+    (let [rem  (loop [i 0 r ver]
+                 (if (< i 12)
+                   (recur (inc i) (bit-xor (bit-shift-left r 1) (* (unsigned-bit-shift-right r 11) 7973)))
+                   r))
+          bits (bit-or (bit-shift-left ver 12) rem)]
+      (dotimes [i 18]
+        (let [dark? (bit-set-at? bits i)
+              a     (+ (- size 11) (mod i 3))
+              b     (js/Math.floor (/ i 3))]
+          (set-fn-mod! mods fn-mask a b dark?)
+          (set-fn-mod! mods fn-mask b a dark?))))))
+
+(defn- draw-function-patterns! [mods fn-mask ver size ecl]
+  (dotimes [i size]
+    (let [dark? (zero? (mod i 2))]
+      (set-fn-mod! mods fn-mask 6 i dark?)
+      (set-fn-mod! mods fn-mask i 6 dark?)))
+  (doseq [[cx cy] [[3 3] [(- size 4) 3] [3 (- size 4)]]]
+    (doseq [dy (range -4 5)
+            dx (range -4 5)]
+      (let [xx (+ cx dx)
+            yy (+ cy dy)]
+        (when (and (>= xx 0) (< xx size) (>= yy 0) (< yy size))
+          (let [dist (max (js/Math.abs dx) (js/Math.abs dy))]
+            (set-fn-mod! mods fn-mask xx yy (and (not= dist 2) (not= dist 4))))))))
+  (let [pos (alignment-positions ver size)
+        cnt (count pos)]
+    (dotimes [i cnt]
+      (dotimes [j cnt]
+        (when-not (or (and (= i 0) (= j 0))
+                      (and (= i 0) (= j (dec cnt)))
+                      (and (= i (dec cnt)) (= j 0)))
+          (let [cx (nth pos i)
+                cy (nth pos j)]
+            (doseq [dy (range -2 3)
+                    dx (range -2 3)]
+              (set-fn-mod! mods fn-mask (+ cx dx) (+ cy dy)
+                           (not= (max (js/Math.abs dx) (js/Math.abs dy)) 1))))))))
+  (draw-format-bits! mods fn-mask size ecl 0)
+  (draw-version! mods fn-mask ver size))
+
+(defn- draw-codewords! [mods fn-mask size all-cw]
+  (let [bit-limit (* (.-length all-cw) 8)]
+    (loop [right (dec size)
+           idx   0]
+      (when (>= right 1)
+        (let [r        (if (= right 6) 5 right)
+              upward?  (zero? (bit-and (inc r) 2))
+              next-idx (loop [vert 0
+                              i    idx]
+                         (if (>= vert size)
+                           i
+                           (let [y  (if upward? (- size 1 vert) vert)
+                                 i1 (let [x r]
+                                      (if (and (not (aget (aget fn-mask y) x)) (< i bit-limit))
+                                        (do
+                                          (aset (aget mods y) x
+                                                (bit-set-at? (aget all-cw (unsigned-bit-shift-right i 3))
+                                                             (- 7 (bit-and i 7))))
+                                          (inc i))
+                                        i))
+                                 i2 (let [x (dec r)]
+                                      (if (and (not (aget (aget fn-mask y) x)) (< i1 bit-limit))
+                                        (do
+                                          (aset (aget mods y) x
+                                                (bit-set-at? (aget all-cw (unsigned-bit-shift-right i1 3))
+                                                             (- 7 (bit-and i1 7))))
+                                          (inc i1))
+                                        i1))]
+                             (recur (inc vert) i2))))]
+          (recur (- r 2) next-idx))))))
+
+(defn- mask-invert? [mask x y]
+  (case mask
+    0 (zero? (mod (+ x y) 2))
+    1 (zero? (mod y 2))
+    2 (zero? (mod x 3))
+    3 (zero? (mod (+ x y) 3))
+    4 (zero? (mod (+ (js/Math.floor (/ x 3)) (js/Math.floor (/ y 2))) 2))
+    5 (zero? (+ (mod (* x y) 2) (mod (* x y) 3)))
+    6 (zero? (mod (+ (mod (* x y) 2) (mod (* x y) 3)) 2))
+    7 (zero? (mod (+ (mod (+ x y) 2) (mod (* x y) 3)) 2))
+    false))
+
+(defn- apply-mask! [mods fn-mask size mask]
+  (dotimes [y size]
+    (let [mrow (aget mods y)
+          frow (aget fn-mask y)]
+      (dotimes [x size]
+        (when (and (not (aget frow x)) (mask-invert? mask x y))
+          (aset mrow x (not (aget mrow x))))))))
+
+(defn- finder-add-history! [size run-len hist]
+  (let [len (if (zero? (aget hist 0)) (+ run-len size) run-len)]
+    (.pop hist)
+    (.unshift hist len)))
+
+(defn- finder-count-patterns [hist]
+  (let [n    (aget hist 1)
+        core (and (pos? n)
+                  (= (aget hist 2) n)
+                  (= (aget hist 3) (* n 3))
+                  (= (aget hist 4) n)
+                  (= (aget hist 5) n))]
+    (+ (if (and core (>= (aget hist 0) (* n 4)) (>= (aget hist 6) n)) 1 0)
+       (if (and core (>= (aget hist 6) (* n 4)) (>= (aget hist 0) n)) 1 0))))
+
+(defn- finder-terminate-count [size dark? run-len hist]
+  (let [rem-len (if dark?
+                  (do (finder-add-history! size run-len hist) 0)
+                  run-len)]
+    (finder-add-history! size (+ rem-len size) hist)
+    (finder-count-patterns hist)))
+
+(defn- penalty-score [mods size]
+  (let [!res (atom 0)]
+    (dotimes [y size]
+      (let [row  (aget mods y)
+            hist #js [0 0 0 0 0 0 0]]
+        (loop [x 0 run-color false run-len 0]
+          (if (< x size)
+            (let [c (aget row x)]
+              (if (= c run-color)
+                (let [nl (inc run-len)]
+                  (cond (= nl 5) (swap! !res + 3)
+                        (> nl 5) (swap! !res inc))
+                  (recur (inc x) run-color nl))
+                (do
+                  (finder-add-history! size run-len hist)
+                  (when-not run-color
+                    (swap! !res + (* (finder-count-patterns hist) 40)))
+                  (recur (inc x) c 1))))
+            (swap! !res + (* (finder-terminate-count size run-color run-len hist) 40))))))
+    (dotimes [x size]
+      (let [hist #js [0 0 0 0 0 0 0]]
+        (loop [y 0 run-color false run-len 0]
+          (if (< y size)
+            (let [c (aget (aget mods y) x)]
+              (if (= c run-color)
+                (let [nl (inc run-len)]
+                  (cond (= nl 5) (swap! !res + 3)
+                        (> nl 5) (swap! !res inc))
+                  (recur (inc y) run-color nl))
+                (do
+                  (finder-add-history! size run-len hist)
+                  (when-not run-color
+                    (swap! !res + (* (finder-count-patterns hist) 40)))
+                  (recur (inc y) c 1))))
+            (swap! !res + (* (finder-terminate-count size run-color run-len hist) 40))))))
+    (dotimes [y (dec size)]
+      (let [r0 (aget mods y)
+            r1 (aget mods (inc y))]
+        (dotimes [x (dec size)]
+          (let [c (aget r0 x)]
+            (when (and (= c (aget r0 (inc x)))
+                       (= c (aget r1 x))
+                       (= c (aget r1 (inc x))))
+              (swap! !res + 3))))))
+    (let [dark  (loop [y 0 acc 0]
+                  (if (< y size)
+                    (let [row (aget mods y)
+                          rd  (loop [x 0 c 0]
+                                (if (< x size)
+                                  (recur (inc x) (if (aget row x) (inc c) c))
+                                  c))]
+                      (recur (inc y) (+ acc rd)))
+                    acc))
+          total (* size size)
+          k     (dec (js/Math.ceil (/ (js/Math.abs (- (* dark 20) (* total 10))) total)))]
+      (+ @!res (* k 10)))))
+
+(defn encode
+  "Encodes `data` (string or Uint8Array) into `{:version v :size s :matrix <2D js boolean array>}`.
+   Options: `:ecc` (`:l`, `:m`, `:q`, `:h`, default `:m`), `:border` (quiet-zone modules, default `2`),
+   `:boost-ecc?` (default `true`)."
+  ([data] (encode data nil))
+  ([data {:keys [ecc border boost-ecc?]
+          :or   {ecc :m border 2 boost-ecc? true}}]
+   (let [ecc-kw   (or (some-> ecc name str/lower-case keyword) :m)
+         init-ecl (get ecc-levels ecc-kw (:m ecc-levels))
+         segs     (make-segments data)
+         ver      (loop [v 1]
+                    (let [cap  (* (num-data-codewords v init-ecl) 8)
+                          used (total-bits segs v)]
+                      (cond
+                        (<= used cap) v
+                        (>= v 40)     (throw (js/RangeError. "QR data too long"))
+                        :else         (recur (inc v)))))
+         used     (total-bits segs ver)
+         ecl      (if boost-ecc?
+                    (reduce (fn [cur cand]
+                              (if (<= used (* (num-data-codewords ver cand) 8))
+                                cand
+                                cur))
+                            init-ecl
+                            [(:m ecc-levels) (:q ecc-levels) (:h ecc-levels)])
+                    init-ecl)
+         bb       #js []]
+     (doseq [{:keys [mode num-chars bits]} segs]
+       (append-bits! bb (first mode) 4)
+       (append-bits! bb num-chars (num-char-count-bits mode ver))
+       (dotimes [i (.-length bits)]
+         (.push bb (aget bits i))))
+     (let [cap-bits (* (num-data-codewords ver ecl) 8)]
+       (append-bits! bb 0 (min 4 (- cap-bits (.-length bb))))
+       (append-bits! bb 0 (mod (- 8 (mod (.-length bb) 8)) 8))
+       (loop [pad-byte 0xEC]
+         (when (< (.-length bb) cap-bits)
+           (append-bits! bb pad-byte 8)
+           (recur (bit-xor pad-byte (bit-xor 0xEC 0x11)))))
+       (let [cw-len  (js/Math.floor (/ (.-length bb) 8))
+             data-cw (js/Array. cw-len)]
+         (dotimes [i cw-len] (aset data-cw i 0))
+         (dotimes [i (.-length bb)]
+           (let [idx (unsigned-bit-shift-right i 3)]
+             (aset data-cw idx (bit-or (aget data-cw idx)
+                                       (bit-shift-left (aget bb i) (- 7 (bit-and i 7)))))))
+         (let [size    (+ (* ver 4) 17)
+               mods    (js/Array. size)
+               fn-mask (js/Array. size)]
+           (dotimes [y size]
+             (let [mr (js/Array. size)
+                   fr (js/Array. size)]
+               (dotimes [x size]
+                 (aset mr x false)
+                 (aset fr x false))
+               (aset mods y mr)
+               (aset fn-mask y fr)))
+           (draw-function-patterns! mods fn-mask ver size ecl)
+           (draw-codewords! mods fn-mask size (add-ecc-and-interleave data-cw ver ecl))
+           (let [best-mask (loop [m 0 best 0 min-p 1e9]
+                             (if (< m 8)
+                               (do
+                                 (apply-mask! mods fn-mask size m)
+                                 (draw-format-bits! mods fn-mask size ecl m)
+                                 (let [p (penalty-score mods size)]
+                                   (apply-mask! mods fn-mask size m)
+                                   (if (< p min-p)
+                                     (recur (inc m) m p)
+                                     (recur (inc m) best min-p))))
+                               best))]
+             (apply-mask! mods fn-mask size best-mask)
+             (draw-format-bits! mods fn-mask size ecl best-mask)
+             (let [b          (max 0 (int (or border 0)))
+                   total-size (+ size (* 2 b))]
+               (if (zero? b)
+                 {:version ver :size size :mask best-mask :matrix mods}
+                 (let [padded (js/Array. total-size)]
+                   (dotimes [y total-size]
+                     (let [row (js/Array. total-size)]
+                       (dotimes [x total-size]
+                         (aset row x (if (and (>= y b) (< y (+ b size))
+                                              (>= x b) (< x (+ b size)))
+                                       (aget (aget mods (- y b)) (- x b))
+                                       false)))
+                       (aset padded y row)))
+                   {:version ver :size total-size :mask best-mask :matrix padded}))))))))))
+
+(defn qr-matrix->svg-path
+  "Converts a 2D boolean QR module matrix into a run-length-encoded SVG path
+  string suitable for crisp vector rendering."
+  [matrix]
+  (let [rows (.-length matrix)
+        buf  #js []]
+    (dotimes [y rows]
+      (let [row  (aget matrix y)
+            cols (.-length row)]
+        (loop [x 0]
+          (when (< x cols)
+            (if (aget row x)
+              (let [end (loop [x2 (inc x)]
+                          (if (and (< x2 cols) (aget row x2))
+                            (recur (inc x2))
+                            x2))]
+                (.push buf (str "M" x " " y "h" (- end x) "v1h-" (- end x) "z"))
+                (recur end))
+              (recur (inc x)))))))
+    (.join buf "")))
+#+end_src
