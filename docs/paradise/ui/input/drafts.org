@@ -1,14 +1,10 @@
-
 ** Message Drafts
-
 
 **** Preface
 
-A key part of message sending is drafting. For now we're not going to implement any fancy
-multi-device draft syncing as it is overkill. Instead we want to ensure we provide a
-clean drafting implementation so that users just don't lose their drafts on navigation
-away.
-
+A key part of message sending is drafting. Rather than multi-device draft
+syncing, Paradise persists local drafts per room so users do not lose composed
+text or pending attachments when navigating away.
 
 **** Imports
 
