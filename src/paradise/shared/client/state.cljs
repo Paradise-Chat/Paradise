@@ -1,5 +1,6 @@
 (ns paradise.shared.client.state
-  (:require [reagent.core :as r]))
+  (:require
+   [re-frame.core :as re-frame]))
 
 (defonce !shared-app-db (atom {}))
 (defonce !eve-app-db-payload (atom nil))
@@ -9,36 +10,28 @@
 (defonce !virtualizer-pool (atom nil))
 (defonce !config (atom nil))
 
-(defonce !ast-handoff (atom {}))
 (defonce !attachments-cache (atom {}))
 
-(defonce !components (r/atom {}))
-(defonce !pure-fns (atom {}))
-(defonce !active-overrides (r/atom {}))
-(defonce !slots (r/atom {}))
+(defn guard-session-gen
+  "Returns a re-frame interceptor that drops an event when the generation token
+  extracted by `extract-gen-fn` does not match the active `:session/gen` in
+  `app-db`."
+  [extract-gen-fn]
+  (re-frame/->interceptor
+   :id :guard-session-gen
+   :before
+   (fn [context]
+     (let [db           (get-in context [:coeffects :db])
+           event        (get-in context [:coeffects :event])
+           expected-gen (extract-gen-fn event)]
+       (if (and (some? expected-gen)
+                (not= expected-gen (:session/gen db)))
+         (assoc context :queue [] :effects {})
+         context)))))
 
-(defn reg-slot-item [slot-id component]
-  (swap! !slots update slot-id (fnil conj []) component))
-
-(defn get-slot [slot-id]
-  (->> (get @!slots slot-id [])
-       (sort-by #(get % :order 0))
-       (map (fn [{:keys [id component]}]
-              ^{:key (or id (random-uuid))} [component]))))
-
-(defn remove-plugin-overrides! [target-plugin-id]
-  (let [target-str (name target-plugin-id)]
-    (swap! !active-overrides
-           (fn [overrides]
-             (into {} (remove (fn [[_ override-data]]
-                                (= (name (:plugin-id override-data)) target-str))
-                              overrides))))))
-
-(defn remove-plugin-slots! [target-plugin-id]
-  (let [target-str (name target-plugin-id)]
-    (swap! !slots
-           (fn [slots]
-             (into {}
-                   (map (fn [[slot-id items]]
-                          [slot-id (into [] (remove #(= (name (:plugin-id % "unknown")) target-str) items))])
-                        slots))))))
+(defn room-forum-mode?
+  "Returns true when `room-id` should render in forum/threads mode, either
+  natively via its room preview or via the active account's forum overrides."
+  [db room-id]
+  (or (boolean (get-in db [:room-previews room-id :is-forum?]))
+      (contains? (get db :forum-room-overrides #{}) room-id)))
