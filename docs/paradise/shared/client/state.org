@@ -4,7 +4,9 @@ A short file to store the web worker handles and shared re-frame session
 helpers.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/state.cljs
-(ns paradise.shared.client.state)
+(ns paradise.shared.client.state
+  (:require
+   [re-frame.core :as re-frame]))
 
 (defonce !shared-app-db (atom {}))
 (defonce !eve-app-db-payload (atom nil))
