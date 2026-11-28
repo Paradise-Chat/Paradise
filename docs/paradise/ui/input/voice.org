@@ -43,41 +43,54 @@ reasonably just provide handling for different formats in the core.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
 (re-frame/reg-event-fx
  :sdk/send-voice-message
- (fn [_ [_ {:keys [room-id thread-id root-event-id is-new? title
-                   buffer buffer-b64 mime filename size duration-ms waveform]}]]
-   (let [b64 (cond
-               (and (string? buffer-b64) (not (str/blank? buffer-b64)))
-               buffer-b64
+ (fn [{:keys [db]} [_ {:keys [room-id thread-id root-event-id is-new? title
+                              buffer buffer-b64 mime filename size duration-ms waveform]}]]
+   (let [scope-key (if thread-id
+                     (str room-id "::thread::" thread-id)
+                     room-id)
+         raw-ctx   (when scope-key (get-in db [:input-context scope-key]))
+         reply-ctx (when (= (:mode raw-ctx) :reply)
+                     {:mode        :reply
+                      :target      (get-in raw-ctx [:target :id])
+                      :msg-tag     (get-in raw-ctx [:target :content :inner :tag])
+                      :ffi-content (get-in raw-ctx [:target :content :inner :content :ffi-content])})
+         b64       (cond
+                     (and (string? buffer-b64) (not (str/blank? buffer-b64)))
+                     buffer-b64
 
-               buffer
-               (let [u8 (if (instance? js/Uint8Array buffer) buffer (js/Uint8Array. buffer))]
-                 (when (pos? (.-byteLength u8))
-                   (uint8->base64 u8)))
+                     buffer
+                     (let [u8 (if (instance? js/Uint8Array buffer) buffer (js/Uint8Array. buffer))]
+                       (when (pos? (.-byteLength u8))
+                         (uint8->base64 u8)))
 
-               :else nil)]
+                     :else nil)]
      (when (and room-id (not (str/blank? b64)) @state/!engine-pool)
        (let [pool @state/!engine-pool]
          (go
            (try
-             (let [res (<! (main/do-with-pool!
-                            pool
-                            {:handler   :send-voice-message
-                             :arguments {:room-id       room-id
-                                         :thread-id     thread-id
-                                         :root-event-id root-event-id
-                                         :is-new?       (boolean is-new?)
-                                         :title         title
-                                         :buffer-b64    b64
-                                         :mime          mime
-                                         :filename      filename
-                                         :size          size
-                                         :duration-ms   duration-ms
-                                         :waveform      (vec waveform)}}))]
+             (let [args (cond-> {:room-id       room-id
+                                 :thread-id     thread-id
+                                 :root-event-id root-event-id
+                                 :is-new?       (boolean is-new?)
+                                 :title         title
+                                 :buffer-b64    b64
+                                 :mime          mime
+                                 :filename      filename
+                                 :size          size
+                                 :duration-ms   duration-ms
+                                 :waveform      (vec waveform)}
+                          reply-ctx (assoc :context reply-ctx))
+                   res  (<! (main/do-with-pool!
+                             pool
+                             {:handler   :send-voice-message
+                              :arguments args}))]
                (when-not (contains? #{"success" :success} (:status res))
                  (log/error "Voice message send failed:" (:msg res))))
              (catch :default e
-               (log/error "Voice message exception:" e)))))))
-   {}))
+               (log/error "Voice message exception:" e))))))
+     (if reply-ctx
+       {:db (update db :input-context dissoc scope-key)}
+       {}))))
 #+end_src
 
 
@@ -443,122 +456,233 @@ reasonably just provide handling for different formats in the core.
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/voice.cljs
-(defn ^:react voice-recorder-bar [{:keys [room-id thread-id root-event-id is-new? title on-close]}]
-  (r/with-let [!elapsed-ms (r/atom 0)
-               !live-bars  (r/atom (vec (repeat 28 0.12)))
-               !all-peaks  (atom [])
-               !chunks     (atom [])
-               !sending?   (r/atom false)
-               !cancelled? (atom false)
-               !session    (atom nil)
-               _           (let [db         @rf-db/app-db
-                                 device-id  (get-in db [:settings :call-devices :audioinput])
-                                 threshold  (get-in db [:settings :voice-threshold]
-                                                    @call-rtc/!voice-threshold)
-                                 noise-sup? (get-in db [:settings :noise-suppression-enabled?]
-                                                    @call-rtc/!noise-suppression-enabled?)
-                                 gate-on?   @call-rtc/!voice-gate-enabled?]
-                             (-> (p/let [stream    (acquire-voice-stream! device-id)
-                                         raw-track (aget (.getAudioTracks stream) 0)
-                                         AudioCtx  (or (.-AudioContext js/window)
-                                                       (.-webkitAudioContext js/window))
-                                         actx      (when AudioCtx (AudioCtx.))
-                                         _         (if (and actx (= (.-state actx) "suspended"))
-                                                     (-> (.resume actx) (p/catch (fn [_] nil)))
-                                                     (p/resolved nil))
-                                         processor (when (and actx raw-track)
-                                                     (let [proc (audio-processor/create-processor
-                                                                 {:threshold     threshold
-                                                                  :gate-enabled? gate-on?
-                                                                  :hangover-ms   180})]
-                                                       (when-let [set-ns (aget proc "setNoiseSuppressionEnabled")]
-                                                         (set-ns noise-sup?))
-                                                       proc))
-                                         proc-ok?  (if processor
-                                                     (-> (.init processor #js {:audioContext actx
-                                                                               :track        raw-track})
-                                                         (p/then (fn [_] true))
+(def ^:private lock-drag-threshold-px 56)
+(def ^:private cancel-drag-threshold-px 82)
+(def ^:private min-hold-send-ms 320)
+
+(defn ^:react voice-recorder-bar
+  [{:keys [room-id thread-id root-event-id is-new? title on-close hold-gesture]}]
+  (r/with-let [!elapsed-ms    (r/atom 0)
+               !live-bars     (r/atom (vec (repeat 28 0.12)))
+               !all-peaks     (atom [])
+               !chunks        (atom [])
+               !sending?      (r/atom false)
+               !cancelled?    (atom false)
+               !session       (atom nil)
+               !locked?       (r/atom (nil? hold-gesture))
+               !drag-delta    (r/atom {:dx 0 :dy 0})
+               !gesture-clean (atom nil)
+               cleanup-gesture! (fn []
+                                  (when-let [f @!gesture-clean]
+                                    (reset! !gesture-clean nil)
+                                    (f)))
+               cancel-now!    (fn []
+                                (cleanup-gesture!)
+                                (reset! !cancelled? true)
+                                (cleanup-recorder-session! !session)
+                                (when on-close (on-close)))
+               finish-now!    (fn []
+                                (cleanup-gesture!)
+                                (when-let [{:keys [recorder mime started]} @!session]
+                                  (when-not @!sending?
+                                    (reset! !sending? true)
+                                    (let [dur-ms (max 400 (- (js/Date.now) started))
+                                          wf     (resample-waveform @!all-peaks 48)
+                                          done!  (fn []
+                                                   (let [raw-mime (or (some-> mime str (str/split #";") first str/trim not-empty)
+                                                                      "audio/ogg")
+                                                         blob     (js/Blob. (to-array @!chunks) #js {:type raw-mime})
+                                                         raw-ext  (cond
+                                                                    (str/includes? raw-mime "ogg") "ogg"
+                                                                    (str/includes? raw-mime "mp4") "m4a"
+                                                                    :else                          "webm")]
+                                                     (-> (.arrayBuffer blob)
+                                                         (p/then
+                                                          (fn [ab]
+                                                            (when (pos? (.-byteLength ab))
+                                                              (let [remuxed  (remux-webm-opus->ogg ab)
+                                                                    send-ab  (or (:buffer remuxed) ab)
+                                                                    send-u8  (if (instance? js/Uint8Array send-ab)
+                                                                               send-ab
+                                                                               (js/Uint8Array. send-ab))
+                                                                    send-m   (or (:mime remuxed) raw-mime)
+                                                                    send-ext (or (:ext remuxed) raw-ext)]
+                                                                (when (pos? (.-byteLength send-u8))
+                                                                  (re-frame/dispatch
+                                                                   [:sdk/send-voice-message
+                                                                    {:room-id       room-id
+                                                                     :thread-id     thread-id
+                                                                     :root-event-id root-event-id
+                                                                     :is-new?       is-new?
+                                                                     :title         title
+                                                                     :buffer-b64    (uint8->base64 send-u8)
+                                                                     :mime          send-m
+                                                                     :filename      (str "voice-message." send-ext)
+                                                                     :size          (.-byteLength send-u8)
+                                                                     :duration-ms   dur-ms
+                                                                     :waveform      wf}]))))
+                                                            (cleanup-recorder-session! !session)
+                                                            (when on-close (on-close))))
                                                          (p/catch
-                                                          (fn [err]
-                                                            (log/warn "Voice note processor fallback to raw mic:" err)
-                                                            false)))
-                                                     (p/resolved false))]
-                                   (if @!cancelled?
-                                     (do
-                                       (when processor
-                                         (when-let [destroy (aget processor "destroy")]
-                                           (-> (destroy) (p/catch (fn [_] nil)))))
-                                       (doseq [t (array-seq (.getTracks stream))]
-                                         (try (.stop t) (catch :default _ nil)))
-                                       (when (and actx (not= "closed" (.-state actx)))
-                                         (-> (.close actx) (p/catch (fn [_] nil)))))
-                                     (let [out-track  (when proc-ok?
-                                                        (.-processedTrack processor))
-                                           rec-stream (if out-track
-                                                        (js/MediaStream. #js [out-track])
-                                                        stream)
-                                           mime       (pick-recorder-mime)
-                                           rec        (if (str/blank? mime)
-                                                        (js/MediaRecorder. rec-stream)
-                                                        (js/MediaRecorder. rec-stream #js {:mimeType mime}))
-                                           analyser   (when (and (not out-track) actx)
-                                                        (let [src (.createMediaStreamSource actx stream)
-                                                              an  (.createAnalyser actx)]
-                                                          (set! (.-fftSize an) 256)
-                                                          (.connect src an)
-                                                          an))
-                                           buf        (when analyser
-                                                        (js/Uint8Array. (.-frequencyBinCount analyser)))
-                                           started    (js/Date.now)
-                                           timer      (js/setInterval
-                                                       (fn []
-                                                         (reset! !elapsed-ms (- (js/Date.now) started))
-                                                         (let [amp (cond
-                                                                     out-track
-                                                                     (let [get-lvl (aget processor "getLevel")
-                                                                           is-open (aget processor "isGateOpen")
-                                                                           lvl     (if get-lvl (get-lvl) 0.0)
-                                                                           open?   (if is-open (is-open) true)]
-                                                                       (if open?
-                                                                         (max 0.14 (min 1.0 (* lvl 3.8)))
-                                                                         0.10))
+                                                          (fn [e]
+                                                            (log/error "Voice blob error:" e)
+                                                            (cleanup-recorder-session! !session)
+                                                            (when on-close (on-close)))))))]
+                                      (if (= (.-state recorder) "inactive")
+                                        (done!)
+                                        (do
+                                          (.addEventListener recorder "stop" (fn [_] (done!)) #js {:once true})
+                                          (try
+                                            (when (= (.-state recorder) "recording")
+                                              (.requestData recorder))
+                                            (catch :default _ nil))
+                                          (.stop recorder)))))))
+               _              (when hold-gesture
+                                (let [{:keys [pointer-id start-x start-y started-at]} hold-gesture]
+                                  (reset! !gesture-clean
+                                          (attach-window-swipe!
+                                           :voice-hold
+                                           {:pointer-id       pointer-id
+                                            :start-x          start-x
+                                            :start-y          start-y
+                                            :lock-threshold   lock-drag-threshold-px
+                                            :cancel-threshold cancel-drag-threshold-px
+                                            :on-move          (fn [dx dy]
+                                                                (when (and (not @!locked?) (not @!cancelled?))
+                                                                  (reset! !drag-delta {:dx dx :dy dy})))
+                                            :on-lock          (fn []
+                                                                (when (and (not @!locked?) (not @!cancelled?))
+                                                                  (trigger-haptic! :medium)
+                                                                  (reset! !locked? true)
+                                                                  (reset! !drag-delta {:dx 0 :dy 0})
+                                                                  (cleanup-gesture!)))
+                                            :on-cancel        (fn []
+                                                                (when (and (not @!locked?) (not @!cancelled?))
+                                                                  (trigger-haptic! :light)
+                                                                  (cancel-now!)))
+                                            :on-release       (fn []
+                                                                (when (and (not @!locked?) (not @!cancelled?))
+                                                                  (let [held-ms (- (js/Date.now)
+                                                                                   (or started-at (js/Date.now)))]
+                                                                    (if (and @!session (>= held-ms min-hold-send-ms))
+                                                                      (finish-now!)
+                                                                      (do
+                                                                        (when room-id
+                                                                          (re-frame/dispatch
+                                                                           [:composer/show-notice room-id
+                                                                            {:level :info
+                                                                             :key   :composer/voice-hold-hint}]))
+                                                                        (cancel-now!))))))
+                                            }))))
+               _              (let [db         @rf-db/app-db
+                                    device-id  (get-in db [:settings :call-devices :audioinput])
+                                    threshold  (get-in db [:settings :voice-threshold]
+                                                       @call-rtc/!voice-threshold)
+                                    noise-sup? (get-in db [:settings :noise-suppression-enabled?]
+                                                       @call-rtc/!noise-suppression-enabled?)
+                                    gate-on?   @call-rtc/!voice-gate-enabled?]
+                                (-> (p/let [stream    (acquire-voice-stream! device-id)
+                                            raw-track (aget (.getAudioTracks stream) 0)
+                                            AudioCtx  (or (.-AudioContext js/window)
+                                                          (.-webkitAudioContext js/window))
+                                            actx      (when AudioCtx (AudioCtx.))
+                                            _         (if (and actx (= (.-state actx) "suspended"))
+                                                        (-> (.resume actx) (p/catch (fn [_] nil)))
+                                                        (p/resolved nil))
+                                            processor (when (and actx raw-track)
+                                                        (let [proc (audio-processor/create-processor
+                                                                    {:threshold     threshold
+                                                                     :gate-enabled? gate-on?
+                                                                     :hangover-ms   180})]
+                                                          (when-let [set-ns (aget proc "setNoiseSuppressionEnabled")]
+                                                            (set-ns noise-sup?))
+                                                          proc))
+                                            proc-ok?  (if processor
+                                                        (-> (.init processor #js {:audioContext actx
+                                                                                  :track        raw-track})
+                                                            (p/then (fn [_] true))
+                                                            (p/catch
+                                                             (fn [err]
+                                                               (log/warn "Voice note processor fallback to raw mic:" err)
+                                                               false)))
+                                                        (p/resolved false))]
+                                      (if @!cancelled?
+                                        (do
+                                          (when processor
+                                            (when-let [destroy (aget processor "destroy")]
+                                              (-> (destroy) (p/catch (fn [_] nil)))))
+                                          (doseq [t (array-seq (.getTracks stream))]
+                                            (try (.stop t) (catch :default _ nil)))
+                                          (when (and actx (not= "closed" (.-state actx)))
+                                            (-> (.close actx) (p/catch (fn [_] nil)))))
+                                        (let [out-track  (when proc-ok?
+                                                           (.-processedTrack processor))
+                                              rec-stream (if out-track
+                                                           (js/MediaStream. #js [out-track])
+                                                           stream)
+                                              mime       (pick-recorder-mime)
+                                              rec        (if (str/blank? mime)
+                                                           (js/MediaRecorder. rec-stream)
+                                                           (js/MediaRecorder. rec-stream #js {:mimeType mime}))
+                                              analyser   (when (and (not out-track) actx)
+                                                           (let [src (.createMediaStreamSource actx stream)
+                                                                 an  (.createAnalyser actx)]
+                                                             (set! (.-fftSize an) 256)
+                                                             (.connect src an)
+                                                             an))
+                                              buf        (when analyser
+                                                           (js/Uint8Array. (.-frequencyBinCount analyser)))
+                                              started    (js/Date.now)
+                                              timer      (js/setInterval
+                                                          (fn []
+                                                            (reset! !elapsed-ms (- (js/Date.now) started))
+                                                            (let [amp (cond
+                                                                        out-track
+                                                                        (let [get-lvl (aget processor "getLevel")
+                                                                              is-open (aget processor "isGateOpen")
+                                                                              lvl     (if get-lvl (get-lvl) 0.0)
+                                                                              open?   (if is-open (is-open) true)]
+                                                                          (if open?
+                                                                            (max 0.14 (min 1.0 (* lvl 3.8)))
+                                                                            0.10))
 
-                                                                     (and analyser buf)
-                                                                     (do
-                                                                       (.getByteTimeDomainData analyser buf)
-                                                                       (let [n   (.-length buf)
-                                                                             sum (loop [i 0 acc 0.0]
-                                                                                   (if (< i n)
-                                                                                     (let [v (/ (- (aget buf i) 128.0) 128.0)]
-                                                                                       (recur (inc i) (+ acc (* v v))))
-                                                                                     acc))
-                                                                             rms (js/Math.sqrt (/ sum (max 1 n)))]
-                                                                         (max 0.12 (min 1.0 (* rms 3.6)))))
+                                                                        (and analyser buf)
+                                                                        (do
+                                                                          (.getByteTimeDomainData analyser buf)
+                                                                          (let [n   (.-length buf)
+                                                                                sum (loop [i 0 acc 0.0]
+                                                                                      (if (< i n)
+                                                                                        (let [v (/ (- (aget buf i) 128.0) 128.0)]
+                                                                                          (recur (inc i) (+ acc (* v v))))
+                                                                                        acc))
+                                                                                rms (js/Math.sqrt (/ sum (max 1 n)))]
+                                                                            (max 0.12 (min 1.0 (* rms 3.6)))))
 
-                                                                     :else 0.12)]
-                                                           (swap! !all-peaks conj amp)
-                                                           (swap! !live-bars
-                                                                  #(conj (subvec (vec %) 1) amp))))
-                                                       85)]
-                                       (.addEventListener rec "dataavailable"
-                                                          (fn [ev]
-                                                            (when (and (.-data ev) (pos? (.. ev -data -size)))
-                                                              (swap! !chunks conj (.-data ev)))))
-                                       (.start rec 150)
-                                       (reset! !session {:recorder   rec
-                                                         :stream     stream
-                                                         :rec-stream (when out-track rec-stream)
-                                                         :processor  processor
-                                                         :audio-ctx  actx
-                                                         :mime       (or (not-empty (.-mimeType rec))
-                                                                         mime
-                                                                         "audio/webm")
-                                                         :started    started
-                                                         :timer      timer}))))
-                                 (p/catch
-                                  (fn [err]
-                                    (log/error "Microphone access denied for voice message:" err)
-                                    (when on-close (on-close))))))]
+                                                                        :else 0.12)]
+                                                              (swap! !all-peaks conj amp)
+                                                              (swap! !live-bars
+                                                                     #(conj (subvec (vec %) 1) amp))))
+                                                          85)]
+                                          (.addEventListener rec "dataavailable"
+                                                             (fn [ev]
+                                                               (when (and (.-data ev) (pos? (.. ev -data -size)))
+                                                                 (swap! !chunks conj (.-data ev)))))
+                                          (.start rec 150)
+                                          (reset! !session {:recorder   rec
+                                                            :stream     stream
+                                                            :rec-stream (when out-track rec-stream)
+                                                            :processor  processor
+                                                            :audio-ctx  actx
+                                                            :mime       (or (not-empty (.-mimeType rec))
+                                                                            mime
+                                                                            "audio/webm")
+                                                            :started    started
+                                                            :timer      timer}))))
+                                    (p/catch
+                                     (fn [err]
+                                       (log/error "Microphone access denied for voice message:" err)
+                                       (cleanup-gesture!)
+                                       (when on-close (on-close))))))]
     (let [tr         @(re-frame/subscribe [:i18n/tr])
           threshold  @(re-frame/subscribe [:settings/voice-threshold])
           noise-sup? @(re-frame/subscribe [:settings/noise-suppression-enabled?])
@@ -570,104 +694,68 @@ reasonably just provide handling for different formats in the core.
           elapsed-ms @!elapsed-ms
           live-bars  @!live-bars
           sending?   @!sending?
-          cancel!    (fn []
-                       (reset! !cancelled? true)
-                       (cleanup-recorder-session! !session)
-                       (when on-close (on-close)))
-          finish!    (fn []
-                       (when-let [{:keys [recorder mime started]} @!session]
-                         (when-not sending?
-                           (reset! !sending? true)
-                           (let [dur-ms (max 400 (- (js/Date.now) started))
-                                 wf     (resample-waveform @!all-peaks 48)
-                                 done!  (fn []
-                                          (let [raw-mime (or (some-> mime str (str/split #";") first str/trim not-empty)
-                                                             "audio/ogg")
-                                                blob     (js/Blob. (to-array @!chunks) #js {:type raw-mime})
-                                                raw-ext  (cond
-                                                           (str/includes? raw-mime "ogg") "ogg"
-                                                           (str/includes? raw-mime "mp4") "m4a"
-                                                           :else                          "webm")]
-                                            (-> (.arrayBuffer blob)
-                                                (p/then
-                                                 (fn [ab]
-                                                   (when (pos? (.-byteLength ab))
-                                                     (let [remuxed  (remux-webm-opus->ogg ab)
-                                                           send-ab  (or (:buffer remuxed) ab)
-                                                           send-u8  (if (instance? js/Uint8Array send-ab)
-                                                                      send-ab
-                                                                      (js/Uint8Array. send-ab))
-                                                           send-m   (or (:mime remuxed) raw-mime)
-                                                           send-ext (or (:ext remuxed) raw-ext)]
-                                                       (when (pos? (.-byteLength send-u8))
-                                                         (re-frame/dispatch
-                                                          [:sdk/send-voice-message
-                                                           {:room-id       room-id
-                                                            :thread-id     thread-id
-                                                            :root-event-id root-event-id
-                                                            :is-new?       is-new?
-                                                            :title         title
-                                                            :buffer-b64    (uint8->base64 send-u8)
-                                                            :mime          send-m
-                                                            :filename      (str "voice-message." send-ext)
-                                                            :size          (.-byteLength send-u8)
-                                                            :duration-ms   dur-ms
-                                                            :waveform      wf}]))))
-                                                   (cleanup-recorder-session! !session)
-                                                   (when on-close (on-close))))
-                                                (p/catch
-                                                 (fn [e]
-                                                   (log/error "Voice blob error:" e)
-                                                   (cleanup-recorder-session! !session)
-                                                   (when on-close (on-close)))))))]
-                             (if (= (.-state recorder) "inactive")
-                               (done!)
-                               (do
-                                 (.addEventListener recorder "stop" (fn [_] (done!)) #js {:once true})
-                                 (try
-                                   (when (= (.-state recorder) "recording")
-                                     (.requestData recorder))
-                                   (catch :default _ nil))
-                                 (.stop recorder)))))))]
-      [:div.voice-recorder-bar
-       [:button.voice-rec-cancel-btn
-        {:type     "button"
-         :title    (tr [:composer/voice-cancel])
-         :disabled sending?
-         :on-click cancel!}
-        [icons/trash {:width "16px" :height "16px"}]]
+          locked?    @!locked?
+          {:keys [dx dy]} @!drag-delta]
+      (if-not locked?
+        (let [lock-progress   (min 1.0 (/ (double dy) lock-drag-threshold-px))
+              cancel-progress (min 1.0 (/ (double dx) cancel-drag-threshold-px))
+              shift-x         (- (min dx cancel-drag-threshold-px))
+              shift-y         (- (min dy lock-drag-threshold-px))]
+          [:div.voice-recorder-bar.is-holding
+           [:div.voice-hold-lock-pill
+            {:class (when (>= lock-progress 0.65) "is-near-lock")
+             :title (tr [:composer/voice-slide-lock])
+             :style {:transform (str "translateY(" (js/Math.round (* -12 lock-progress)) "px)")}}
+            [icons/lock {:width "16px" :height "16px"}]
+            [icons/chevron-up {:width "13px" :height "13px"}]]
 
-       [:div.voice-rec-status
-        [:span.voice-rec-dot]
-        [:span.voice-rec-timer (format-duration-ms elapsed-ms)]]
+           [:div.voice-rec-status
+            [:span.voice-rec-dot]
+            [:span.voice-rec-timer (format-duration-ms elapsed-ms)]]
 
-       (into
-        [:div.voice-rec-waveform]
-        (map-indexed
-         (fn [idx amp]
-           ^{:key idx}
-           [:span.voice-rec-bar
-            {:style {:height (str (max 16 (int (js/Math.round (* amp 100)))) "%")}}])
-         live-bars))
+           [:div.voice-hold-slide-hint
+            {:class (when (>= cancel-progress 0.65) "is-near-cancel")
+             :style {:transform (str "translateX(" (js/Math.round (* -18 cancel-progress)) "px)")
+                     :opacity   (max 0.35 (- 1.0 (* 0.55 cancel-progress)))}}
+            [icons/arrow-left {:width "14px" :height "14px"}]
+            [:span (tr [:composer/voice-slide-cancel])]]
 
-       [:button.voice-rec-send-btn
-        {:type     "button"
-         :title    (tr [:composer/voice-send])
-         :disabled sending?
-         :on-click finish!}
-        [icons/send {:width "16px" :height "16px"}]]])
+           [:div.voice-hold-mic-orb
+            {:style {:transform (str "translate("
+                                     (js/Math.round (* 0.25 shift-x)) "px, "
+                                     (js/Math.round (* 0.35 shift-y)) "px) scale(1.14)")}}
+            [icons/mic {:width "20px" :height "20px"}]]])
+        [:div.voice-recorder-bar
+         [:button.voice-rec-cancel-btn
+          {:type     "button"
+           :title    (tr [:composer/voice-cancel])
+           :disabled sending?
+           :on-click cancel-now!}
+          [icons/trash {:width "16px" :height "16px"}]]
+
+         [:div.voice-rec-status
+          [:span.voice-rec-dot]
+          [:span.voice-rec-timer (format-duration-ms elapsed-ms)]]
+
+         (into
+          [:div.voice-rec-waveform]
+          (map-indexed
+           (fn [idx amp]
+             ^{:key idx}
+             [:span.voice-rec-bar
+              {:style {:height (str (max 16 (int (js/Math.round (* amp 100)))) "%")}}])
+           live-bars))
+
+         [:button.voice-rec-send-btn
+          {:type     "button"
+           :title    (tr [:composer/voice-send])
+           :disabled sending?
+           :on-click finish-now!}
+          [icons/send {:width "16px" :height "16px"}]]]))
     (finally
+      (cleanup-gesture!)
       (reset! !cancelled? true)
       (cleanup-recorder-session! !session))))
-#+end_src
-
-
-
-
-**** CSS
-
-#+begin_src clojurescript :tangle ../../../../css/voice-recorder.css
-
 #+end_src
 
 
