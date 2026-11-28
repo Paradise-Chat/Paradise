@@ -42,8 +42,9 @@ showing the filename.
    (let [{:keys [mimetype mime preview-url filename]} attachment
          resolved-mime (or mime mimetype "application/octet-stream")]
      (cond
-       (str/starts-with? resolved-mime "image/")
-       [:img.preview-image {:src preview-url}]
+       (and (str/starts-with? resolved-mime "image/")
+            (seq preview-url))
+       [:img.preview-image {:src preview-url :alt (or filename "")}]
 
        (or (str/starts-with? resolved-mime "audio/")
            (str/starts-with? resolved-mime "video/"))
@@ -56,116 +57,144 @@ showing the filename.
         [icons/file]
         [:span.file-name filename]]))
    [:button.remove-attachment
-    {:on-click #(re-frame/dispatch [:composer/remove-attachment room-id index])}
+    {:type     "button"
+     :on-click #(re-frame/dispatch [:composer/remove-attachment room-id index])}
     [icons/exit]]])
 #+end_src
-
 
 ***** CSS
 
 #+begin_src css :tangle ../../../../css/attachments.css
-  .composer-attachments {
-      display: flex;
-      flex-direction: row;
-      gap: 12px;
-      padding: 12px;
-      overflow-x: auto;
-      background: rgba(255, 255, 255, 0.05);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      scrollbar-width: thin;
-  }
+.composer-attachments {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  padding: 12px;
+  overflow-x: auto;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  scrollbar-width: thin;
+}
 
-  .attachment-preview {
-      position: relative;
-      flex: 0 0 100px;
-      height: 100px;
-      border-radius: 8px;
-      overflow: hidden;
-      background: #1a1a1a;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-  }
+.attachment-preview {
+  position: relative;
+  flex: 0 0 100px;
+  height: 100px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
 
-  .preview-image, .preview-video {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-  }
+.preview-image,
+.preview-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 
-  .remove-attachment {
-      position: absolute;
-      top: 4px;
-      right: 4px;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: rgba(0, 0, 0, 0.7);
-      color: white;
-      border: none;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 10px;
-      transition: background 0.2s;
-  }
+.remove-attachment {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  transition: background 0.2s;
+}
 
-  .remove-attachment:hover {
-      background: #ff4444;
-  }
-
-
+.remove-attachment:hover {
+  background: #ff4444;
+}
 #+end_src
 
+**** Draft Persistence & Lifecycle Events
 
-
-**** Massive Blob of Reframe Events
-
-
- Currently Eve is breaking this because attachments are in the app-db
- Eve and attachments both are SAB objects and I'm not sure
- Eve knows how to handle other ones
- Will probably pull attachments out and send the URI which references
- the SAB attachment instead
-
-
-
+On iOS runtimes, binary attachment bodies are skipped during draft auto-save so
+typing in the composer never clones multi-megabyte ~ArrayBuffer~ payloads across
+the worker bridge. On desktop and Android, small persistable attachments are
+read sequentially rather than concurrently with ~p/all~ to keep peak memory
+bounded, and any replaced attachment preview URLs are revoked via
+~revoke-object-url!~.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/drafts.cljs
+(defn- clear-composer-save-timer! [db room-id]
+  (when-let [t (get-in db [:composer room-id :save-timer])]
+    (js/clearTimeout t)))
+
+(defn- release-attachments! [attachments]
+  (doseq [att attachments]
+    (revoke-object-url! (:preview-url att))
+    (when (:file-id att)
+      (unregister-file! (:file-id att)))))
+
+(defn- has-local-draft-content? [db room-id]
+  (let [{:keys [text html]} (get-in db [:composer room-id])
+        atts                (get-in db [:drafts room-id :attachments])]
+    (boolean
+     (or (seq atts)
+         (not (str/blank? (str (or text ""))))
+         (str/includes? (str (or html "")) "<img")))))
+
 (re-frame/reg-event-fx
  :composer/clear-after-submit
  (fn [{:keys [db]} [_ room-id]]
-   (doseq [att (get-in db [:drafts room-id :attachments] [])]
-     (when (:preview-url att)
-       (js/URL.revokeObjectURL (:preview-url att)))
-     (when (:file-id att)
-       (unregister-file! (:file-id att))))
-   {:db (-> db
-            (assoc-in [:drafts room-id :attachments] [])
-            (assoc-in [:composer room-id] {:text        ""
-                                           :html        ""
-                                           :loaded-text ""
-                                           :uploading?  false}))
-    :dispatch [:composer/persist-draft room-id]}))
+   (clear-composer-save-timer! db room-id)
+   (release-attachments! (get-in db [:drafts room-id :attachments] []))
+   (let [next-seq (inc (get-in db [:composer room-id :edit-seq] 0))]
+     {:db       (-> db
+                    (assoc-in [:drafts room-id :attachments] [])
+                    (assoc-in [:composer room-id] {:text            ""
+                                                   :html            ""
+                                                   :loaded-text     nil
+                                                   :uploading?      false
+                                                   :draft-hydrated? true
+                                                   :edit-seq        next-seq}))
+      :dispatch [:composer/persist-draft room-id]})))
+
+(def ^:private max-draft-attachment-persist-bytes (* 1536 1024))
 
 (re-frame/reg-event-fx
  :composer/persist-draft
- (fn [{:keys [db]} [_ room-id]]
-   (let [attachments        (get-in db [:drafts room-id :attachments] [])
+ (fn [{:keys [db]} [_ room-id opts]]
+   (let [text-only?       (boolean (:text-only? opts))
+         skip-binary?     (or text-only? (platform/ios-runtime?))
+         attachments      (get-in db [:drafts room-id :attachments] [])
+         persistable-atts (if skip-binary?
+                            []
+                            (filterv (fn [att]
+                                       (let [sz (or (:size att) 0)]
+                                         (and (pos? sz)
+                                              (<= sz max-draft-attachment-persist-bytes))))
+                                     attachments))
          {:keys [text html]} (get-in db [:composer room-id])]
      (if-let [pool @state/!engine-pool]
        (go
          (try
-           (let [worker-atts
-                 (<p! (p/all (map (fn [att]
-                                    (p/let [f  (get-file (:file-id att))
-                                            ab (file->array-buffer f)]
-                                      (assoc att :buffer ab)))
-                                  attachments)))
-                 res (<! (main/do-with-pool! pool {:handler   :persist-draft
-                                                   :arguments {:room-id     room-id
-                                                               :text        (or text "")
-                                                               :html        (or html "")
-                                                               :attachments worker-atts}}))]
+           (let [worker-atts (loop [remaining persistable-atts
+                                    acc       []]
+                               (if-let [att (first remaining)]
+                                 (let [f  (get-file (:file-id att))
+                                       ab (if f
+                                            (<p! (file->array-buffer f))
+                                            (js/ArrayBuffer. 0))]
+                                   (recur (rest remaining) (conj acc (assoc att :buffer ab))))
+                                 acc))
+                 res         (<! (main/do-with-pool!
+                                  pool
+                                  {:handler   :persist-draft
+                                   :arguments {:room-id     room-id
+                                               :text        (or text "")
+                                               :html        (or html "")
+                                               :attachments worker-atts}}))]
              (when (= (:status res) "error")
                (log/error "Persist failed:" (:msg res))))
            (catch :default e
