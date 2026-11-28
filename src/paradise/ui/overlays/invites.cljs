@@ -11,22 +11,37 @@
   (let [tr        @(re-frame/subscribe [:i18n/tr])
         rooms-map @(re-frame/subscribe [:rooms/unfiltered-indexed-map])
         dm-rooms  (->> (vals rooms-map)
-                       (filter #(or (:isDirect %) (:is-direct? %) (:is-direct %))))
+                       (filter #(and (or (:isDirect %) (:is-direct? %) (:is-direct %))
+                                     (not (or (:isGroupDm %) (:is-group-dm? %)))
+                                     (not= (or (:id %) (:roomId %)) target-room-id))))
         close-fn  #(re-frame/dispatch [:ui/close-modal])]
     (r/with-let [query          (r/atom "")
                  selected-index (r/atom 0)]
-      (let [lower-query   (str/lower-case @query)
-            is-matrix-id? (re-matches #"^@.+:.+$" @query)
-            filtered-dms  (if (empty? @query)
-                            (take 15 dm-rooms)
-                            (->> dm-rooms
-                                 (filter #(str/includes?
-                                           (str/lower-case (or (:name %) "unknown"))
-                                           lower-query))
-                                 (take 15)))
-            final-items   (if is-matrix-id?
-                            (vec (cons {:is-raw-id? true :user-id @query} filtered-dms))
-                            (vec filtered-dms))]
+      (let [lower-query    (str/lower-case @query)
+            trimmed-q      (str/trim @query)
+            is-raw-id?     (or (re-matches #"^@.+:.+$" trimmed-q)
+                               (re-matches #"^\d{15,22}$" trimmed-q)
+                               (re-matches #"^npub1[0-9a-z]{58}$" trimmed-q))
+            filtered-dms   (if (empty? @query)
+                             (take 15 dm-rooms)
+                             (->> dm-rooms
+                                  (filter #(str/includes?
+                                            (str/lower-case (or (:name %) "unknown"))
+                                            lower-query))
+                                  (take 15)))
+            final-items    (if is-raw-id?
+                             (vec (cons {:is-raw-id? true :user-id trimmed-q} filtered-dms))
+                             (vec filtered-dms))
+            on-select-item (fn [item]
+                             (when item
+                               (if (:is-raw-id? item)
+                                 (re-frame/dispatch [:rooms/invite-user
+                                                     target-room-id
+                                                     (:user-id item)])
+                                 (re-frame/dispatch [:rooms/invite-from-dm
+                                                     target-room-id
+                                                     (or (:id item) (:roomId item))]))
+                               (close-fn)))]
         [:div.quick-switcher-container
          [:input.form-input.quick-switcher-input
           {:type "text"
@@ -42,10 +57,7 @@
                           (handle-list-navigation
                            e final-items @selected-index
                            #(reset! selected-index %)
-                           #(let [target-user (if (:is-raw-id? %)
-                                                (:user-id %)
-                                                (:id %))]
-                              nil)))}]
+                           on-select-item))}]
          [:div.quick-switcher-results
           [selectable-list
            {:items          final-items
@@ -54,11 +66,7 @@
             :item-class     "quick-switcher-item"
             :key-fn         #(or (:user-id %) (:id %) (:roomId %))
             :on-highlight   #(reset! selected-index %)
-            :on-select      (fn [item]
-                              (if (:is-raw-id? item)
-                                (re-frame/dispatch [:rooms/invite-user target-room-id (:user-id item)])
-                                (re-frame/dispatch [:rooms/invite-from-dm target-room-id (or (:id item) (:roomId item))]))
-                              (close-fn))
+            :on-select      on-select-item
             :render-item    (fn [item _]
                               (if (:is-raw-id? item)
                                 [:div.invite-user-row
@@ -67,7 +75,7 @@
                                           :size  28
                                           :shape :rounded}]
                                  [:div.invite-user-info
-                                  [:span.name.raw-id "Invite user by ID"]
+                                  [:span.name.raw-id (tr [:invites/invite-user-by-id])]
                                   [:span.sub-name (:user-id item)]]]
                                 (let [room-id      (or (:id item) (:roomId item))
                                       members      @(re-frame/subscribe [:room/members-map room-id])
@@ -124,7 +132,7 @@
          [:input.form-input.quick-switcher-input
           {:type "text"
            :auto-focus true
-           :placeholder (tr [:invites.room/placeholder-rooms])
+           :placeholder (tr [:invites/placeholder-rooms])
            :value @query
            :on-change (fn [e]
                         (reset! query (.. e -target -value))
@@ -140,7 +148,7 @@
           [selectable-list
            {:items          final-items
             :selected-index @selected-index
-            :empty-text     (tr [:invites.room/empty-rooms])
+            :empty-text     (tr [:invites/empty-rooms])
             :item-class     "quick-switcher-item"
             :key-fn         #(or (:room-id %) (:id %) (:roomId %))
             :on-highlight   #(reset! selected-index %)
