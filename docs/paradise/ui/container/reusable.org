@@ -12,8 +12,9 @@ so we'll keep them nicely collected here.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/container/reusable.cljs
 (ns paradise.ui.container.reusable
   (:require [clojure.string :as str]
+            [paradise.shared.utils.helpers :refer [date-day-key normalize-ts-ms]]
             [paradise.shared.utils.svg :as icons]
-            [paradise.ui.container.timeline.item :refer [event-tile-render]]
+            [paradise.ui.container.timeline.item :refer [date-divider event-tile-render]]
             [paradise.ui.global :refer [avatar]]
             [re-frame.core :as re-frame]))
 #+end_src
