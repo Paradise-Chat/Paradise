@@ -325,22 +325,24 @@ and then provide easy swapping between the categories themselves.
 ***** CSS
 
 #+begin_src css :tangle ../../../../css/member-list.css
-
-  .filter-pill {
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 0.75rem;
-      border: none;
-      cursor: pointer;
-      white-space: nowrap;
-      background: var(--surface-3);
-      color: var(--text-secondary);
-  }
-  .filter-pill.active {
-      background: var(--primary-accent);
-      color: white;
+.filter-pill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    white-space: nowrap;
+    background: var(--surface-3, #232428);
+    color: var(--text-secondary, #b5bac1);
+    transition: background-color 0.14s ease, color 0.14s ease;
 }
 
+.filter-pill.active {
+    background: var(--primary-accent, #5865f2);
+    border-color: var(--primary-accent, #5865f2);
+    color: #ffffff;
+}
 #+end_src
 
 
@@ -434,56 +436,72 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
 ***** CSS
 
 #+begin_src css :tangle ../../../../css/member-list.css
-  .member-item {
-      display: flex;
-      align-items: center;
-      padding: 8px;
-      gap: 12px;
-      cursor: pointer;
-  }
-  .member-item:hover {
-      background: var(--surface-hover);
-  }
-  .member-item-info {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      flex: 1;
-  }
-  .member-item-name-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-  }
-  .member-item-name {
-      font-size: 0.9rem;
-      font-weight: 500;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-  }
-  .member-item-role-badge {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 0.65rem;
-      padding: 2px 6px;
-      border-radius: 4px;
-      white-space: nowrap;
-  }
-  .member-item-role-icon {
-      width: 10px;
-      height: 10px;
-      border-radius: 2px;
-  }
-  .member-item-user-id {
-      font-size: 0.75rem;
-      color: var(--text-secondary);
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      overflow: hidden;
+.member-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    margin: 1px 8px;
+    border-radius: 8px;
+    gap: 10px;
+    cursor: pointer;
+    transition: background-color 0.12s ease;
 }
 
+.member-item:hover {
+    background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+}
+
+.member-item-info {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex: 1;
+    min-width: 0;
+    gap: 1px;
+}
+
+.member-item-name-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.member-item-name {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary, #f2f3f5);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.member-item-role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.member-item-role-icon {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+
+.member-item-user-id {
+    font-size: 0.72rem;
+    color: var(--text-secondary, #80848e);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
 #+end_src
 
 
@@ -570,86 +588,134 @@ Maybe we can link in org-mode? I forget if backlinks were just a Dendron thing.
 
 #+begin_src css :tangle ../../../../css/member-list.css
 .member-list {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-  }
-  .member-controls-container {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding: 12px;
-      border-bottom: 1px solid var(--border-color);
-  }
-  .member-dropdown-row {
-      display: flex;
-      gap: 8px;
-  }
-  .member-dropdown {
-      flex: 1;
-      padding: 6px;
-      border-radius: 6px;
-      border: 1px solid var(--border-color);
-      background: var(--surface-2);
-      color: var(--text-primary);
-      font-size: 0.8rem;
-      cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
 }
 
-
-  .member-search-container {
-      position: relative;
-  }
-  .member-search-icon-wrapper {
-      position: absolute;
-      left: 10px;
-      top: 9px;
-      opacity: 0.5;
-      pointer-events: none;
-  }
-  .member-search-input {
-      width: 100%;
-      padding: 6px 28px 6px 30px;
-      border-radius: 6px;
-      border: 1px solid var(--border-color);
-      background: var(--surface-2);
-      color: var(--text-primary);
-      font-size: 0.85rem;
-  }
-  .member-search-clear-btn {
-      position: absolute;
-      right: 8px;
-      top: 8px;
-      background: none;
-      border: none;
-      cursor: pointer;
-      color: var(--text-secondary);
+.member-controls-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+    flex-shrink: 0;
 }
 
-
-  .member-list-scroll {
-      flex: 1;
-      height: 100%;
-  }
-  .member-list-loading,
-  .member-list-empty {
-      padding: 16px;
-      text-align: center;
-      color: var(--text-secondary);
-      opacity: 0.5;
-  }
-  .member-list-group-header {
-      background: var(--surface-1);
-      padding: 6px 12px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-      position: sticky;
-      top: 0;
-      z-index: 10;
+.member-dropdown-row {
+    display: flex;
+    gap: 8px;
 }
 
+.member-dropdown {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: var(--surface-2, #1e1f22);
+    color: var(--text-primary, #dbdee1);
+    font-size: 0.8rem;
+    font-weight: 500;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+}
+
+.member-dropdown:focus {
+    border-color: var(--brand-primary, #5865f2);
+}
+
+.member-search-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.member-search-icon-wrapper {
+    position: absolute;
+    left: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary, #80848e);
+    pointer-events: none;
+}
+
+.member-search-input {
+    width: 100%;
+    padding: 8px 30px 8px 32px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: var(--surface-2, #1e1f22);
+    color: var(--text-primary, #f2f3f5);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.member-search-input::placeholder {
+    color: var(--text-muted, #80848e);
+}
+
+.member-search-input:focus {
+    border-color: var(--brand-primary, #5865f2);
+    box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.22);
+}
+
+.member-search-clear-btn {
+    position: absolute;
+    right: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary, #949ba4);
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.member-search-clear-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary, #ffffff);
+}
+
+.member-list-scroll {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+}
+
+.member-list-scroll [data-virtuoso-scroller="true"] {
+    overflow-x: hidden !important;
+}
+
+.member-list-loading,
+.member-list-empty {
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--text-secondary, #80848e);
+    font-size: 0.875rem;
+}
+
+.member-list-group-header {
+    background: var(--surface-1, #2b2d31);
+    padding: 12px 14px 5px 14px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary, #80848e);
+    text-transform: uppercase;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
 #+end_src
 
 
