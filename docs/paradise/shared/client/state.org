@@ -1,10 +1,7 @@
-
 ** State
 
-A short file to store the web workers state. Everything else is in reframe
-
-This may be move-able there too, but will let it remain for now.
-
+A short file to store the web worker handles and shared re-frame session
+helpers.
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/state.cljs
 (ns paradise.shared.client.state)
