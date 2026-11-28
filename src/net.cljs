@@ -1,99 +1,79 @@
 (ns net
-  (:require [promesa.core :as p]
-            [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [goog.object :as gobj]
+            [paradise.shared.net.auth :as net-auth]
+            [paradise.shared.net.proxy :as net-proxy]
+            [promesa.core :as p]))
 
-(defn- same-host? [request-url base-url]
-  (try
-    (let [req-obj  (js/URL. request-url)
-          base-obj (js/URL. base-url)]
-      (= (.-hostname req-obj) (.-hostname base-obj)))
-    (catch :default _ false)))
+(def !auth-context net-auth/!auth-context)
+(def ensure-protocol net-auth/ensure-protocol)
+(def set-auth-context! net-auth/set-auth-context!)
+(def await-auth net-auth/await-auth)
 
-(defn ensure-protocol [url]
-  (when (and (string? url) (not (str/blank? url)))
-    (if (or (str/starts-with? url "http://")
-            (str/starts-with? url "https://"))
-      url
-      (str "https://" url))))
-
-(defonce !auth-context (atom {:token nil :base-url nil :headers nil :auth-fn nil}))
-
-(defn set-auth-context!
-  ([context-map]
-   (if (nil? context-map)
-     (reset! !auth-context {:token nil :base-url nil :headers nil :auth-fn nil})
-     (let [base-url (when-let [u (:base-url context-map)]
-                      (str/replace (ensure-protocol u) #"/+$" ""))]
-       (reset! !auth-context (assoc context-map :base-url base-url)))))
-  ([token base-url]
-   (set-auth-context! {:token token :base-url base-url})))
-
-(defn await-auth
-  ([] (await-auth 3000))
-  ([timeout-ms]
-   (p/create
-    (fn [resolve-fn]
-      (let [{:keys [token base-url headers auth-fn] :as ctx} @!auth-context]
-        (if (or (and token base-url) headers auth-fn)
-          (resolve-fn ctx)
-          (let [watch-key (keyword (gensym "auth-watch"))
-                timer     (js/setTimeout
-                           (fn []
-                             (remove-watch !auth-context watch-key)
-                             (resolve-fn @!auth-context))
-                           timeout-ms)]
-            (add-watch !auth-context watch-key
-                       (fn [_ _ _ new-state]
-                         (when (or (and (:token new-state) (:base-url new-state))
-                                   (:headers new-state)
-                                   (:auth-fn new-state))
-                           (js/clearTimeout timer)
-                           (remove-watch !auth-context watch-key)
-                           (resolve-fn new-state)))))))))))
-
+(def register-native-proxy! net-proxy/register-native-proxy!)
+(def host-proxy-provider net-proxy/host-proxy-provider)
+(def on-proxy-ready! net-proxy/on-proxy-ready!)
+(def mount-host-proxy! net-proxy/mount-host-proxy!)
+(def proxy-available? net-proxy/proxy-available?)
+(def prepare-stream-url! net-proxy/prepare-stream-url!)
+(def clear-stream-url! net-proxy/clear-stream-url!)
+(def prepare-frame-url! net-proxy/prepare-frame-url!)
+(def clear-frame-url! net-proxy/clear-frame-url!)
+(def prepare-websocket! net-proxy/prepare-websocket!)
+(def clear-websocket! net-proxy/clear-websocket!)
+(def open-auth-url! net-proxy/open-auth-url!)
+(def close-auth-url! net-proxy/close-auth-url!)
+(def set-auth-challenge! net-proxy/set-auth-challenge!)
 
 (defn fetch
   ([url] (fetch url nil))
   ([raw-url options]
-   (p/let [opts           (cond
-                            (nil? options) #js {}
-                            (map? options) (reduce-kv (fn [acc k v]
-                                                        (aset acc (name k) v)
-                                                        acc)
-                                                      #js {} options)
-                            :else (js/Object.assign #js {} options))
-           headers        (or (.-headers opts) #js {})
-           has-auth-hdr?  (if (map? headers)
-                            (or (get headers "Authorization") (get headers :Authorization))
-                            (some? (aget headers "Authorization")))
-           explicit-auth? (boolean (.-auth opts))
-           _              (when (and explicit-auth? (not has-auth-hdr?))
-                            (await-auth))
-           {:keys [token base-url auth-fn] :as ctx} @!auth-context
-           final-url      (cond
-                            (or (str/starts-with? raw-url "http://")
-                                (str/starts-with? raw-url "https://"))
-                            raw-url
+   (p/let [opts            (cond
+                             (nil? options) #js {}
+                             (map? options) (reduce-kv (fn [acc k v]
+                                                         (aset acc (name k) v)
+                                                         acc)
+                                                       #js {}
+                                                       options)
+                             :else (js/Object.assign #js {} options))
+           headers         (or (.-headers opts) #js {})
+           hdr-map         (net-proxy/headers->map headers)
+           has-auth-hdr?   (boolean
+                            (some #(= "authorization" (str/lower-case (str %)))
+                                  (keys hdr-map)))
+           raw-auth        (gobj/get opts "auth")
+           auth-disabled?  (false? raw-auth)
+           explicit-auth?  (true? raw-auth)
+           _               (when (and explicit-auth? (not has-auth-hdr?))
+                             (net-auth/await-auth))
+           {:keys [token base-url auth-fn] :as ctx} @net-auth/!auth-context
+           final-url       (cond
+                             (or (str/starts-with? raw-url "http://")
+                                 (str/starts-with? raw-url "https://"))
+                             raw-url
 
-                            (and explicit-auth? base-url (str/starts-with? raw-url "/"))
-                            (str base-url raw-url)
+                             (and explicit-auth? base-url (str/starts-with? raw-url "/"))
+                             (str base-url raw-url)
 
-                            (or (str/starts-with? raw-url "/")
-                                (str/starts-with? raw-url "./")
-                                (str/starts-with? raw-url "../")
-                                (not (str/includes? raw-url "/")))
-                            raw-url
+                             (or (str/starts-with? raw-url "/")
+                                 (str/starts-with? raw-url "./")
+                                 (str/starts-with? raw-url "../")
+                                 (not (str/includes? raw-url "/")))
+                             raw-url
 
-                            :else
-                            (ensure-protocol raw-url))
-           is-absolute?   (or (str/starts-with? final-url "http://")
-                              (str/starts-with? final-url "https://"))
-           safe-headers   (js/Object.assign #js {} headers)
-           wants-auth?    (and (not has-auth-hdr?)
-                               (or explicit-auth?
-                                   (and is-absolute? base-url (same-host? final-url base-url))))
-           dyn-headers    (when (and wants-auth? auth-fn)
-                            (auth-fn final-url opts))]
+                             :else
+                             (net-auth/ensure-protocol raw-url))
+           is-absolute?    (or (str/starts-with? final-url "http://")
+                               (str/starts-with? final-url "https://"))
+           same-auth-org?  (and is-absolute? base-url (net-auth/same-origin-pair? final-url base-url))
+           safe-headers    (clj->js hdr-map)
+           wants-auth?     (and (not auth-disabled?)
+                                (not has-auth-hdr?)
+                                (or same-auth-org?
+                                    (and explicit-auth?
+                                         (or (nil? base-url) (not is-absolute?)))))
+           dyn-headers     (when (and wants-auth? auth-fn)
+                             (auth-fn final-url opts))]
      (when wants-auth?
        (cond
          dyn-headers
@@ -108,7 +88,15 @@
          (aset safe-headers "Authorization" (str "Bearer " token))))
      (js-delete opts "auth")
      (aset opts "headers" safe-headers)
-     (-> (js/fetch final-url opts)
+     (when (nil? (gobj/get opts "referrerPolicy"))
+       (aset opts "referrerPolicy" "no-referrer"))
+     (when (and (or wants-auth? has-auth-hdr?) (nil? (gobj/get opts "credentials")))
+       (aset opts "credentials" "omit"))
+     (-> (p/let [proxied-resp (when (and is-absolute? (not (net-auth/same-origin? final-url)))
+                                (net-proxy/try-native-fetch final-url opts safe-headers))]
+           (if proxied-resp
+             proxied-resp
+             (js/fetch final-url opts)))
          (p/catch (fn [err]
-                    (js/console.error "Fetch failed on URL:" final-url)
+                    (js/console.error "Fetch failed on URL:" (net-auth/redact-url-for-log final-url))
                     (throw err)))))))
