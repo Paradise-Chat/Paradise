@@ -234,8 +234,9 @@ mechanism for multi-threaded communication.
 
 (re-frame/reg-event-fx
  :app/bootstrap
- (fn [{:keys [db]} [_ target-user-id engine-id]]
-   (let [db-engine (:active-engine db)]
+ (fn [{:keys [db]} [_ target-user-id engine-id expected-gen]]
+   (let [db-engine (:active-engine db)
+         gen       (or expected-gen (:session/gen db))]
      (go
        (try
          (let [saved-eng       (when-not (or engine-id db-engine)
@@ -254,7 +255,9 @@ mechanism for multi-threaded communication.
                                    fallback-engine)]
            (case status-kw
              :success (re-frame/dispatch [:auth/login-success
-                                          (assoc boot-res :engine-id final-engine)])
+                                          (assoc boot-res
+                                                 :engine-id    final-engine
+                                                 :expected-gen gen)])
              :empty   (dispatch-logged-out!)
              :error   (do
                         (log/error "Bootstrap failed:"
@@ -307,15 +310,18 @@ initialization for Matrix
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (re-frame/reg-event-fx
  :sdk/start-sync
- (fn [{:keys [db]} _]
-   (go
-     (let [pool @state/!engine-pool
-           res  (<! (main/do-with-pool! pool {:handler :start-sync}))]
-       (if (ok-status? res)
-         (do
-           (log/info "Main sync loop started successfully.")
-           (re-frame/dispatch [:search/refresh-index-status]))
-         (log/error "Failed to start sync:" (:msg res)))))
+ (fn [{:keys [db]} [_ expected-gen]]
+   (let [gen (or expected-gen (:session/gen db))]
+     (go
+       (let [res (<! (mesh/do-with-thread! :engine-pool {:handler :start-sync}))]
+         (if (ok-status? res)
+           (do
+             (log/info "Main sync loop started successfully.")
+             (re-frame/dispatch [:session/on-sync-ready gen])
+             (re-frame/dispatch [:search/refresh-index-status]))
+           (do
+             (log/error "Failed to start sync:" (:msg res))
+             (re-frame/dispatch [:session/on-sync-ready gen]))))))
    {:db (dissoc db :search/index-status)}))
 #+end_src
 
@@ -381,12 +387,21 @@ If the app has been running then we just need to update some contexts.
 
 (re-frame/reg-event-fx
  :engine/switch-account-boot
- (fn [{:keys [db]} [_ {:keys [target-user-id engine-id]}]]
-   (let [engine-kw (keyword (or engine-id :matrix))]
+ [(state/guard-session-gen #(-> % second :expected-gen))]
+ (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id expected-gen]}]]
+   (let [engine-kw (keyword (or engine-id :matrix))
+         prev-kw   (some-> prev-engine-id keyword)]
      (go
+       (when prev-kw
+         (try
+           (<! (mesh/do-with-thread!
+                :engine-pool
+                {:handler   (keyword (name prev-kw) "suspend-session")
+                 :arguments {}}))
+           (catch :default _ nil)))
        (<! (clear-worker-media-session! {:all? true}))
        (<! (activate-engine! engine-kw))
-       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw]))
+       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw expected-gen]))
      {:db (assoc db :active-engine engine-kw)})))
 #+end_src
 
@@ -399,16 +414,17 @@ the standard boot strap.
 (re-frame/reg-event-fx
  :app/cold-boot
  (fn [{:keys [db]} [_ target-user-id requested-engine]]
-   (go
-     (let [saved-engine (<p! (store/get-setting "last-active-engine"))
-           engine-id    (when-let [e (or requested-engine saved-engine)]
-                          (keyword e))]
-       (when engine-id
-         (<! (activate-engine! engine-id)))
-       (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
-       (if engine-id
-         (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
-         (dispatch-logged-out!))))
+   (let [gen (:session/gen db)]
+     (go
+       (let [saved-engine (<p! (store/get-setting "last-active-engine"))
+             engine-id    (when-let [e (or requested-engine saved-engine)]
+                            (keyword e))]
+         (when engine-id
+           (<! (activate-engine! engine-id)))
+         (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
+         (if engine-id
+           (re-frame/dispatch [:app/bootstrap target-user-id engine-id gen])
+           (dispatch-logged-out!)))))
    (cond-> {}
      requested-engine
      (assoc :db (assoc db :active-engine (keyword requested-engine))))))
@@ -426,10 +442,11 @@ the user.
 #+begin_src clojurescript :tangle ../../../../src/paradise/shared/client/core.cljs
 (re-frame/reg-event-fx
  :sdk/ignite-session
- (fn [_ _]
-   {:fx [[:dispatch [:sdk/start-sync]]
-         [:dispatch [:sdk/fetch-own-profile]]
-         [:dispatch [:sdk/fetch-all-emotes]]]}))
+ (fn [{:keys [db]} [_ expected-gen]]
+   (let [gen (or expected-gen (:session/gen db))]
+     {:fx [[:dispatch [:sdk/start-sync gen]]
+           [:dispatch [:sdk/fetch-own-profile]]
+           [:dispatch [:sdk/fetch-all-emotes]]]})))
 #+end_src
 
 **** Initialize the application!
