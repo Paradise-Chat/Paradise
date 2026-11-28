@@ -1,0 +1,136 @@
+(ns ^:virtualizer/skip paradise.shared.utils.cache
+  (:require [promesa.core :as p]))
+
+(defonce ^:private !session-caches (atom []))
+
+(defn make-ttl-cache
+  "Creates a bounded in-memory cache map.
+   Options:
+   - `:ttl-ms`          optional freshness window in ms
+   - `:max-entries`     optional entry cap (FIFO eviction when exceeded)
+   - `:atom-fn`         atom constructor (default `atom`; pass `r/atom` for reactive UI caches)
+   - `:session-scoped?` when true, registered for `clear-all-session-caches!`
+   - `:on-evict`        optional `(fn [k value])` callback on eviction/clear"
+  [{:keys [ttl-ms max-entries atom-fn session-scoped? on-evict]
+    :or   {atom-fn atom session-scoped? false}}]
+  (let [c {:!entries    (atom-fn {})
+           :!in-flight  (atom {})
+           :ttl-ms      ttl-ms
+           :max-entries max-entries
+           :on-evict    on-evict}]
+    (when session-scoped?
+      (swap! !session-caches conj c))
+    c))
+
+(defn entry-fresh?
+  "Returns true when `entry` is non-nil and within `cache`'s `:ttl-ms` (if configured)."
+  [cache entry]
+  (when (some? entry)
+    (if-let [ttl (:ttl-ms cache)]
+      (< (- (js/Date.now) (or (:fetched-at entry) 0)) ttl)
+      true)))
+
+(defn get-entry
+  "Returns the raw cache entry map `{:value :fetched-at}` for `k`, or nil."
+  [cache k]
+  (get @(:!entries cache) k))
+
+(defn get-fresh
+  "Returns the cached `:value` for `k` when present and not expired, else nil."
+  [cache k]
+  (let [entry (get-entry cache k)]
+    (when (entry-fresh? cache entry)
+      (:value entry))))
+
+(defn put!
+  "Stores `value` under `k` with the current timestamp, enforcing `:max-entries`."
+  [cache k value]
+  (let [now        (js/Date.now)
+        max-n      (:max-entries cache)
+        on-evict   (:on-evict cache)
+        !evicted   (atom nil)]
+    (swap! (:!entries cache)
+           (fn [m]
+             (let [m' (assoc m k {:value value :fetched-at now})]
+               (if (and max-n (> (count m') max-n))
+                 (let [victim-k (first (keys m'))]
+                   (reset! !evicted [victim-k (:value (get m' victim-k))])
+                   (dissoc m' victim-k))
+                 m'))))
+    (when (and on-evict @!evicted)
+      (let [[ek ev] @!evicted]
+        (try (on-evict ek ev) (catch :default _ nil))))
+    value))
+
+(defn evict!
+  "Removes `k` from `cache` and clears any tracked in-flight promise."
+  [cache k]
+  (let [prev (get @(:!entries cache) k)]
+    (swap! (:!entries cache) dissoc k)
+    (swap! (:!in-flight cache) dissoc k)
+    (when (and prev (:on-evict cache))
+      (try ((:on-evict cache) k (:value prev)) (catch :default _ nil)))))
+
+(defn prune-expired!
+  "Removes all expired entries from `cache` when `:ttl-ms` is configured."
+  [cache]
+  (when-let [ttl (:ttl-ms cache)]
+    (let [now (js/Date.now)]
+      (swap! (:!entries cache)
+             (fn [m]
+               (into {}
+                     (filter (fn [[_ entry]]
+                               (< (- now (or (:fetched-at entry) 0)) ttl)))
+                     m))))))
+
+(defn clear!
+  "Clears all entries and in-flight state in `cache`."
+  [cache]
+  (let [prev     @(:!entries cache)
+        on-evict (:on-evict cache)]
+    (reset! (:!entries cache) {})
+    (reset! (:!in-flight cache) {})
+    (when on-evict
+      (doseq [[k entry] prev]
+        (try (on-evict k (:value entry)) (catch :default _ nil))))))
+
+(defn clear-all-session-caches!
+  "Clears every cache registered with `:session-scoped? true`."
+  []
+  (doseq [c @!session-caches]
+    (clear! c)))
+
+(defn memoize-bounded
+  "Returns fresh cached value for `k`, or evaluates `(compute-fn)`, caches it, and returns it."
+  [cache k compute-fn]
+  (let [entry (get-entry cache k)]
+    (if (entry-fresh? cache entry)
+      (:value entry)
+      (put! cache k (compute-fn)))))
+
+(defn fetch-once!
+  "Deduplicates concurrent async fetches for `k` and caches resolved values.
+   Options:
+   - `:force?` bypasses freshness check
+   - `:cache-nil?` when true, caches nil responses as well (default false)"
+  ([cache k fetch-fn]
+   (fetch-once! cache k fetch-fn nil))
+  ([cache k fetch-fn {:keys [force? cache-nil?]}]
+   (let [entry (get-entry cache k)]
+     (cond
+       (and (not force?) (entry-fresh? cache entry))
+       (p/resolved (:value entry))
+
+       (contains? @(:!in-flight cache) k)
+       (get @(:!in-flight cache) k)
+
+       :else
+       (let [prom (-> (p/do! (fetch-fn))
+                      (p/then (fn [v]
+                                (when (or (some? v) cache-nil?)
+                                  (put! cache k v))
+                                v))
+                      (p/finally (fn []
+                                   (swap! (:!in-flight cache) dissoc k))))]
+         (swap! (:!in-flight cache) assoc k prom)
+         prom)))))
