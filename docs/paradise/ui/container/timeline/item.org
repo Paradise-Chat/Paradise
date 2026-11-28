@@ -2117,55 +2117,88 @@ library itself some context of deferred components...
          (when snippet
            [:span.timeline-thread-summary-snippet snippet])]))))
 
-(defn ^:ui event-tile-render [item]
-  (let [active-room  @(re-frame/subscribe [:rooms/active-id])
-        is-mobile?   @(re-frame/subscribe [:ui/mobile?])
-        my-profile   @(re-frame/subscribe [:sdk/profile])
-        my-id        (:user-id my-profile)]
-    (fn [item]
-      (let [{:keys [id sender-id sender-name sender-avatar content-tag content type reactions ts is-own? merge-with-prev?]} item
-            action-room      (or (:action-room-id item) active-room)
-            input-scope      (or (:input-scope-id item) active-room)
-            is-editing-this? @(re-frame/subscribe [:input/is-editing-event? action-room id])
-            custom-tags      @(re-frame/subscribe [:room/power-level-tags active-room])
-            members-map      @(re-frame/subscribe [:room/members-map active-room])
-            member-data      (get members-map sender-id)
-            popover-member   {:user-id sender-id
-                              :display-name (or (:display-name member-data) sender-name)
-                              :avatar-url (or (:avatar-url member-data) sender-avatar)
-                              :power-level (or (:power-level member-data) 0)}]
-        (if (= type :virtual)
-          [virtual-item item]
-          (if (= content-tag "MsgLike")
-            [swipe-to-action-wrapper
-             {:can-edit? is-own?
-              :enabled? is-mobile?
-              :on-action (fn [action]
-                           (re-frame/dispatch
-                            [:input/set-context
-                             (if (= action :edit) action-room input-scope)
-                             action
-                             item]))
-              :wrapper-props (merge (long-press-props
-                                     #(event-menu %1 %2 item active-room my-id))
-                                    {:class (str "timeline-message is-message"
-                                                 (when merge-with-prev? " is-merged"))})}
+(defn ^:ui message-send-failed-bar [action-room item]
+  (let [err-msg (:send-error item)]
+    [:div.message-send-failed-bar
+     [:span.message-send-failed-text
+      {:title (or err-msg "Failed to send message")}
+      "Failed to send"]
+     [:button.message-send-failed-btn.is-retry
+      {:type     "button"
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch [:msg/retry-send action-room item]))}
+      "Retry"]
+     [:button.message-send-failed-btn.is-cancel
+      {:type     "button"
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch [:msg/cancel-pending action-room item]))}
+      "Dismiss"]]))
 
-             [timeline-avatar content-tag merge-with-prev? popover-member custom-tags active-room]
-             [:div.timeline-content-wrapper
-              [message-hover-toolbar item active-room my-id]
-              (when-not merge-with-prev?
-                [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
-              [timeline-body item content action-room is-editing-this?]
-              (when (seq reactions)
-                [reaction-row {:reactions reactions
-                               :my-id my-id
-                               :members-map members-map
-                               :active-room action-room
-                               :event-id (or (:event-or-transaction-id item) id)}])
-              [thread-summary-pill active-room item]]]
-            [:<>
-             [sub-virtual-items content-tag item sender-name]]))))))
+(defn ^:ui event-tile-render [item]
+  (let [active-room      @(re-frame/subscribe [:rooms/active-id])
+        is-mobile?       @(re-frame/subscribe [:ui/mobile?])
+        my-profile       @(re-frame/subscribe [:sdk/profile])
+        my-id            (:user-id my-profile)
+        {:keys [id sender-id sender-name sender-avatar content-tag content type reactions ts is-own? merge-with-prev? send-state]} item
+        norm-send-state  (when send-state
+                           (if (keyword? send-state) send-state (keyword (str send-state))))
+        is-pending?      (= norm-send-state :pending)
+        is-failed?       (= norm-send-state :failed)
+        action-room      (or (:action-room-id item) active-room)
+        input-scope      (or (:input-scope-id item) active-room)
+        is-editing-this? @(re-frame/subscribe [:input/is-editing-event? action-room id])
+        custom-tags      @(re-frame/subscribe [:room/power-level-tags active-room])
+        members-map      @(re-frame/subscribe [:room/members-map active-room])
+        member-data      (get members-map sender-id)
+        popover-member   {:user-id sender-id
+                          :display-name (or (:display-name member-data) sender-name)
+                          :avatar-url (or (:avatar-url member-data) sender-avatar)
+                          :power-level (or (:power-level member-data) 0)}]
+    (if (= type :virtual)
+      [virtual-item item]
+      (if (= content-tag "MsgLike")
+        [swipe-to-action-wrapper
+         {:can-edit? (and is-own? (not is-pending?) (not is-failed?))
+          :enabled? (and is-mobile? (not is-pending?) (not is-failed?) (not is-editing-this?))
+          :on-action (fn [action]
+                       (re-frame/dispatch
+                        [:input/set-context
+                         (if (= action :edit) action-room input-scope)
+                         action
+                         item]))
+          :wrapper-props (merge (long-press-props
+                                 #(event-menu %1 %2 item active-room my-id))
+                                {:class (str "timeline-message is-message"
+                                             (when merge-with-prev? " is-merged")
+                                             (when is-editing-this? " is-editing")
+                                             (when is-pending? " is-pending")
+                                             (when is-failed? " is-send-failed"))})}
+
+         [timeline-avatar content-tag merge-with-prev? popover-member custom-tags active-room]
+         [:div.timeline-content-wrapper
+          (when-not (or is-pending? is-failed? is-editing-this?)
+            [message-hover-toolbar item active-room my-id])
+          (when-not merge-with-prev?
+            [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
+          [:div.timeline-body-row
+           [timeline-body item content action-room is-editing-this?]
+           (when is-pending?
+             [:span.timeline-sending-label "Sending…"])]
+          (when is-failed?
+            [message-send-failed-bar action-room item])
+          (when (seq reactions)
+            [reaction-row {:reactions reactions
+                           :my-id my-id
+                           :members-map members-map
+                           :active-room action-room
+                           :event-id (or (:event-or-transaction-id item) id)}])
+          [thread-summary-pill active-room item]]]
+        [:<>
+         [sub-virtual-items content-tag item sender-name]]))))
 
 
 #+end_src
