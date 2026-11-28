@@ -27,8 +27,8 @@ ingest them all at once.
    [paradise.shared.client.state :as state]
    [paradise.shared.sci-runner.factory :as factory]
    [paradise.shared.sci-runner.ui-common :as ui-common]
-   [paradise.shared.utils.macros :refer [expose-ns]]
-   [sci.core :as sci]))
+   [sci.core :as sci]
+   [sci.ctx-store :as ctx-store]))
 #+end_src
 
 
