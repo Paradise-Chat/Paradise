@@ -14,7 +14,10 @@ So there a couple methods that don't mesh perfectly in any one location that for
    [cljs.reader :as reader]
    [clojure.string :as str]
    [hickory.core :as h]
+   [paradise.shared.utils.cache :as mem-cache]
    [paradise.shared.utils.encoding :as encoding]
+   [paradise.shared.utils.media :as media-utils]
+   [paradise.shared.utils.platform :as platform]
    [promesa.core :as p]
    [taoensso.timbre :as log]))
 #+end_src
