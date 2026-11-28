@@ -7,99 +7,294 @@
    [paradise.shared.client.session-store :as store]
    [paradise.shared.utils.svg :as icons]
    ["react-virtuoso" :refer [Virtuoso]]
-   [paradise.ui.navigation.rooms.entry :refer [render-room-item active-call-panel]]
+   [paradise.ui.navigation.rooms.entry :refer [render-room-item]]
    [cljs.core.async :refer [go <!]]))
+
+(defn safe-get [obj k-str k-kw]
+  (if (map? obj)
+    (get obj k-kw)
+    (when obj
+      (let [v (aget obj k-str)]
+        (if (undefined? v)
+          (aget obj (name k-kw))
+          v)))))
+
+(defn- room-entry-id [r]
+  (if (map? r)
+    (or (:id r) (:roomId r))
+    (when r
+      (or (aget r "id") (aget r "roomId")))))
+
+(defn- idx-remove-child [idx pid rid]
+  (if (and pid rid)
+    (let [m (dissoc (get idx pid) rid)]
+      (if (empty? m)
+        (dissoc idx pid)
+        (assoc idx pid m)))
+    idx))
+
+(defn- idx-put-child [idx pid rid is-space?]
+  (if (and pid rid)
+    (assoc-in idx [pid rid] {:id rid :is-space? (boolean is-space?)})
+    idx))
 
 (re-frame/reg-event-db
  :rooms/parent-resolved
  (fn [db _]
    (update-in db [:ui :parent-refresh-counter] (fnil inc 0))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :room-list/set-home-rooms-sync
- (fn [db [_ rooms]]
-   (assoc db :rooms rooms)))
+ (fn [{:keys [db]} [_ rooms]]
+   (if (= (:rooms db) rooms)
+     {}
+     (cond-> {:db (assoc db :rooms rooms)}
+       (get-in db [:session/pending-restore :applied?])
+       (assoc :fx [[:dispatch [:session/reconcile-restored-room]]])))))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :room-list/set-bg-rooms-sync
- (fn [db [_ rooms-list]]
-   (let [rooms-map (reduce (fn [acc r]
-                             (let [id (or (:id r) (:roomId r))]
-                               (if id
-                                 (assoc acc id r)
-                                 acc)))
-                           {} rooms-list)]
-     (assoc db :rooms-unfiltered-cache rooms-map))))
+ (fn [{:keys [db]} [_ rooms-list]]
+   (let [old-cache (:rooms-unfiltered-cache db {})
+         old-idx   (:rooms-manual-children-idx db {})
+         [raw-map next-idx]
+         (reduce
+          (fn [[c-acc i-acc] r]
+            (if-let [id (room-entry-id r)]
+              (let [old-r       (get old-cache id)
+                    prev-parent (when old-r
+                                  (safe-get old-r "first-parent-id" :first-parent-id))
+                    merged-r    (if (and (map? r)
+                                         prev-parent
+                                         (nil? (:first-parent-id r)))
+                                  (assoc r :first-parent-id prev-parent)
+                                  r)
+                    final-r     (if (= old-r merged-r) old-r merged-r)
+                    pid         (safe-get final-r "first-parent-id" :first-parent-id)
+                    is-space?   (boolean (safe-get final-r "isSpace" :isSpace))]
+                [(assoc! c-acc id final-r)
+                 (idx-put-child i-acc pid id is-space?)])
+              [c-acc i-acc]))
+          [(transient {}) {}]
+          rooms-list)
+         rooms-map (persistent! raw-map)
+         cache-eq? (= old-cache rooms-map)
+         idx-eq?   (= old-idx next-idx)]
+     (if (and cache-eq? idx-eq?)
+       {}
+       (cond-> {:db (cond-> db
+                      (not cache-eq?) (assoc :rooms-unfiltered-cache rooms-map)
+                      (not idx-eq?)   (assoc :rooms-manual-children-idx next-idx))}
+         (get-in db [:session/pending-restore :applied?])
+         (assoc :fx [[:dispatch [:session/reconcile-restored-room]]]))))))
+
+(re-frame/reg-event-fx
+ :room-list/patch-bg-rooms-sync
+ (fn [{:keys [db]} [_ upserts removals]]
+   (let [old-cache (:rooms-unfiltered-cache db {})
+         old-idx   (:rooms-manual-children-idx db {})
+         [rem-cache rem-idx]
+         (reduce
+          (fn [[c-acc i-acc] raw-id]
+            (let [rid (str raw-id)]
+              (if-let [old-r (get c-acc rid)]
+                (let [old-pid (safe-get old-r "first-parent-id" :first-parent-id)]
+                  [(dissoc c-acc rid)
+                   (idx-remove-child i-acc old-pid rid)])
+                [c-acc i-acc])))
+          [old-cache old-idx]
+          removals)
+         [next-cache next-idx]
+         (reduce
+          (fn [[c-acc i-acc] r]
+            (if-let [id (room-entry-id r)]
+              (let [old-r      (get c-acc id)
+                    old-pid    (when old-r
+                                 (safe-get old-r "first-parent-id" :first-parent-id))
+                    old-space? (when old-r
+                                 (boolean (safe-get old-r "isSpace" :isSpace)))
+                    merged-r   (if (and (map? r)
+                                        old-pid
+                                        (nil? (:first-parent-id r)))
+                                 (assoc r :first-parent-id old-pid)
+                                 r)]
+                (if (= old-r merged-r)
+                  [c-acc i-acc]
+                  (let [new-pid    (safe-get merged-r "first-parent-id" :first-parent-id)
+                        new-space? (boolean (safe-get merged-r "isSpace" :isSpace))
+                        i-acc'     (if (and (some? old-r)
+                                            (= old-pid new-pid)
+                                            (= old-space? new-space?))
+                                     i-acc
+                                     (-> i-acc
+                                         (idx-remove-child old-pid id)
+                                         (idx-put-child new-pid id new-space?)))]
+                    [(assoc c-acc id merged-r) i-acc'])))
+              [c-acc i-acc]))
+          [rem-cache rem-idx]
+          upserts)
+         cache-same? (identical? old-cache next-cache)
+         idx-same?   (identical? old-idx next-idx)]
+     (if (and cache-same? idx-same?)
+       {}
+       (cond-> {:db (cond-> db
+                      (not cache-same?) (assoc :rooms-unfiltered-cache next-cache)
+                      (not idx-same?)   (assoc :rooms-manual-children-idx next-idx))}
+         (get-in db [:session/pending-restore :applied?])
+         (assoc :fx [[:dispatch [:session/reconcile-restored-room]]]))))))
 
 (defn distinct-by [f coll]
-  (let [!seen (atom #{})]
-    (filterv (fn [x]
-               (let [k (f x)]
-                 (if (contains? @!seen k)
-                   false
-                   (do (swap! !seen conj k)
-                       true))))
-             coll)))
+  (loop [xs   (seq coll)
+         seen (transient #{})
+         out  (transient [])]
+    (if xs
+      (let [x (first xs)
+            k (f x)]
+        (if (contains? seen k)
+          (recur (next xs) seen out)
+          (recur (next xs) (conj! seen k) (conj! out x))))
+      (persistent! out))))
 
-(defn safe-get [obj k-str k-kw]
-  (if (map? obj)
-    (get obj k-kw)
-    (let [v (aget obj k-str)]
-      (if (undefined? v)
-        (aget obj (name k-kw))
-        v))))
+(defn build-manual-children-map [rooms-map]
+  (persistent!
+   (reduce-kv
+    (fn [acc id r]
+      (if-let [pid (safe-get r "first-parent-id" :first-parent-id)]
+        (let [rid  (or id
+                       (safe-get r "id" :id)
+                       (safe-get r "roomId" :roomId))
+              prev (get acc pid [])]
+          (if rid
+            (assoc! acc pid (conj prev {:id        rid
+                                        :is-space? (boolean (safe-get r "isSpace" :isSpace))}))
+            acc))
+        acc))
+    (transient {})
+    rooms-map)))
 
-
-
-
-(defn flatten-tree [rooms-map children-map space-orders closed-drawers previews-map join-mode? parent-id depth]
-  (let [sdk-children    (get children-map parent-id [])
-        manual-children (->> (vals rooms-map)
-                             (filter #(= (safe-get % "first-parent-id" :first-parent-id) parent-id))
-                             (map (fn [r] {:id        (or (safe-get r "id" :id) (safe-get r "roomId" :roomId))
-                                           :is-space? (safe-get r "isSpace" :isSpace)})))
-
-        orders-for-parent (get space-orders parent-id {})
-
-        child-refs      (->> (concat sdk-children manual-children)
-                             (distinct-by :id)
-                             (sort-by #(get orders-for-parent (:id %) "zzzz"))
-                             (vec))]
+(defn- flatten-tree*
+  [!out visited rooms-map children-map manual-children-map
+   space-orders closed-drawers previews-map join-mode? parent-id depth]
+  (let [sdk-children      (get children-map parent-id [])
+        manual-children   (get manual-children-map parent-id [])
+        orders-for-parent (get space-orders parent-id)
+        deduped-refs      (if (empty? manual-children)
+                            (distinct-by :id sdk-children)
+                            (distinct-by :id (concat sdk-children manual-children)))
+        child-refs        (if (seq orders-for-parent)
+                            (vec (sort-by #(get orders-for-parent (:id %) "zzzz") deduped-refs))
+                            deduped-refs)]
     (reduce
      (fn [acc {:keys [id is-space?]}]
-       (let [summary   (get rooms-map id)
-             preview   (get previews-map id)
-             unjoined? (nil? summary)]
-         (if (and unjoined? (not join-mode?))
-           acc
-           (let [item          {:id                         id
+       (if (or (nil? id) (contains? visited id))
+         acc
+         (let [summary   (get rooms-map id)
+               preview   (get previews-map id)
+               unjoined? (nil? summary)]
+           (if (and unjoined? (not join-mode?))
+             acc
+             (let [call-parts  (when summary
+                                 (safe-get summary
+                                           "activeRoomCallParticipants"
+                                           :activeRoomCallParticipants))
+                   r-name      (if summary
+                                 (or (safe-get summary "name" :name) "Loading...")
+                                 (or (:name preview) "Loading..."))
+                   r-avatar    (if summary
+                                 (safe-get summary "avatar" :avatar)
+                                 (or (:avatarUrl preview) (:avatar-url preview)))
+                   unread-cnt  (if summary
+                                 (or (safe-get summary
+                                               "unreadNotificationsCount"
+                                               :unreadNotificationsCount)
+                                     0)
+                                 0)
+                   mention-cnt (if summary
+                                 (or (safe-get summary
+                                               "unreadMentionsCount"
+                                               :unreadMentionsCount)
+                                     0)
+                                 0)
+                   unread-msgs (if summary
+                                 (or (safe-get summary
+                                               "unreadMessagesCount"
+                                               :unreadMessagesCount)
+                                     0)
+                                 0)
+                   is-bold?    (boolean
+                                (when summary
+                                  (safe-get summary "isBold" :isBold)))
+                   marked-unr? (boolean
+                                (when summary
+                                  (safe-get summary "isMarkedUnread" :isMarkedUnread)))
+                   item        {:id                         id
                                 :is-space?                  is-space?
                                 :parent-id                  parent-id
                                 :depth                      depth
                                 :is-unjoined?               unjoined?
-                                :activeRoomCallParticipants (when summary (safe-get summary "activeRoomCallParticipants" :activeRoomCallParticipants))
-                                :name                       (if summary
-                                                              (or (safe-get summary "name" :name) "Loading...")
-                                                              (or (:name preview) "Loading..."))
-                                :avatar                     (if summary
-                                                              (safe-get summary "avatar" :avatar)
-                                                              (or (:avatarUrl preview) (:avatar-url preview)))
-                                :unreadNotificationsCount   (if summary (or (safe-get summary "unreadNotificationsCount" :unreadNotificationsCount) 0) 0)
-                                :unreadMentionsCount        (if summary (or (safe-get summary "unreadMentionsCount" :unreadMentionsCount) 0) 0)}
-                 acc-with-item (conj acc item)]
-
-             (if (and is-space? (not (contains? closed-drawers id)))
-               (into acc-with-item (flatten-tree rooms-map children-map space-orders closed-drawers previews-map join-mode? id (inc depth)))
-               acc-with-item)))))
-     []
+                                :activeRoomCallParticipants call-parts
+                                :name                       r-name
+                                :avatar                     r-avatar
+                                :unreadNotificationsCount   unread-cnt
+                                :unreadMentionsCount        mention-cnt
+                                :unreadMessagesCount        unread-msgs
+                                :isBold                     is-bold?
+                                :isMarkedUnread             marked-unr?}
+                   acc'        (conj! acc item)]
+               (if (and is-space? (not (contains? closed-drawers id)))
+                 (flatten-tree* acc'
+                                (conj visited id)
+                                rooms-map
+                                children-map
+                                manual-children-map
+                                space-orders
+                                closed-drawers
+                                previews-map
+                                join-mode?
+                                id
+                                (inc depth))
+                 acc'))))))
+     !out
      child-refs)))
 
-
+(defn flatten-tree
+  ([rooms-map children-map space-orders closed-drawers previews-map join-mode? parent-id depth]
+   (flatten-tree rooms-map
+                 children-map
+                 (build-manual-children-map rooms-map)
+                 space-orders
+                 closed-drawers
+                 previews-map
+                 join-mode?
+                 parent-id
+                 depth))
+  ([rooms-map children-map manual-children-map space-orders closed-drawers
+    previews-map join-mode? parent-id depth]
+   (if (nil? parent-id)
+     []
+     (persistent!
+      (flatten-tree* (transient [])
+                     #{parent-id}
+                     rooms-map
+                     children-map
+                     manual-children-map
+                     space-orders
+                     closed-drawers
+                     previews-map
+                     join-mode?
+                     parent-id
+                     depth)))))
 
 (re-frame/reg-sub :rooms/active-id (fn [db _] (:active-room-id db)))
 (re-frame/reg-sub :space-rooms (fn [db _] (vec (or (:space-rooms db) []))))
-(re-frame/reg-sub :rooms/all (fn [db _] (let [rooms (:rooms db)] (if (map? rooms) (vec (vals rooms)) (vec (or rooms []))))))
 
+(re-frame/reg-sub
+ :rooms/all
+ (fn [db _]
+   (let [rooms (:rooms db)]
+     (if (map? rooms)
+       (vec (vals rooms))
+       (vec (or rooms []))))))
 
 (re-frame/reg-sub
  :rooms/active-metadata
@@ -108,17 +303,38 @@
  (fn [[active-id rooms-map] _]
    (when active-id (get rooms-map active-id))))
 
-
 (re-frame/reg-event-fx
  :room-list/paginate-global
  (fn [_ _]
    (main/do-with-pool! @state/!engine-pool {:handler :paginate-room-list})
    {}))
 
-(re-frame/reg-event-db
+(re-frame/reg-event-fx
  :rooms/set-preview
- (fn [db [_ room-id preview-data]]
-   (assoc-in db [:room-previews room-id] preview-data)))
+ (fn [{:keys [db]} [_ room-id preview-data]]
+   (let [prev        (get-in db [:room-previews room-id] {})
+         merged      (merge prev preview-data)
+         forum?      (or (boolean (:is-forum? merged))
+                         (state/room-forum-mode? db room-id))
+         merged'     (cond-> merged
+                       (contains? preview-data :is-forum?)
+                       (assoc :native-forum? (boolean (:is-forum? preview-data)))
+                       forum?
+                       (assoc :is-forum? true))
+         active-hit? (and (= room-id (:active-room-id db))
+                          forum?
+                          (= (:main-focus db :timeline) :timeline)
+                          (nil? (get-in db [:timeline/jump-target-id room-id])))]
+     (if (= prev merged')
+       {}
+       (cond-> {:db (cond-> (assoc-in db [:room-previews room-id] merged')
+                      active-hit?
+                      (-> (assoc :main-focus :thread)
+                          (assoc-in [:ui :main-focus] :thread)
+                          (cond-> (= (:side-panel db) :threads)
+                            (assoc :side-panel nil))))}
+         active-hit?
+         (assoc :dispatch [:threads/fetch-list room-id false]))))))
 
 (re-frame/reg-sub
  :rooms/preview
@@ -127,27 +343,41 @@
 
 (re-frame/reg-event-db
  :rooms/toggle-join-mode
-       (fn [db _]
-        (update db :room-list/join-mode? not)))
+ (fn [db _]
+   (update db :room-list/join-mode? not)))
 
 (re-frame/reg-sub
  :rooms/join-mode?
-       (fn [db _]
-        (get db :room-list/join-mode? false)))
+ (fn [db _]
+   (get db :room-list/join-mode? false)))
 
 (re-frame/reg-sub
  :rooms/previews-map
-       (fn [db _]
-        (get db :room-previews {})))
+ (fn [db _]
+   (get db :room-previews {})))
 
+(re-frame/reg-sub
+ :rooms/unfiltered-indexed-map
+ (fn [db _]
+   (get db :rooms-unfiltered-cache {})))
 
+(re-frame/reg-sub
+ :rooms/manual-children-idx
+ (fn [db _]
+   (get db :rooms-manual-children-idx {})))
 
-(re-frame/reg-sub :rooms/unfiltered-indexed-map (fn [db _] (get db :rooms-unfiltered-cache {})))
-
-
+(re-frame/reg-sub
+ :rooms/manual-children-map
+ :<- [:rooms/manual-children-idx]
+ (fn [manual-idx _]
+   (persistent!
+    (reduce-kv
+     (fn [acc pid children-by-id]
+       (assoc! acc pid (vec (vals children-by-id))))
+     (transient {})
+     manual-idx))))
 
 (re-frame/reg-sub :rooms/ordered-list (fn [db _] (get db :rooms [])))
-
 
 (re-frame/reg-sub :rooms/space-orders (fn [db _] (get db :space-orders {})))
 
@@ -160,21 +390,41 @@
                (if id
                  (assoc acc id room)
                  acc)))
-           {} rooms-list)))
+           {}
+           rooms-list)))
 
 (re-frame/reg-event-db
  :rooms/apply-parent-resolution
  (fn [db [_ room-id first-parent-id]]
-   (-> db
-       (assoc-in [:rooms-unfiltered-cache room-id :first-parent-id] first-parent-id)
-       (update :rooms (fn [rooms]
-                        (if (sequential? rooms)
-                          (mapv (fn [r]
-                                  (if (= (:id r) room-id)
-                                    (assoc r :first-parent-id first-parent-id)
-                                    r))
-                                rooms)
-                          rooms))))))
+   (let [old-r         (get-in db [:rooms-unfiltered-cache room-id])
+         cached-parent (when old-r
+                         (safe-get old-r "first-parent-id" :first-parent-id))
+         is-space?     (boolean (when old-r
+                                  (safe-get old-r "isSpace" :isSpace)))
+         rooms         (:rooms db)
+         home-needs?   (and (sequential? rooms)
+                            (some #(and (= (:id %) room-id)
+                                        (not= (:first-parent-id %) first-parent-id))
+                                  rooms))]
+     (if (and (= cached-parent first-parent-id) (not home-needs?))
+       db
+       (cond-> db
+         (not= cached-parent first-parent-id)
+         (-> (assoc-in [:rooms-unfiltered-cache room-id :first-parent-id] first-parent-id)
+             (update :rooms-manual-children-idx
+                     (fn [idx]
+                       (-> (or idx {})
+                           (idx-remove-child cached-parent room-id)
+                           (idx-put-child first-parent-id room-id is-space?)))))
+
+         home-needs?
+         (update :rooms
+                 (fn [rs]
+                   (mapv (fn [r]
+                           (if (= (:id r) room-id)
+                             (assoc r :first-parent-id first-parent-id)
+                             r))
+                         rs))))))))
 
 (re-frame/reg-sub
  :rooms/current-view
@@ -182,68 +432,173 @@
  :<- [:rooms/ordered-list]
  :<- [:rooms/unfiltered-indexed-map]
  :<- [:space-children/map]
+ :<- [:rooms/manual-children-map]
  :<- [:rooms/space-orders]
  :<- [:rooms/closed-drawers]
  :<- [:rooms/previews-map]
  :<- [:rooms/join-mode?]
- (fn [[active-id ordered-list indexed-map children-map space-orders closed-drawers previews-map join-mode?] _]
-  (if-not active-id
-   ordered-list
-   (flatten-tree indexed-map children-map space-orders closed-drawers previews-map join-mode? active-id 0))))
-
-
+ (fn [[active-id ordered-list indexed-map children-map manual-children-map
+       space-orders closed-drawers previews-map join-mode?] _]
+   (if-not active-id
+     ordered-list
+     (flatten-tree indexed-map
+                   children-map
+                   manual-children-map
+                   space-orders
+                   closed-drawers
+                   previews-map
+                   join-mode?
+                   active-id
+                   0))))
 
 (re-frame/reg-event-db
  :rooms/toggle-drawer
  (fn [db [_ drawer-id]]
    (update-in db [:ui :closed-drawers]
               (fn [closed]
-                (if (contains? closed drawer-id) (disj closed drawer-id) (conj (or closed #{}) drawer-id))))))
+                (if (contains? closed drawer-id)
+                  (disj closed drawer-id)
+                  (conj (or closed #{}) drawer-id))))))
 
 (re-frame/reg-sub :rooms/closed-drawers (fn [db _] (get-in db [:ui :closed-drawers] #{})))
 
-(re-frame/reg-sub
-                                   :space/unread-stats
-                                   :<- [:rooms/unfiltered-indexed-map]
-                                   :<- [:space-children/map]
-                                   :<- [:rooms/space-orders]
-                                   (fn [[rooms-map children-map space-orders] [_ space-id]]
-                                    (let [rooms-in-space (flatten-tree rooms-map children-map space-orders #{} {} false space-id 0)
+(def ^:private empty-unread-stats
+  {:unread?     false
+   :notif-count 0
+   :mentions    0
+   :highlight?  false})
 
-                                          stats (reduce (fn [acc room]
-                                                         (-> acc
-                                                          (update :notifs + (get room :unreadNotificationsCount 0))
-                                                          (update :mentions + (get room :unreadMentionsCount 0))))
-    {:notifs 0 :mentions 0} rooms-in-space)]
-                                        {:unread? (pos? (:notifs stats))
-                                         :notif-count (:notifs stats)
-                                         :mentions (:mentions stats)
-                                         :highlight? (pos? (:mentions stats))})))
+(defn- normalize-map-key [k]
+  (cond
+    (string? k)  k
+    (keyword? k) (subs (str k) 1)
+    (some? k)    (str k)
+    :else        nil))
+
+(defn- map-get [m k]
+  (when (map? m)
+    (let [v (get m k ::not-found)]
+      (if (= v ::not-found)
+        (get m (name k))
+        v))))
+
+(defn- normalize-space-unread-entry [raw]
+  (let [m          (cond
+                     (map? raw)    raw
+                     (object? raw) (js->clj raw :keywordize-keys true)
+                     :else         nil)
+        notifs     (int (or (map-get m :notif-count) (map-get m :notifCount) 0))
+        mentions   (int (or (map-get m :mentions) 0))
+        highlight? (boolean (or (map-get m :highlight?) (pos? mentions)))
+        unread?    (boolean (or (map-get m :unread?) highlight? (pos? notifs)))]
+    (if (and (not unread?) (zero? notifs) (zero? mentions))
+      empty-unread-stats
+      {:unread?     unread?
+       :notif-count notifs
+       :mentions    mentions
+       :highlight?  highlight?})))
+
+(defn- normalize-space-unreads-map [raw]
+  (let [m (cond
+            (map? raw)    raw
+            (object? raw) (js->clj raw)
+            :else         nil)]
+    (if (seq m)
+      (persistent!
+       (reduce-kv
+        (fn [acc k v]
+          (if-let [sid (normalize-map-key k)]
+            (let [entry (normalize-space-unread-entry v)]
+              (if (= entry empty-unread-stats)
+                acc
+                (assoc! acc sid entry)))
+            acc))
+        (transient {})
+        m))
+      {})))
+
+(defn- normalize-dm-pop-item [raw]
+  (let [m  (cond
+             (map? raw)    raw
+             (object? raw) (js->clj raw :keywordize-keys true)
+             :else         nil)
+        id (or (map-get m :id) (map-get m :roomId))]
+    (when id
+      (let [mentions   (int (or (map-get m :mentions) 0))
+            msg-count  (int (or (map-get m :msg-count) (map-get m :msgCount) 0))
+            raw-unread (map-get m :unread?)]
+        {:id                (str id)
+         :name              (or (map-get m :name) "Loading...")
+         :avatar-url        (or (map-get m :avatar-url)
+                                (map-get m :avatarUrl)
+                                (map-get m :avatar))
+         :is-dm?            true
+         :is-group-dm?      (boolean (or (map-get m :is-group-dm?)
+                                         (map-get m :isGroupDm)))
+         :recipient-avatars (or (map-get m :recipient-avatars)
+                                (map-get m :recipientAvatars))
+         :unread?           (boolean (if (some? raw-unread) raw-unread true))
+         :highlight?        (boolean (or (map-get m :highlight?) (pos? mentions)))
+         :mentions          mentions
+         :msg-count         msg-count}))))
+
+(re-frame/reg-event-db
+ :spaces/set-unreads-sync
+ (fn [db [_ {:keys [space-unreads patch? removals]}]]
+   (let [prev     (:space-unreads db {})
+         incoming (normalize-space-unreads-map space-unreads)
+         next-map (if patch?
+                    (let [raw-map  (cond
+                                     (map? space-unreads)    space-unreads
+                                     (object? space-unreads) (js->clj space-unreads)
+                                     :else                   nil)
+                          cleared  (reduce
+                                    (fn [acc rid]
+                                      (if-let [sid (normalize-map-key rid)]
+                                        (dissoc acc sid)
+                                        acc))
+                                    prev
+                                    (or removals []))
+                          updated  (reduce-kv
+                                    (fn [acc k v]
+                                      (if-let [sid (normalize-map-key k)]
+                                        (let [entry (normalize-space-unread-entry v)]
+                                          (if (= entry empty-unread-stats)
+                                            (dissoc acc sid)
+                                            (assoc acc sid entry)))
+                                        acc))
+                                    cleared
+                                    (or raw-map {}))]
+                      updated)
+                    incoming)]
+     (if (= prev next-map)
+       db
+       (assoc db :space-unreads next-map)))))
+
+(re-frame/reg-event-db
+ :rooms/set-dm-pops-sync
+ (fn [db [_ raw-dms]]
+   (let [prev     (:dm-pops db [])
+         next-dms (into [] (keep normalize-dm-pop-item) (or raw-dms []))]
+     (if (= prev next-dms)
+       db
+       (assoc db :dm-pops next-dms)))))
+
+(re-frame/reg-sub
+ :spaces/unread-stats-map
+ (fn [db _]
+   (get db :space-unreads {})))
+
+(re-frame/reg-sub
+ :space/unread-stats
+ :<- [:spaces/unread-stats-map]
+ (fn [stats-map [_ space-id]]
+   (get stats-map space-id empty-unread-stats)))
 
 (re-frame/reg-sub
  :rooms/active-dm-pops
- :<- [:rooms/unfiltered-indexed-map]
- (fn [rooms-map _]
-   (->> (vals rooms-map)
-        (keep (fn [raw-room]
-                (let [r           (if (map? raw-room) raw-room (js->clj raw-room :keywordize-keys true))
-                      is-dm?      (or (:is-direct? r) (:isDirect r) (:is-direct r))
-                      msg-count   (or (:unread-messages-count r) (:unreadMessagesCount r) 0)
-                      mentions    (or (:highlight-count r) (:unreadMentionsCount r) 0)
-                      ts          (or (:last_message_ts r) (:lastMessageTs r) 0)]
-                  (when (and is-dm? (pos? msg-count))
-                    {:id          (or (:id r) (:roomId r))
-                     :name        (or (:name r) "Loading...")
-                     :avatar-url  (or (:avatar r) (:avatarUrl r))
-                     :is-dm?      true
-                     :unread?     true
-                     :highlight?  (pos? mentions)
-                     :mentions    mentions
-                     :msg-count   msg-count
-                     :ts          ts}))))
-        (sort-by :ts >)
-        (map #(dissoc % :ts)))))
-
+ (fn [db _]
+   (get db :dm-pops [])))
 
 (defn- is-call-room? [db room-id]
   (get-in db [:room-previews room-id :is-call?] false))
@@ -259,80 +614,128 @@
  :rooms/clear-active-if-matches
  (fn [{:keys [db]} [_ room-id]]
    (if (= (:active-room-id db) room-id)
-     (let [current-user (:active-user-id db)]
-       (store/set-setting! (str "last_room_" current-user) nil)
-       {:db (assoc db :active-room-id nil)
+     (let [current-user (:active-user-id db)
+           current-eng  (:active-engine db)]
+       (when (and current-eng current-user)
+         (store/save-nav-state! current-eng current-user
+                                {:space-id  (:active-space-id db)
+                                 :room-id   nil
+                                 :filter-id (:active-filter-id db "people")}))
+       {:db       (assoc db
+                         :active-room-id nil
+                         :session/pending-room-select nil)
         :dispatch [:sdk/cleanup-timeline room-id]})
      {})))
 
 (re-frame/reg-event-fx
  :rooms/select
+ [(state/guard-session-gen #(-> % (nth 2 nil) :gen))]
  (fn [{:keys [db]} [_ room-id opts]]
-   (let [
-         _ (log/error room-id)
+   (let [gen             (:session/gen db)
+         from-restore?   (boolean (:from-restore? opts))
          current-room-id (:active-room-id db)
          current-user    (:active-user-id db)
+         current-eng     (:active-engine db)
          membership      (get-in db [:rooms/membership room-id])
-         _ (log/error membership)
-         in-cache?       (contains? (:rooms-unfiltered-cache db) room-id)
-
          needs-join?     (and (some? room-id)
-                           (#{"invited" "left" "unknown"} membership))]
+                              (#{"invited" "left" "unknown"} membership))]
+     (cond
+       (nil? room-id)
+       {}
 
-     (if (= current-room-id room-id)
-       {:db (assoc-in db [:ui :sidebar-open?] false)}
+       (= current-room-id room-id)
+       {:db (cond-> (assoc-in db [:ui :sidebar-open?] false)
+              (= (:main-focus db) :discovery) (assoc :main-focus :timeline)
+              (not from-restore?) (assoc :session/pending-restore nil))}
+
+       :else
        (do
-         (store/set-setting! (str "last_room_" current-user) room-id)
-         (let [base-db (assoc db :active-room-id nil)
-               cleanup (when current-room-id [:rooms/clear-active-if-matches current-room-id])]
+         (when (and (not from-restore?) current-eng current-user)
+           (store/save-nav-state! current-eng current-user
+                                  {:space-id  (:active-space-id db)
+                                   :room-id   room-id
+                                   :filter-id (:active-filter-id db "people")}))
+         (let [base-db  (cond-> (assoc db
+                                       :active-room-id nil
+                                       :session/pending-room-select {:room-id room-id
+                                                                     :gen     gen})
+                          (not from-restore?) (assoc :session/pending-restore nil))
+               flush-r  (when current-room-id [:msg/flush-receipts true])
+               cleanup  (when current-room-id [:sdk/cleanup-timeline current-room-id])
+               gen-opts (assoc (or opts {}) :gen gen)]
            (if needs-join?
              {:db         base-db
-              :dispatch-n (remove nil? [cleanup [:rooms/join room-id opts]])}
+              :dispatch-n (remove nil? [flush-r cleanup [:rooms/join room-id gen-opts]])}
              {:db             base-db
-              :dispatch-n     (remove nil? [cleanup])
-              :dispatch-later [{:ms 20 :dispatch [:rooms/finish-select room-id opts]}]})))))))
+              :dispatch-n     (remove nil? [flush-r cleanup])
+              :dispatch-later [{:ms       20
+                                :dispatch [:rooms/finish-select room-id gen-opts]}]})))))))
 
 
 
 (re-frame/reg-event-fx
  :rooms/finish-select
  (fn [{:keys [db]} [_ room-id opts]]
-   (let [active-call-id     (get-in db [:call :active-room-id])
-         already-loaded?    (get-in db [:room-members room-id :data])
-         loading?           (get-in db [:room-members room-id :loading?])
-         is-call-room?      (is-call-room? db room-id)
+   (let [gen         (:session/gen db)
+         pending-sel (:session/pending-room-select db)]
+     (if (and pending-sel
+              (or (not= (:gen pending-sel) gen)
+                  (not= (:room-id pending-sel) room-id)))
+       (do
+         (log/debug "Ignoring stale :rooms/finish-select for" room-id)
+         {})
+       (let [active-call-id     (get-in db [:call :active-room-id])
+             already-loaded?    (get-in db [:room-members room-id :data])
+             loading?           (get-in db [:room-members room-id :loading?])
+             is-call-room?      (is-call-room? db room-id)
+             is-forum-room?     (state/room-forum-mode? db room-id)
 
-         force-lobby?       (:force-lobby? opts)
-         focus-override     (:focus-override opts)
-         mobile?            (get-in db [:ui :mobile?])
-         join-directly?     (if force-lobby? false (not mobile?))
-         wipe-call-state?   (not is-call-room?)
-         swapping-calls?    (and active-call-id
-                                 (not= active-call-id room-id)
-                                 is-call-room?
-                                 (not force-lobby?))
-         current-side-panel (get-in db [:ui :side-panel])
-         side-panel-update  (if (and (= current-side-panel :timeline) (not focus-override)) nil current-side-panel)
-         new-focus          (if is-call-room? :call :timeline)
-         base-db            (-> db
-                                (assoc :active-room-id room-id)
-                                (assoc-in [:ui :sidebar-open?] false)
-                                (assoc-in [:ui :main-focus] new-focus)
-                                (assoc-in [:call :chat-open?] false))
-         dispatches         (remove nil?
-                                    [(when swapping-calls? [:call/hangup {:wipe-state? wipe-call-state? :room-id active-call-id}])
-                                     [:composer/load-draft room-id]
-                                     [:sdk/boot-timeline room-id]
-                                     (when (not (or already-loaded? loading?)) [:room/fetch-members room-id])
-                                     [:sdk/fetch-room-emotes :room room-id]
-                                     [:container/set-main-focus new-focus]
-                                     (when focus-override [:container/set-side-panel focus-override])
-                                     (when (and (= current-side-panel :timeline) (nil? side-panel-update)) [:container/set-side-panel nil])
-                                     ;;(when is-call-room? [:call/init-widget room-id {:join-directly? join-directly?}])
-                                     ])]
-     {:db                 base-db
-      :input/focus-composer (not mobile?)
-      :dispatch-n         dispatches})))
+             force-lobby?       (:force-lobby? opts)
+             focus-override     (:focus-override opts)
+             jump-event-id      (:jump-event-id opts)
+             mobile?            (get-in db [:ui :mobile?])
+             join-directly?     (if force-lobby? false (not mobile?))
+             wipe-call-state?   (not is-call-room?)
+             swapping-calls?    (and active-call-id
+                                     (not= active-call-id room-id)
+                                     is-call-room?
+                                     (not force-lobby?))
+             current-side-panel (:side-panel db)
+             new-focus          (cond
+                                  is-call-room?  :call
+                                  (and is-forum-room? (not jump-event-id)) :thread
+                                  :else          :timeline)
+             side-panel-update  (cond
+                                  (and (= current-side-panel :timeline) (not focus-override)) nil
+                                  (and (= current-side-panel :threads) (= new-focus :thread)) nil
+                                  :else current-side-panel)
+             base-db            (cond-> (-> db
+                                            (assoc :active-room-id room-id
+                                                   :session/pending-room-select nil)
+                                            (assoc-in [:ui :sidebar-open?] false)
+                                            (assoc-in [:ui :main-focus] new-focus)
+                                            (assoc-in [:call :chat-open?] false))
+                                  (not jump-event-id)
+                                  (-> (update-in [:read-receipts :sent] dissoc room-id)
+                                      (update-in [:read-receipts :in-flight] dissoc room-id))
+                                  jump-event-id
+                                  (assoc-in [:timeline/jump-target-id room-id] jump-event-id))
+             dispatches         (remove nil?
+                                        [(when swapping-calls? [:call/hangup {:wipe-state? wipe-call-state? :room-id active-call-id}])
+                                         [:composer/load-draft room-id]
+                                         (cond
+                                           jump-event-id          [:room/boot-focused-timeline room-id jump-event-id]
+                                           (= new-focus :thread)  [:threads/fetch-list room-id false]
+                                           :else                  [:sdk/boot-timeline room-id])
+                                         (when (not (or already-loaded? loading?)) [:room/fetch-members room-id])
+                                         [:sdk/fetch-room-emotes :room room-id]
+                                         [:container/set-main-focus new-focus]
+                                         (when focus-override [:container/set-side-panel focus-override])
+                                         (when (and (some? current-side-panel) (nil? side-panel-update))
+                                           [:container/set-side-panel nil])])]
+         {:db                 base-db
+          :input/focus-composer (not mobile?)
+          :dispatch-n         dispatches})))))
 
 (defn ^:ui filter-toggle-bar []
   (let [tr            @(re-frame/subscribe [:i18n/tr])
@@ -354,20 +757,31 @@
 
 (re-frame/reg-event-fx
  :room-list/apply-filter
- (fn [{:keys [db]} [_ filter-id]]
-   (let [current-filter (:active-filter-id db)]
-     (if (= current-filter filter-id)
+ (fn [{:keys [db]} [_ filter-id opts]]
+   (let [current-filter (:active-filter-id db)
+         force?         (boolean (:force? opts))
+         persist?       (not (false? (:persist? opts)))
+         next-filter    (or (some-> filter-id str not-empty) "people")]
+     (when (and persist?
+                (nil? (:active-space-id db))
+                (:active-engine db)
+                (:active-user-id db))
+       (store/save-nav-state! (:active-engine db) (:active-user-id db)
+                              {:space-id  nil
+                               :room-id   (:active-room-id db)
+                               :filter-id next-filter}))
+     (if (and (not force?) (= current-filter next-filter))
        {}
        (do
-         (log/debug "Swapping filter to" filter-id)
+         (log/debug "Swapping filter to" next-filter)
          (go
            (let [pool @state/!engine-pool
-                 res  (<! (main/do-with-pool! pool {:handler :set-room-filter
-                                                    :arguments {:filter-id filter-id}}))]
+                 res  (<! (main/do-with-pool! pool {:handler   :set-room-filter
+                                                    :arguments {:filter-id next-filter}}))]
              (if (= (:status res) "success")
                (log/debug "Worker successfully swapped filter!")
                (log/error "Worker failed to swap filter:" res))))
-         {:db (assoc db :active-filter-id filter-id)})))))
+         {:db (assoc db :active-filter-id next-filter)})))))
 
 (re-frame/reg-sub :room-list/active-filter (fn [db _] (get db :active-filter-id "people")))
 
@@ -391,26 +805,34 @@
         room-array      (to-array rooms)]
     [:div.sidebar-rooms
 
-     [:div.room-list-header-container
-      {:style {:display "flex" :justify-content "space-between" :align-items "center" :padding-right "16px"}}
-      (if active-space
-        [:h3.room-list-header (:name active-space)]
-        [:h3.room-list-header (tr [:navigation.room-list.headers/home])])
+      [:div.room-list-header-container
+       (if active-space
+         [:h3.room-list-header (:name active-space)]
+         [:h3.room-list-header (tr [:navigation.room-list.headers/home])])
 
-      (when active-space
-        [:button.header-icon-btn
-         {:class (when join-mode? "active-green")
-          :title (if join-mode? "Hide Joinable Rooms" "Show Joinable Rooms")
-          :on-click #(re-frame/dispatch [:rooms/toggle-join-mode])}
-         [icons/compass {:size "20px"}]
-         ])]
+       (if active-space
+         [:button.header-icon-btn
+          {:class (when join-mode? "active-green")
+           :title (if join-mode? "Hide Joinable Rooms" "Show Joinable Rooms")
+           :on-click #(re-frame/dispatch [:rooms/toggle-join-mode])}
+          [icons/compass {:size "18px"}]]
+         [:button.header-icon-btn.new-dm-header-btn
+          {:type     "button"
+           :title    (tr [:navigation.room-list/new-dm])
+           :on-click #(re-frame/dispatch [:dm/open-create-modal])}
+          [icons/plus {:size "18px"}]])]
 
-     (when-not active-space
-       [filter-toggle-bar])
+      (when-not active-space
+        [:<>
+         [:button.dm-search-trigger-btn
+          {:type     "button"
+           :on-click #(re-frame/dispatch [:dm/open-create-modal])}
+          [icons/search {:size "14px"}]
+          [:span (tr [:navigation.room-list/start-dm-placeholder])]]
+         [filter-toggle-bar]])
 
-     (if (or (nil? room-array) (== (alength room-array) 0))
-       [:div.empty-state (tr [:navigation.room-list.empty-state/no-rooms])]
-       [:div.room-collection
-        [virtualized-room-list tr client room-array active-space active-room closed-drawers active-filter]])
-     [active-call-panel]]))
+      (if (or (nil? room-array) (== (alength room-array) 0))
+        [:div.empty-state (tr [:navigation.room-list.empty-state/no-rooms])]
+        [:div.room-collection
+         [virtualized-room-list tr client room-array active-space active-room closed-drawers active-filter]])]))
 
