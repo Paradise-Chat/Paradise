@@ -503,65 +503,70 @@ read receipts. This prevents any sort of spamming to the home server.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
 (defn ^:ui message-hover-toolbar [item active-room current-user-id]
-  (let [tr         @(re-frame/subscribe [:i18n/tr])
-        react-str  (tr [:container.timeline.item/react])
-        reply-str  (tr [:container.timeline.item/reply])
-        thread-str (tr [:container.timeline.item/start-thread])
-        edit-str   (tr [:container.timeline.item/edit-message])
-        more-str   (tr [:container.timeline.item/more])]
-    (fn [item active-room current-user-id tr]
-      (let [msg-id      (:id item)
-            e-t-id      (or (:event-or-transaction-id item) msg-id)
-            action-room (or (:action-room-id item) active-room)
-            input-scope (or (:input-scope-id item) active-room)
-            in-thread?  (boolean (:in-thread-view? item))
-            th-summary  (:thread-summary item)]
-        [:div.message-hover-toolbar
-         [:div.toolbar-btn
-          {:title    react-str
-           :on-click (fn [e]
-                       (.preventDefault e)
-                       (.stopPropagation e)
-                       (re-frame/dispatch
-                        [:ui/open-popover :reaction-picker
-                         {:room-id action-room
-                          :msg-id  e-t-id
-                          :x       (.-clientX e)
-                          :y       (.-clientY e)
-                          :width   320
-                          :height  380}]))}
-          [icons/smiley]]
-         [:div.toolbar-btn
-          {:title    reply-str
-           :on-click #(re-frame/dispatch
-                       [:input/set-context input-scope :reply item])}
-          [icons/reply]]
-         (when-not in-thread?
-           [:div.toolbar-btn
-            {:title    thread-str
-             :on-click (fn [e]
-                         (.preventDefault e)
-                         (.stopPropagation e)
-                         (re-frame/dispatch
-                          [:msg/thread active-room msg-id th-summary item]))}
-            [icons/thread]])
-         (when (and (:is-own? item)
-                    (= (get-in item [:content :tag]) "Message")
-                    (contains? #{"Text" "Notice" "Emote"}
-                               (get-in item [:content :inner :tag])))
-           [:div.toolbar-btn
-            {:title    edit-str
-             :on-click #(re-frame/dispatch
-                         [:input/set-context action-room :edit item])}
-            [icons/edit]])
-         [:div.toolbar-btn
-          {:title    more-str
-           :on-click (fn [e]
-                       (.stopPropagation e)
-                       (let [mx (.-clientX e)
-                             my (.-clientY e)]
-                         (event-menu mx my item active-room current-user-id)))}
-          [icons/more]]]))))
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        react-str   (tr [:container.timeline.item/react])
+        reply-str   (tr [:container.timeline.item/reply])
+        thread-str  (tr [:container.timeline.item/start-thread])
+        edit-str    (tr [:container.timeline.item/edit-message])
+        more-str    (tr [:container.timeline.item/more])
+        msg-id      (:id item)
+        e-t-id      (or (:event-or-transaction-id item) msg-id)
+        action-room (or (:action-room-id item) active-room)
+        input-scope (or (:input-scope-id item) active-room)
+        in-thread?  (boolean (:in-thread-view? item))
+        th-summary  (:thread-summary item)]
+    [:div.message-hover-toolbar
+     [:div.toolbar-btn
+      {:title    react-str
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch
+                    [:ui/open-popover :reaction-picker
+                     {:room-id action-room
+                      :msg-id  e-t-id
+                      :x       (.-clientX e)
+                      :y       (.-clientY e)
+                      :width   320
+                      :height  380}]))}
+      [icons/smiley]]
+     [:div.toolbar-btn
+      {:title    reply-str
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch
+                    [:input/set-context input-scope :reply item]))}
+      [icons/reply]]
+     (when-not in-thread?
+       [:div.toolbar-btn
+        {:title    thread-str
+         :on-click (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (re-frame/dispatch
+                      [:msg/thread active-room msg-id th-summary item]))}
+        [icons/thread]])
+     (when (and (:is-own? item)
+                (= (get-in item [:content :tag]) "Message")
+                (contains? #{"Text" "Notice" "Emote"}
+                           (get-in item [:content :inner :tag])))
+       [:div.toolbar-btn
+        {:title    edit-str
+         :on-click (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (re-frame/dispatch
+                      [:input/set-context action-room :edit item]))}
+        [icons/edit]])
+     [:div.toolbar-btn
+      {:title    more-str
+       :on-click (fn [e]
+                   (.stopPropagation e)
+                   (let [mx (.-clientX e)
+                         my (.-clientY e)]
+                     (event-menu mx my item active-room current-user-id)))}
+      [icons/more]]]))
 
 
 
