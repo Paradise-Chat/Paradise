@@ -1610,6 +1610,54 @@ working on deferred rendered components.
   border-color: var(--brand-primary, #5865f2);
 }
 
+.poll-option-row.is-winner {
+  border-color: rgba(46, 204, 113, 0.55);
+}
+
+.poll-option-row.is-winner .poll-option-fill {
+  background: rgba(46, 204, 113, 0.22);
+}
+
+.poll-option-check.is-winner {
+  background: var(--status-online, #23a55a);
+  border-color: var(--status-online, #23a55a);
+}
+
+.poll-result-card {
+  border-color: rgba(46, 204, 113, 0.25);
+}
+
+.poll-result-winner-row {
+  cursor: default;
+}
+
+.poll-result-emoji {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.poll-result-emoji-text {
+  position: relative;
+  z-index: 1;
+  font-size: 1rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.poll-result-empty {
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px dashed var(--border-color, rgba(255, 255, 255, 0.12));
+  background: var(--bg-tertiary, #1e1f22);
+  color: var(--text-muted, #949ba4);
+  font-size: 0.84rem;
+  font-style: italic;
+}
+
 .poll-option-row:disabled {
   cursor: default;
 }
