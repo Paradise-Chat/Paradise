@@ -38,7 +38,9 @@
   (run-tangle-all)
   (js/setInterval run-tangle-all 1000))
 
-(let [args (not-empty (js->clj (.slice js/process.argv 2)))]
+(let [args (->> *command-line-args*
+                (filter #(and (string? %) (str/ends-with? % ".org")))
+                not-empty)]
   (if args
     (doseq [file args]
       (if (fs/existsSync file)
