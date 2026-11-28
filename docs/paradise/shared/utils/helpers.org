@@ -426,6 +426,141 @@ spot for them to live and be utilized neatly outside of it.
   (when-let [cb (and (exists? js/navigator) (.-clipboard js/navigator))]
     (.writeText cb (str text))
     true))
+#+end_src
+
+***** Metadata Probing
+
+Only images receive a persistent preview ~blob:~ URL because videos, audio, and
+generic files render icon placeholders. On iOS WKWebView, detached ~<video>~
+probing can crash CoreMedia/GPUProcess and decoding full-resolution 12-48 MP
+camera photos through ~new Image()~ spikes WebContent/GPU memory. Therefore,
+~extract-metadata~ parses image dimensions directly from the first 64 KB header
+slice (PNG, GIF, JPEG, WebP, and HEIC ~ispe~ boxes) before falling back to
+~new Image()~ on non-iOS runtimes, and always clears ~img.src~ upon completion.
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/shared/utils/helpers.cljs
+(defn- u16-be [^js dv off] (.getUint16 dv off false))
+(defn- u16-le [^js dv off] (.getUint16 dv off true))
+(defn- u32-be [^js dv off] (.getUint32 dv off false))
+
+(defn- read-ascii4 [^js u8 off]
+  (when (<= (+ off 4) (.-length u8))
+    (str (js/String.fromCharCode (aget u8 off)
+                                 (aget u8 (+ off 1))
+                                 (aget u8 (+ off 2))
+                                 (aget u8 (+ off 3))))))
+
+(defn- parse-png-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 24)
+             (= (aget u8 0) 0x89)
+             (= (read-ascii4 u8 1) "PNG\r"))
+    {:width  (u32-be dv 16)
+     :height (u32-be dv 20)}))
+
+(defn- parse-gif-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 10)
+             (let [hdr (read-ascii4 u8 0)]
+               (or (= hdr "GIF8"))))
+    {:width  (u16-le dv 6)
+     :height (u16-le dv 8)}))
+
+(defn- parse-jpeg-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 4)
+             (= (aget u8 0) 0xFF)
+             (= (aget u8 1) 0xD8))
+    (let [len (.-length u8)]
+      (loop [off 2]
+        (when (< (+ off 4) len)
+          (if (not= (aget u8 off) 0xFF)
+            nil
+            (let [marker (aget u8 (inc off))]
+              (cond
+                (or (= marker 0xFF) (= marker 0x00))
+                (recur (inc off))
+
+                (contains? #{0xC0 0xC1 0xC2 0xC3 0xC5 0xC6 0xC7 0xC9 0xCA 0xCB 0xCD 0xCE 0xCF}
+                           marker)
+                (when (<= (+ off 9) len)
+                  {:height (u16-be dv (+ off 5))
+                   :width  (u16-be dv (+ off 7))})
+
+                (or (= marker 0xD9) (= marker 0xDA))
+                nil
+
+                :else
+                (let [seg-len (u16-be dv (+ off 2))]
+                  (when (>= seg-len 2)
+                    (recur (+ off 2 seg-len))))))))))))
+
+(defn- parse-webp-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 30)
+             (= (read-ascii4 u8 0) "RIFF")
+             (= (read-ascii4 u8 8) "WEBP"))
+    (let [chunk (read-ascii4 u8 12)]
+      (cond
+        (= chunk "VP8X")
+        {:width  (inc (bit-or (aget u8 24)
+                              (bit-shift-left (aget u8 25) 8)
+                              (bit-shift-left (aget u8 26) 16)))
+         :height (inc (bit-or (aget u8 27)
+                              (bit-shift-left (aget u8 28) 8)
+                              (bit-shift-left (aget u8 29) 16)))}
+
+        (= chunk "VP8 ")
+        {:width  (bit-and (u16-le dv 26) 0x3FFF)
+         :height (bit-and (u16-le dv 28) 0x3FFF)}
+
+        (= chunk "VP8L")
+        (let [bits (bit-or (aget u8 21)
+                           (bit-shift-left (aget u8 22) 8)
+                           (bit-shift-left (aget u8 23) 16)
+                           (bit-shift-left (aget u8 24) 24))]
+          {:width  (inc (bit-and bits 0x3FFF))
+           :height (inc (bit-and (unsigned-bit-shift-right bits 14) 0x3FFF))})
+
+        :else nil))))
+
+(defn- parse-heic-dims [^js u8 ^js dv]
+  (when (and (>= (.-length u8) 24)
+             (= (read-ascii4 u8 4) "ftyp"))
+    (let [len (.-length u8)]
+      (loop [i 8]
+        (when (<= (+ i 16) len)
+          (if (= (read-ascii4 u8 i) "ispe")
+            (let [w (u32-be dv (+ i 8))
+                  h (u32-be dv (+ i 12))]
+              (when (and (pos? w) (pos? h) (<= w 32768) (<= h 32768))
+                {:width w :height h}))
+            (recur (inc i))))))))
+
+(defn parse-image-dimensions-from-buffer
+  "Parses `{:width :height}` from the leading header bytes of PNG/GIF/JPEG/WebP/HEIC."
+  [^js ab]
+  (when (and ab (pos? (.-byteLength ab)))
+    (try
+      (let [u8 (js/Uint8Array. ab)
+            dv (js/DataView. ab)]
+        (or (parse-png-dims u8 dv)
+            (parse-jpeg-dims u8 dv)
+            (parse-webp-dims u8 dv)
+            (parse-gif-dims u8 dv)
+            (parse-heic-dims u8 dv)))
+      (catch :default _
+        nil))))
+
+(defn- probe-image-header-dims [raw-file]
+  (try
+    (let [slice-fn (.-slice raw-file)
+          head     (if (fn? slice-fn)
+                     (.slice raw-file 0 (min (or (.-size raw-file) 65536) 65536))
+                     raw-file)]
+      (-> (file->array-buffer head)
+          (p/then parse-image-dimensions-from-buffer)
+          (p/catch (fn [_] nil))))
+    (catch :default _
+      (p/resolved nil))))
+
+(def ^:private max-ios-inline-preview-bytes (* 2 1024 1024))
 
 (defn extract-metadata [raw-file]
   (p/create
