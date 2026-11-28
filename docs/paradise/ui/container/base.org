@@ -99,45 +99,75 @@ This is more or less where the layout and control of the container's contents wi
   flex: 1;
   min-width: 0;
   height: 100%;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .room-layout.with-sidebar {
-  grid-template-columns: 1fr 350px;
+  grid-template-columns: minmax(0, 1fr) 340px;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--surface-1);
-  border-left: 1px solid var(--border-color);
+  min-height: 0;
+  background: var(--surface-1, #2b2d31);
+  border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.14);
 }
 
 .sidebar-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
-  height: 48px;
-  border-bottom: 1px solid var(--border-color);
+  gap: 8px;
+  padding: 0 12px 0 16px;
+  height: 52px;
+  min-height: 52px;
+  flex-shrink: 0;
+  background: var(--surface-1, #2b2d31);
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.07));
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.22);
 }
 
 .sidebar-title {
-  font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05rem;
+  margin: 0;
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary, #f2f3f5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .sidebar-close {
-  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border: none;
-  color: var(--text-secondary);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #949ba4);
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.sidebar-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #f2f3f5);
 }
 
 .sidebar-content {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
