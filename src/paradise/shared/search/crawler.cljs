@@ -1,5 +1,6 @@
 (ns paradise.shared.search.crawler
-  (:require [paradise.shared.search.index :as index]
+  (:require [clojure.set :as set]
+            [paradise.shared.search.index :as index]
             [promesa.core :as p]
             [taoensso.timbre :as log]))
 
@@ -7,7 +8,13 @@
 (def ^:const default-step-delay-ms 1400)
 (def ^:const default-idle-recheck-ms 20000)
 (def ^:const default-batch-size 50)
-(def ^:const default-max-pages-per-room 40)
+(def ^:const default-max-pages-per-room 500)
+(def ^:const default-pages-per-slice 5)
+(def ^:const default-transient-backoff-ms 6000)
+(def ^:const default-utd-retry-delay-ms 30000)
+(def ^:const max-utd-retry-delay-ms 900000)
+(def ^:const max-utd-ids-per-room 100)
+(def ^:const max-utd-attempts 6)
 (def ^:const progress-min-interval-ms 1200)
 
 (defonce !crawlers (atom {}))
@@ -57,6 +64,93 @@
                             wait-ms)]
                (reset! (:!emit-timer c) tmr)))))))))
 
+(defn- cp-backfill-done? [cp]
+  (boolean (or (:backfill-done? cp) (:done? cp))))
+
+(defn- load-cached-checkpoint! [c rid]
+  (let [!cache (:!cp-cache c)]
+    (if (contains? @!cache rid)
+      (p/resolved (get @!cache rid))
+      (p/let [cp (index/load-checkpoint! (:engine-id c) rid)]
+        (swap! !cache assoc rid cp)
+        cp))))
+
+(defn- save-cached-checkpoint! [c rid cp]
+  (p/let [_ (index/save-checkpoint! (:engine-id c) rid cp)]
+    (swap! (:!cp-cache c) assoc rid cp)
+    cp))
+
+(defn- compute-event-bounds [events]
+  (reduce
+   (fn [{:keys [min-ts min-id max-ts max-id] :as acc} ev]
+     (let [ts  (long (or (:ts ev) 0))
+           eid (some-> (:id ev) str)]
+       (if (pos? ts)
+         {:min-ts (if (or (nil? min-ts) (< ts min-ts)) ts min-ts)
+          :min-id (if (or (nil? min-ts) (< ts min-ts)) eid min-id)
+          :max-ts (if (or (nil? max-ts) (> ts max-ts)) ts max-ts)
+          :max-id (if (or (nil? max-ts) (> ts max-ts)) eid max-id)}
+         acc)))
+   {:min-ts nil :min-id nil :max-ts nil :max-id nil}
+   events))
+
+(defn- merge-newest [prev-ts prev-id cand-ts cand-id]
+  (let [p-ts (long (or prev-ts 0))
+        c-ts (long (or cand-ts 0))]
+    (cond
+      (> c-ts p-ts)
+      [c-ts (or cand-id prev-id)]
+
+      (and (= c-ts p-ts) (some? cand-id) (nil? prev-id))
+      [p-ts cand-id]
+
+      :else
+      [p-ts prev-id])))
+
+(defn- merge-oldest [prev-ts prev-id cand-ts cand-id]
+  (let [p-ts (when (and prev-ts (pos? (long prev-ts))) (long prev-ts))
+        c-ts (when (and cand-ts (pos? (long cand-ts))) (long cand-ts))]
+    (cond
+      (and c-ts (or (nil? p-ts) (< c-ts p-ts)))
+      [c-ts (or cand-id prev-id)]
+
+      (and c-ts (= c-ts p-ts) (some? cand-id) (nil? prev-id))
+      [p-ts cand-id]
+
+      :else
+      [p-ts (or prev-id cand-id)])))
+
+(defn- merge-utd-ids [existing new-ids resolved-set]
+  (->> (concat (or existing []) (or new-ids []))
+       (keep #(when % (str %)))
+       (remove #(contains? resolved-set %))
+       distinct
+       (take max-utd-ids-per-room)
+       vec))
+
+(defn- room-needs-catchup? [c rid room-entry cp]
+  (when (some? cp)
+    (let [newest-ts  (long (or (:newest-ts cp) 0))
+          newest-eid (:newest-event-id cp)
+          latest-ts  (long (max (or (:latest-ts room-entry) 0)
+                                (or (get @(:!room-activity c) rid) 0)))
+          latest-eid (:latest-event-id room-entry)]
+      (boolean
+       (or (:catchup-pending? cp)
+           (contains? @(:!dirty-rooms c) rid)
+           (and (pos? latest-ts) (> latest-ts newest-ts))
+           (and (some? latest-eid)
+                (some? newest-eid)
+                (not= latest-eid newest-eid)
+                (>= latest-ts newest-ts)))))))
+
+(defn- room-needs-utd-retry? [c rid cp now]
+  (and (seq (:utd-ids cp))
+       (< (long (or (:utd-attempts cp) 0)) max-utd-attempts)
+       (or (>= now (long (or (:utd-retry-at cp) 0)))
+           (contains? @(:!utd-forced c) rid)
+           (> (long @(:!utd-forced-at c)) (long (or (:updated-at cp) 0))))))
+
 (defn- cancel-sleep! [c]
   (when-let [st (:!sleep c)]
     (when-let [{:keys [timer res-fn]} (first (reset-vals! st nil))]
@@ -80,79 +174,224 @@
        (some? (index/active-session (:engine-id c)))))
 
 (defn- pick-next-room! [c gen]
-  (let [ek         (:engine-id c)
-        rooms-raw  (try ((:list-rooms-fn c)) (catch :default _ []))
-        ordered    (->> rooms-raw
-                        (filter #(some? (:room-id %)))
-                        (sort-by #(or (:priority %) 100))
-                        vec)
-        done-cache @(:!done-rooms c)]
+  (let [rooms-raw (try ((:list-rooms-fn c)) (catch :default _ []))
+        ordered   (->> rooms-raw
+                       (filter #(some? (:room-id %)))
+                       (sort-by #(or (:priority %) 100))
+                       vec)
+        now       (js/Date.now)
+        cooldowns @(:!room-cooldowns c)
+        slices    @(:!slice-counts c)
+        slice-cap (or (:pages-per-slice c) default-pages-per-slice)]
     (reset! (:!rooms-total c) (count ordered))
-    (p/loop [idx 0]
+    (p/loop [idx           0
+             done-acc      #{}
+             candidates    []
+             next-wake-ms  nil]
       (cond
         (not (alive? c gen))
-        nil
+        {:target nil :next-wake-ms nil}
 
         (>= idx (count ordered))
-        nil
+        (do
+          (reset! (:!done-rooms c) done-acc)
+          (if (empty? candidates)
+            {:target nil :next-wake-ms next-wake-ms}
+            (let [mode-rank (fn [m]
+                              (case m
+                                :catchup   0
+                                :backfill  1
+                                :retry-utd 2
+                                3))
+                  fresh     (filterv #(< (get slices (:room-id %) 0) slice-cap) candidates)
+                  pool      (if (seq fresh)
+                              fresh
+                              (do
+                                (reset! (:!slice-counts c) {})
+                                candidates))
+                  chosen    (->> pool
+                                 (sort-by (fn [item]
+                                            [(mode-rank (:mode item))
+                                             (or (:priority item) 100)
+                                             (get slices (:room-id item) 0)]))
+                                 first)]
+              {:target chosen :next-wake-ms nil})))
 
         :else
         (let [room-entry (nth ordered idx)
-              rid        (str (:room-id room-entry))]
-          (if (contains? done-cache rid)
-            (p/recur (inc idx))
-            (p/let [cp (index/load-checkpoint! ek rid)]
-              (if (:done? cp)
-                (do
-                  (swap! (:!done-rooms c) conj rid)
-                  (p/recur (inc idx)))
-                {:room-id   rid
-                 :max-pages (:max-pages room-entry)
-                 :cp        cp}))))))))
+              rid        (str (:room-id room-entry))
+              cool-until (long (or (get cooldowns rid) 0))]
+          (p/let [cp (load-cached-checkpoint! c rid)]
+            (let [bf-done?  (cp-backfill-done? cp)
+                  catchup?  (room-needs-catchup? c rid room-entry cp)
+                  utd?      (room-needs-utd-retry? c rid cp now)
+                  next-done (if (and bf-done? (not catchup?))
+                              (conj done-acc rid)
+                              done-acc)
+                  mode      (cond
+                              catchup?      :catchup
+                              (not bf-done?) :backfill
+                              utd?          :retry-utd
+                              :else         nil)]
+              (cond
+                (nil? mode)
+                (let [utd-at (when (and (seq (:utd-ids cp))
+                                        (< (long (or (:utd-attempts cp) 0)) max-utd-attempts))
+                               (long (or (:utd-retry-at cp) 0)))
+                      wake   (if (and utd-at (> utd-at now))
+                               (if next-wake-ms (min next-wake-ms (- utd-at now)) (- utd-at now))
+                               next-wake-ms)]
+                  (p/recur (inc idx) next-done candidates wake))
 
-(defn- run-step! [c gen {:keys [room-id max-pages cp]}]
+                (> cool-until now)
+                (let [rem-ms (- cool-until now)
+                      wake   (if next-wake-ms (min next-wake-ms rem-ms) rem-ms)]
+                  (p/recur (inc idx) next-done candidates wake))
+
+                :else
+                (p/recur (inc idx)
+                         next-done
+                         (conj candidates
+                               {:room-id      rid
+                                :mode         mode
+                                :priority     (:priority room-entry)
+                                :max-pages    (:max-pages room-entry)
+                                :stop-at-cap? (boolean (:stop-at-cap? room-entry))
+                                :latest-ts    (long (max (or (:latest-ts room-entry) 0)
+                                                         (or (get @(:!room-activity c) rid) 0)))
+                                :cp           cp})
+                         next-wake-ms)))))))))
+
+(defn- run-step! [c gen {:keys [room-id mode max-pages stop-at-cap? latest-ts cp]}]
   (let [ek        (:engine-id c)
-        room-cap  (or max-pages (:max-pages-per-room c) default-max-pages-per-room)
+        hard-cap  (or max-pages (:max-pages-per-room c) default-max-pages-per-room)
         page      (long (or (:page cp) 0))
-        cursor    (:cursor cp)]
+        cursor    (if (= mode :catchup) (:catchup-cursor cp) (:cursor cp))
+        now       (js/Date.now)]
     (-> ((:crawl-step-fn c)
-         {:room-id    room-id
-          :cursor     cursor
-          :page       page
-          :batch-size (or (:batch-size c) default-batch-size)})
+         {:mode            mode
+          :room-id         room-id
+          :cursor          cursor
+          :page            page
+          :batch-size      (or (:batch-size c) default-batch-size)
+          :max-pages       hard-cap
+          :stop-at-cap?    stop-at-cap?
+          :newest-ts       (long (or (:newest-ts cp) 0))
+          :newest-event-id (:newest-event-id cp)
+          :oldest-ts       (:oldest-ts cp)
+          :oldest-event-id (:oldest-event-id cp)
+          :utd-ids         (vec (or (:utd-ids cp) []))})
         (p/then
           (fn [res]
             (when (alive? c gen)
-              (let [raw-events (:events res)
-                    tl-items   (:timeline-items res)
-                    extracted  (when (seq tl-items)
-                                 (->> tl-items
-                                      (keep #(index/extract-timeline-item room-id %))
-                                      (keep #(when (= (:action %) :upsert) (:event %)))
-                                      vec))
-                    all-events (vec (concat raw-events extracted))
-                    next-page  (inc page)
-                    done?      (boolean (or (:done? res)
-                                            (>= next-page room-cap)))]
-                (p/let [_ (if (seq all-events)
-                            (index/upsert-events! ek all-events)
-                            (p/resolved 0))
-                        _ (index/save-checkpoint!
-                           ek
-                           room-id
-                           {:cursor     (:next-cursor res)
-                            :page       next-page
-                            :done?      done?
-                            :updated-at (js/Date.now)})]
-                  (when done?
-                    (swap! (:!done-rooms c) conj room-id))
-                  (emit-progress! ek done?)
-                  {:retry-after-ms (:retry-after-ms res)
-                   :done?          done?})))))
+              (if (:retry? res)
+                (let [delay-ms (long (or (:retry-after-ms res) default-transient-backoff-ms))]
+                  (swap! (:!room-cooldowns c) assoc room-id (+ (js/Date.now) delay-ms))
+                  {:retry-after-ms (min 1500 delay-ms)
+                   :done?          false})
+                (let [all-events    (vec (or (:events res) []))
+                      all-removes   (mapv (fn [eid] {:room-id room-id :id (str eid)})
+                                          (or (:remove-ids res) []))
+                      new-utds      (vec (or (:utd-ids res) []))
+                      resolved-ids  (into (set (map str (or (:resolved-utd-ids res) [])))
+                                          (concat (keep #(some-> (:id %) str) all-events)
+                                                  (keep #(some-> (:id %) str) all-removes)))
+                      own-events    (filterv #(= (str (:room-id %)) room-id) all-events)
+                      ev-bounds     (compute-event-bounds own-events)
+                      cand-new-ts   (or (:newest-ts res) (:max-ts ev-bounds))
+                      cand-new-id   (or (:newest-event-id res) (:max-id ev-bounds))
+                      cand-old-ts   (or (:oldest-ts res) (:min-ts ev-bounds))
+                      cand-old-id   (or (:oldest-event-id res) (:min-id ev-bounds))
+                      [nxt-new-ts nxt-new-id]
+                      (merge-newest (:newest-ts cp) (:newest-event-id cp)
+                                    cand-new-ts cand-new-id)
+                      [final-new-ts final-new-id]
+                      (if (and (= mode :catchup)
+                               (:done? res)
+                               (pos? (long (or latest-ts 0)))
+                               (> (long latest-ts) (long nxt-new-ts)))
+                        [(long latest-ts) nxt-new-id]
+                        [nxt-new-ts nxt-new-id])
+                      [nxt-old-ts nxt-old-id]
+                      (merge-oldest (:oldest-ts cp) (:oldest-event-id cp)
+                                    cand-old-ts cand-old-id)
+                      merged-utds   (merge-utd-ids (:utd-ids cp) new-utds resolved-ids)
+                      next-cp
+                      (case mode
+                        :catchup
+                        (let [cu-done? (boolean (:done? res))]
+                          (cond-> (assoc (or cp {})
+                                         :newest-ts       final-new-ts
+                                         :newest-event-id final-new-id
+                                         :oldest-ts       nxt-old-ts
+                                         :oldest-event-id nxt-old-id
+                                         :catchup-cursor  (when-not cu-done? (:next-cursor res))
+                                         :catchup-pending? (not cu-done?)
+                                         :utd-ids         merged-utds
+                                         :updated-at      now)
+                            (and (seq merged-utds) (nil? (:utd-retry-at cp)))
+                            (assoc :utd-retry-at (+ now default-utd-retry-delay-ms))))
+
+                        :retry-utd
+                        (let [attempts (if (seq merged-utds)
+                                         (inc (long (or (:utd-attempts cp) 0)))
+                                         0)
+                              backoff  (min max-utd-retry-delay-ms
+                                            (* default-utd-retry-delay-ms
+                                               (bit-shift-left 1 (min 5 attempts))))]
+                          (assoc (or cp {})
+                                 :newest-ts       final-new-ts
+                                 :newest-event-id final-new-id
+                                 :utd-ids         merged-utds
+                                 :utd-attempts    attempts
+                                 :utd-retry-at    (when (seq merged-utds) (+ now backoff))
+                                 :updated-at      now))
+
+                        (let [next-page (inc page)
+                              bf-done?  (boolean (or (:done? res)
+                                                     (and stop-at-cap? (>= next-page hard-cap))
+                                                     (>= next-page hard-cap)))
+                              bf-new-ts (if (and (zero? page) (pos? (long (or latest-ts 0))))
+                                          (max (long final-new-ts) (long latest-ts))
+                                          (long final-new-ts))]
+                          (cond-> (assoc (or cp {})
+                                         :cursor          (:next-cursor res)
+                                         :page            next-page
+                                         :backfill-done?  bf-done?
+                                         :done?           bf-done?
+                                         :newest-ts       bf-new-ts
+                                         :newest-event-id final-new-id
+                                         :oldest-ts       nxt-old-ts
+                                         :oldest-event-id nxt-old-id
+                                         :utd-ids         merged-utds
+                                         :updated-at      now)
+                            (and (seq merged-utds) (nil? (:utd-retry-at cp)))
+                            (assoc :utd-retry-at (+ now default-utd-retry-delay-ms)))))]
+                  (p/let [_ (if (seq all-events)
+                              (index/upsert-events! ek all-events)
+                              (p/resolved 0))
+                          _ (if (seq all-removes)
+                              (p/all (map #(index/remove-event! ek (:room-id %) (:id %))
+                                          all-removes))
+                              (p/resolved nil))
+                          _ (save-cached-checkpoint! c room-id next-cp)]
+                    (swap! (:!room-cooldowns c) dissoc room-id)
+                    (swap! (:!slice-counts c) update room-id (fnil inc 0))
+                    (when (and (= mode :catchup) (:done? res))
+                      (swap! (:!dirty-rooms c) disj room-id))
+                    (when (= mode :retry-utd)
+                      (swap! (:!utd-forced c) disj room-id))
+                    (when (and (cp-backfill-done? next-cp)
+                               (not (:catchup-pending? next-cp)))
+                      (swap! (:!done-rooms c) conj room-id))
+                    (emit-progress! ek (boolean (:done? res)))
+                    {:retry-after-ms (:retry-after-ms res)
+                     :done?          (boolean (:done? res))}))))))
         (p/catch
           (fn [err]
             (log/debug "Encrypted search crawl step backoff for" room-id ":" err)
-            {:retry-after-ms 5000})))))
+            (swap! (:!room-cooldowns c) assoc room-id (+ (js/Date.now) default-transient-backoff-ms))
+            {:retry-after-ms 2500})))))
 
 (defn- crawl-loop! [c gen initial-wait-ms]
   (p/let [_ (sleep-ms c initial-wait-ms)]
@@ -163,9 +402,11 @@
             (reset! (:!running? c) false)
             (emit-progress! (:engine-id c) true)
             nil)
-          (p/let [_      (when (pos? backoff-ms) (sleep-ms c backoff-ms))
-                  target (when (and (alive? c gen) @(:!enabled? c))
-                           (pick-next-room! c gen))]
+          (p/let [_    (when (pos? backoff-ms) (sleep-ms c backoff-ms))
+                  pick (when (and (alive? c gen) @(:!enabled? c))
+                         (pick-next-room! c gen))
+                  target (:target pick)
+                  next-wake-ms (:next-wake-ms pick)]
             (cond
               (not (alive? c gen))
               nil
@@ -177,10 +418,12 @@
                 nil)
 
               (nil? target)
-              (do
+              (let [idle-wait (if (and next-wake-ms (pos? next-wake-ms))
+                                (min default-idle-recheck-ms (max 500 next-wake-ms))
+                                default-idle-recheck-ms)]
                 (reset! (:!running? c) false)
                 (emit-progress! (:engine-id c) true)
-                (p/let [_ (sleep-ms c default-idle-recheck-ms)]
+                (p/let [_ (sleep-ms c idle-wait)]
                   (when (and (alive? c gen) @(:!enabled? c))
                     (p/recur 0))))
 
@@ -214,6 +457,7 @@
            step-delay-ms
            batch-size
            max-pages-per-room
+           pages-per-slice
            list-rooms-fn
            crawl-step-fn
            on-cleanup-fn
@@ -231,9 +475,17 @@
                     :!done-rooms        (atom #{})
                     :!rooms-total       (atom init-total)
                     :!last-emit-ts      (atom 0)
+                    :!cp-cache          (atom {})
+                    :!room-cooldowns    (atom {})
+                    :!slice-counts      (atom {})
+                    :!dirty-rooms       (atom #{})
+                    :!room-activity     (atom {})
+                    :!utd-forced        (atom #{})
+                    :!utd-forced-at     (atom 0)
                     :step-delay-ms      (or step-delay-ms default-step-delay-ms)
                     :batch-size         (or batch-size default-batch-size)
                     :max-pages-per-room (or max-pages-per-room default-max-pages-per-room)
+                    :pages-per-slice    (or pages-per-slice default-pages-per-slice)
                     :list-rooms-fn      list-rooms-fn
                     :crawl-step-fn      crawl-step-fn
                     :on-cleanup-fn      on-cleanup-fn
@@ -270,7 +522,40 @@
       (when (and @(:!enabled? c) (not @(:!running? c)))
         (let [next-gen (swap! (:!gen c) inc)]
           (cancel-sleep! c)
-          (crawl-loop! c next-gen 500))))))
+          (crawl-loop! c next-gen 500)))))
+  nil)
+
+(defn notify-room-activity!
+  ([engine-id room-id]
+   (notify-room-activity! engine-id room-id (js/Date.now)))
+  ([engine-id room-id latest-ts]
+   (let [ek  (keyword engine-id)
+         rid (some-> room-id str)]
+     (when (and rid (not (empty? rid)))
+       (when-let [c (get @!crawlers ek)]
+         (let [ts      (long (or latest-ts 0))
+               prev-ts (long (or (get @(:!room-activity c) rid) 0))
+               cp      (get @(:!cp-cache c) rid)
+               cp-ts   (long (or (:newest-ts cp) 0))]
+           (when (> ts prev-ts)
+             (swap! (:!room-activity c) assoc rid ts))
+           (when (or (nil? cp) (> ts cp-ts))
+             (swap! (:!dirty-rooms c) conj rid)
+             (swap! (:!done-rooms c) disj rid)
+             (nudge! ek))))))
+   nil))
+
+(defn retry-utd-now! [engine-id]
+  (let [ek (keyword engine-id)]
+    (when-let [c (get @!crawlers ek)]
+      (let [rids (keep (fn [[rid cp]]
+                         (when (seq (:utd-ids cp)) rid))
+                       @(:!cp-cache c))]
+        (reset! (:!utd-forced-at c) (js/Date.now))
+        (swap! (:!utd-forced c) into rids)
+        (reset! (:!room-cooldowns c) {})
+        (nudge! ek))))
+  nil)
 
 (defn clear-and-rebuild! [engine-id rebuild?]
   (let [ek (keyword engine-id)]
@@ -283,6 +568,13 @@
           (try (cleanup) (catch :default _ nil)))
         (p/let [_ (index/clear-index! ek)]
           (reset! (:!done-rooms c) #{})
+          (reset! (:!cp-cache c) {})
+          (reset! (:!room-cooldowns c) {})
+          (reset! (:!slice-counts c) {})
+          (reset! (:!dirty-rooms c) #{})
+          (reset! (:!room-activity c) {})
+          (reset! (:!utd-forced c) #{})
+          (reset! (:!utd-forced-at c) 0)
           (when (and rebuild? was-enabled?)
             (let [next-gen (swap! (:!gen c) inc)]
               (crawl-loop! c next-gen 300)))
