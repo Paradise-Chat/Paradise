@@ -839,12 +839,6 @@ much simpler.
 
 500ms is the standard
 #+begin_src clojurescript :tangle ../../../src/paradise/ui/global.cljs
-(defn- vibrate-short! []
-  (try
-    (when (some-> js/navigator .-vibrate)
-      (.vibrate js/navigator 10))
-    (catch :default _ nil)))
-
 (defn- attach-scroll-lock! [!state handler]
   (when-not (:scroll-handler @!state)
     (swap! !state assoc :scroll-handler handler)
@@ -878,7 +872,7 @@ much simpler.
        (attach-scroll-lock! !state handler)
        (swap! !swipe-drag-data assoc :owner :touch-drag)
        (swap! !state assoc :armed? true)
-       (vibrate-short!)
+       (trigger-haptic! :light)
        (when-let [f (:on-arm drag-opts)]
          (f mx my target-el))))
    200))
