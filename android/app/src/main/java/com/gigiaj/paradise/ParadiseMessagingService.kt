@@ -65,8 +65,8 @@ class ParadiseMessagingService : FirebaseMessagingService() {
         val data = remoteMessage.data
         Log.d("ParadisePush", "FCM onMessageReceived keys=${data.keys}")
 
-        val roomId = data["room_id"]?.trim()
-        val eventId = data["event_id"]?.trim()
+        val roomId = (data["room_id"] ?: data["channel_id"])?.trim()
+        val eventId = (data["event_id"] ?: data["message_id"] ?: data["call_id"])?.trim()
         val engine = data["engine"]?.trim().orEmpty()
 
         if (roomId.isNullOrEmpty() || eventId.isNullOrEmpty()) {
@@ -141,19 +141,40 @@ class ParadiseMessagingService : FirebaseMessagingService() {
                         argsJsonArray = args
                     )
 
-                    Log.d("ParadisePush", "QuickJS result: $res")
+                    Log.d(
+                        "ParadisePush",
+                        "QuickJS resolved ignore=${res.optBoolean("ignore", false)} isCall=${res.optBoolean("is_call", false)}"
+                    )
 
                     if (res.optBoolean("ignore", false)) {
                         return@withLock
                     }
 
                     val tag = res.optCleanString("tag") ?: defaultTag
+                    val callRoomId = res.optCleanString("room_id") ?: roomId
+                    val resolvedEngine = res.optCleanString("engine") ?: engine
                     val title = res.optCleanString("title") ?: "New Message"
                     val subtitle = res.optCleanString("subtitle")
                     val body = res.optCleanString("body") ?: "Open Paradise to view."
 
                     if (res.optBoolean("is_call", false)) {
-                        ParadiseCallPlugin.triggerIncomingCall(applicationContext, tag, title)
+                        val callAction = res.optCleanString("call_action") ?: "invite"
+                        if (callAction == "hangup" || callAction == "cancel") {
+                            ParadiseForegroundService.cancelIncomingCallNotification(
+                                applicationContext,
+                                callRoomId
+                            )
+                        } else {
+                            ParadiseCallPlugin.triggerIncomingCall(
+                                context = applicationContext,
+                                roomId = callRoomId,
+                                callerName = title,
+                                engine = resolvedEngine,
+                                subtitle = subtitle,
+                                hasVideo = res.optBoolean("has_video", false)
+                            )
+                        }
+                        return@withLock
                     }
 
                     showNotification(tag, title, subtitle, body, data)

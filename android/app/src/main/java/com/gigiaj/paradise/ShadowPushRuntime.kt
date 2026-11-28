@@ -69,8 +69,7 @@ object ShadowPushRuntime {
                 return sessions.optJSONObject(k)
             }
         }
-        val firstKey = sessions.keys().asSequence().firstOrNull() ?: return null
-        return sessions.optJSONObject(firstKey)
+        return null
     }
 
     fun resolveSessionForPush(
@@ -93,6 +92,7 @@ object ShadowPushRuntime {
                     sessions.optJSONObject(k)?.let { return k to it }
                 }
             }
+            return null
         }
 
         val activeUser = state.optString("active_push_user", "")
@@ -124,13 +124,7 @@ object ShadowPushRuntime {
             }
         }
 
-        if (activeUser.isNotBlank()) {
-            sessions.optJSONObject(activeUser)?.let { return activeUser to it }
-        }
-
-        val firstKey = sessions.keys().asSequence().firstOrNull() ?: return null
-        val firstSession = sessions.optJSONObject(firstKey) ?: return null
-        return firstKey to firstSession
+        return null
     }
 
     fun saveShadowSession(context: Context, userId: String, sessionData: JSONObject) {
@@ -241,16 +235,33 @@ object ShadowPushRuntime {
             }
 
             override fun httpSync(method: String, urlStr: String, headersJson: String, body: String?): String {
-                var conn: HttpURLConnection? = null
-                return try {
-                    val url = URL(urlStr)
-                    conn = (url.openConnection() as HttpURLConnection).apply {
-                        requestMethod = method
-                        connectTimeout = 10000
-                        readTimeout = 12000
-                        doInput = true
-                    }
+                val safeRedirectHeaders = setOf(
+                    "accept",
+                    "accept-language",
+                    "accept-encoding",
+                    "user-agent",
+                    "range",
+                    "if-range"
+                )
+                fun exactOrigin(u: URL): String {
+                    val scheme = u.protocol.lowercase()
+                    val host = u.host.lowercase()
+                    val port = if (u.port > 0) u.port else if (scheme == "https") 443 else 80
+                    val defaultPort = if (scheme == "https") 443 else 80
+                    return if (port == defaultPort) "$scheme://$host" else "$scheme://$host:$port"
+                }
 
+                return try {
+                    var currentUrl = URL(urlStr)
+                    if (currentUrl.protocol != "http" && currentUrl.protocol != "https") {
+                        throw IllegalArgumentException("Unsupported protocol: ${currentUrl.protocol}")
+                    }
+                    var currentMethod = method.uppercase()
+                    var currentBody = if (currentMethod != "GET" && currentMethod != "HEAD" &&
+                        !body.isNullOrEmpty() && body != "null" && body != "undefined"
+                    ) body.toByteArray(Charsets.UTF_8) else null
+
+                    val currentHeaders = mutableMapOf<String, String>()
                     val headersObj = try {
                         JSONObject(headersJson)
                     } catch (_: Exception) {
@@ -258,25 +269,89 @@ object ShadowPushRuntime {
                     }
                     val keys = headersObj.keys()
                     while (keys.hasNext()) {
-                        val k = keys.next()
-                        conn.setRequestProperty(k, headersObj.optString(k, ""))
-                    }
-
-                    if (method != "GET" && method != "HEAD" && !body.isNullOrEmpty() && body != "null" && body != "undefined") {
-                        conn.doOutput = true
-                        conn.outputStream.use { os ->
-                            os.write(body.toByteArray(Charsets.UTF_8))
+                        val k = keys.next().trim()
+                        val v = headersObj.optString(k, "")
+                        if (k.isNotEmpty() && !k.contains('\r') && !k.contains('\n') &&
+                            !v.contains('\r') && !v.contains('\n')
+                        ) {
+                            currentHeaders[k] = v
                         }
                     }
 
-                    val status = conn.responseCode
-                    val stream = if (status in 200..299) conn.inputStream else conn.errorStream
-                    val respText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                    for (hop in 0..6) {
+                        val conn = (currentUrl.openConnection() as HttpURLConnection).apply {
+                            instanceFollowRedirects = false
+                            useCaches = false
+                            requestMethod = currentMethod
+                            connectTimeout = 10000
+                            readTimeout = 12000
+                            doInput = true
+                        }
+                        try {
+                            for ((k, v) in currentHeaders) {
+                                conn.setRequestProperty(k, v)
+                            }
+                            if (currentBody != null && currentMethod != "GET" && currentMethod != "HEAD") {
+                                conn.doOutput = true
+                                conn.setFixedLengthStreamingMode(currentBody.size)
+                                conn.outputStream.use { os ->
+                                    os.write(currentBody)
+                                }
+                            }
+
+                            val status = conn.responseCode
+                            val location = conn.getHeaderField("Location")
+                            if (status in listOf(301, 302, 303, 307, 308) && !location.isNullOrBlank() && hop < 6) {
+                                val nextUrl = URL(currentUrl, location)
+                                if (nextUrl.protocol != "http" && nextUrl.protocol != "https") {
+                                    throw IllegalArgumentException("Unsupported redirect protocol")
+                                }
+                                val sameOrigin = exactOrigin(nextUrl) == exactOrigin(currentUrl)
+                                val hasSensitive = currentHeaders.keys.any { k ->
+                                    val l = k.lowercase()
+                                    l !in safeRedirectHeaders && l != "content-type"
+                                }
+                                if (currentUrl.protocol.equals("https", ignoreCase = true) &&
+                                    nextUrl.protocol.equals("http", ignoreCase = true) &&
+                                    hasSensitive
+                                ) {
+                                    throw SecurityException("Blocked HTTPS to HTTP credentialed redirect")
+                                }
+                                if (status == 303 || ((status == 301 || status == 302) && currentMethod == "POST")) {
+                                    currentMethod = "GET"
+                                    currentBody = null
+                                    currentHeaders.keys.removeIf {
+                                        it.equals("Content-Type", ignoreCase = true) ||
+                                            it.equals("Content-Length", ignoreCase = true)
+                                    }
+                                }
+                                if (!sameOrigin) {
+                                    if ((status == 307 || status == 308) && currentBody != null) {
+                                        throw SecurityException("Blocked cross-origin 307/308 redirect with body")
+                                    }
+                                    currentHeaders.keys.removeIf { it.lowercase() !in safeRedirectHeaders }
+                                }
+                                currentUrl = nextUrl
+                                continue
+                            }
+
+                            val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+                            val respText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+
+                            return JSONObject().apply {
+                                put("ok", status in 200..299)
+                                put("status", status)
+                                put("body", respText)
+                            }.toString()
+                        } finally {
+                            conn.disconnect()
+                        }
+                    }
 
                     JSONObject().apply {
-                        put("ok", status in 200..299)
-                        put("status", status)
-                        put("body", respText)
+                        put("ok", false)
+                        put("status", 0)
+                        put("body", "Too many HTTP redirects")
                     }.toString()
                 } catch (e: Exception) {
                     JSONObject().apply {
@@ -284,8 +359,6 @@ object ShadowPushRuntime {
                         put("status", 0)
                         put("body", e.message ?: "HTTP failure")
                     }.toString()
-                } finally {
-                    conn?.disconnect()
                 }
             }
 
