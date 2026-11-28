@@ -15,39 +15,47 @@
 (re-frame/reg-event-fx
  :room/fetch-members
  (fn [{:keys [db]} [_ room-id]]
-   (if-let [pool @state/!engine-pool]
-     (go
-       (let [res (<! (main/do-with-pool! pool {:handler :fetch-room-members
-                                               :arguments {:room-id room-id}}))]
-         (if (= (:status res) "success")
-           (re-frame/dispatch [:room/fetch-members-success room-id (:members res)])
-           (do
-             (log/error "Failed to fetch members:" (:msg res))
-             (re-frame/dispatch [:room/fetch-members-error room-id (:msg res)])))))
-     (log/error "Cannot fetch members: No engine pool"))
-   {:db (assoc-in db [:room-members room-id :loading?] true)}))
+   (if-not room-id
+     {}
+     (do
+       (if-let [pool @state/!engine-pool]
+         (go
+           (let [res (<! (main/do-with-pool! pool {:handler   :fetch-room-members
+                                                   :arguments {:room-id room-id}}))]
+             (if (= (:status res) "success")
+               (re-frame/dispatch [:room/fetch-members-success room-id (:members res)])
+               (do
+                 (log/error "Failed to fetch members:" (:msg res))
+                 (re-frame/dispatch [:room/fetch-members-error room-id (:msg res)])))))
+         (log/error "Cannot fetch members: No engine pool"))
+       {:db (-> db
+                (assoc-in [:room-members room-id :loading?] true)
+                (assoc-in [:room-members room-id :attempted?] true))}))))
 
- (re-frame/reg-event-db
+(re-frame/reg-event-db
  :room/fetch-members-success
  (fn [db [_ room-id raw-members]]
    (let [clean-members (mapv
                         (fn [m]
-                          (assoc m :avatar-url (or (:avatar-url m) (:avatar-uri m))))
+                          (assoc m :avatar-url
+                                 (or (:avatar-url m) (:avatar-uri m) (:avatar-mxc m))))
                         raw-members)]
      (-> db
          (assoc-in [:room-members room-id :data] clean-members)
-         (assoc-in [:room-members room-id :loading?] false)))))
+         (assoc-in [:room-members room-id :loading?] false)
+         (assoc-in [:room-members room-id :attempted?] true)))))
 
 (re-frame/reg-event-db
  :room/fetch-members-error
  (fn [db [_ room-id _err]]
-   (assoc-in db [:room-members room-id :loading?] false)))
+   (-> db
+       (assoc-in [:room-members room-id :loading?] false)
+       (assoc-in [:room-members room-id :attempted?] true))))
 
 (re-frame/reg-event-db
  :room/set-member-sort
  (fn [db [_ room-id sort-type]]
    (assoc-in db [:room-members room-id :sort-type] sort-type)))
-
 
 
 (re-frame/reg-sub
@@ -159,6 +167,11 @@
    (get-in db [:room-members room-id :loading?] false)))
 
 (re-frame/reg-sub
+ :room/members-attempted?
+ (fn [db [_ room-id]]
+   (get-in db [:room-members room-id :attempted?] false)))
+
+(re-frame/reg-sub
  :room/members
  (fn [db [_ room-id]]
    (get-in db [:room-members room-id :data] [])))
@@ -204,19 +217,19 @@
 (defn profile-popover-trigger [member custom-tags active-room pos child]
   (let [open-popover! (fn [current-target]
                         (let [rect (.getBoundingClientRect current-target)
-                              px (if (= pos :left)
-                                   (- (.-left rect) 265)
-                                   (+ (.-right rect) 15))
-                              py (.-top rect)]
-                          (log/error member)
+                              px   (if (= pos :left)
+                                     (- (.-left rect) 312)
+                                     (+ (.-right rect) 15))
+                              py   (.-top rect)]
                           (re-frame/dispatch
                            [:ui/open-popover :profile-preview
                             {:x         px
                              :y         py
-                             :width     265
-                             :height    150
+                             :width     300
+                             :height    260
                              :backdrop? true
                              :member    member
+                             :room-id   active-room
                              :tags      custom-tags}])))
         trigger-props {:on-click (fn [e]
                                    (.stopPropagation e)
@@ -240,13 +253,19 @@
 
 (defn member-item [m custom-tags active-room]
   (let [pl         (:power-level m)
+        uid        (:user-id m)
+        status     @(re-frame/subscribe [:presence/user uid (:presence m)])
         tag-data   (get custom-tags (keyword (str pl)))
         role-name  (:name tag-data)
         role-color (or (:color tag-data) "var(--text-primary)")
         icon-uri   (some-> tag-data :icon :key)]
     [profile-popover-trigger m custom-tags active-room :left
      [:div.member-item
-      [avatar {:id (:user-id m) :name (:display-name m) :url (:avatar-url m) :size 32}]
+      [avatar {:id     uid
+               :name   (:display-name m)
+               :url    (:avatar-url m)
+               :size   32
+               :status status}]
       [:div.member-item-info
        [:div.member-item-name-row
         [:span.member-item-name {:style {:color role-color}} (:display-name m)]
@@ -255,7 +274,7 @@
            (when icon-uri
              [media {:uri icon-uri :class "member-item-role-icon"}])
            role-name])]
-       [:span.member-item-user-id (:user-id m)]]]]))
+       [:span.member-item-user-id uid]]]]))
 
 (defn member-list []
   (let [tr           @(re-frame/subscribe [:i18n/tr])
@@ -266,12 +285,16 @@
         sort-type    @(re-frame/subscribe [:room/member-sort-type active-room])
         counts       @(re-frame/subscribe [:room/member-counts active-room])
         loading?     @(re-frame/subscribe [:room/members-loading? active-room])
+        attempted?   @(re-frame/subscribe [:room/members-attempted? active-room])
         groups       @(re-frame/subscribe [:room/member-groups active-room])
         group-counts (:counts groups)
         group-labels (:labels groups)
         flat-members (:flat-members groups)]
 
-    (when (and (not loading?) (empty? @(re-frame/subscribe [:room/members active-room])))
+    (when (and active-room
+               (not loading?)
+               (not attempted?)
+               (empty? @(re-frame/subscribe [:room/members active-room])))
       (re-frame/dispatch [:room/fetch-members active-room])
       (re-frame/dispatch [:room/fetch-power-level-tags active-room]))
 
