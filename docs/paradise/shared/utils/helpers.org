@@ -129,12 +129,12 @@ throw an error.
   (and (string? s)
        (boolean (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*://" s))))
 
-(defn local-media-url?
-  "Returns true when `url` is a local browser object or inline data URI."
-  [url]
-  (let [s (str (or url ""))]
-    (or (str/starts-with? s "blob:")
-        (str/starts-with? s "data:"))))
+(def http-url? media-utils/http-url?)
+(def local-media-url? media-utils/local-media-url?)
+(def audio-media? media-utils/audio-media?)
+(def normalize-base-url media-utils/normalize-base-url)
+(def same-origin-prefix? media-utils/same-origin-prefix?)
+(def extract-media-source media-utils/extract-media-source)
 
 (defn extract-first-url
   "Extracts the first HTTP(S) URL from `text`, stripping trailing punctuation."
