@@ -1,22 +1,30 @@
 (ns paradise.media.core
-  (:require [cljs.core.async :refer [go <!]]
-            [cljs-workers.worker :as worker]
-            [cljs.core.async.interop :refer-macros [<p!]]
-            [shadow.esm :refer [dynamic-import]]
-            [paradise.shared.registry :as registry]))
+  (:require [cljs-workers.worker :as worker]
+            [cljs.core.async :refer [<! go]]
+            [net :as net]
+            [paradise.shared.worker-loader :as worker-loader]))
 
-(defonce !loaded-media-engines (atom #{}))
+(defonce !media-protocol-handlers (atom {}))
+(defonce !current-media-protocol (atom nil))
+
+(defn- clear-previous-media-protocol! [next-kw]
+  (let [prev-kw @!current-media-protocol]
+    (when (and prev-kw (not= prev-kw next-kw))
+      (net/set-auth-context! nil nil)
+      (when-let [clear-fn (get-in @!media-protocol-handlers [prev-kw :clear-media-session])]
+        (try
+          (clear-fn {:all? true})
+          (catch :default _ nil))))))
 
 (defn load-protocol-media! [protocol]
   (go
-    (<! (registry/ensure-environment!))
-    (let [proto-kw (keyword protocol)]
-      (when-not (contains? @!loaded-media-engines proto-kw)
-        (if-let [url (registry/get-engine-url protocol)]
-          (do
-            (<p! (dynamic-import url))
-            (swap! !loaded-media-engines conj proto-kw))
-          (throw (js/Error. (str "Unknown protocol or missing registry URL: " protocol))))))))
+    (let [res (<! (worker-loader/ensure-protocol-handlers!
+                   !media-protocol-handlers
+                   protocol
+                   {:on-before-switch clear-previous-media-protocol!}))]
+      (when (not= "error" (:status res))
+        (reset! !current-media-protocol (:proto-kw res)))
+      res)))
 
 (worker/register
  :register-engine
@@ -25,11 +33,13 @@
      (try
        (let [protocol-str (if (map? payload) (:engine-id payload) payload)]
          (if protocol-str
-           (let [protocol-name (name protocol-str)]
-             (<! (load-protocol-media! protocol-name))
-             {:status "success" :msg (str "Registered media handlers for " protocol-name)})
+           (let [protocol-name (name protocol-str)
+                 res           (<! (load-protocol-media! protocol-name))]
+             (if (= "error" (:status res))
+               res
+               {:status "success" :msg (str "Registered media handlers for " protocol-name)}))
            {:status "error" :msg "No engine provided."}))
        (catch :default e
-         {:status "error" :msg (.-message e)})))))
+         {:status "error" :msg (or (.-message e) (str e))})))))
 
 (worker/bootstrap)
