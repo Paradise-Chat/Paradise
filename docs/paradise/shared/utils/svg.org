@@ -1087,8 +1087,12 @@ strings, or raw hiccup vectors).
    :edit         edit
    :shield       shield
    :lock         lock
+   :clock        clock
    :smiley       smiley
-   :globe        globe})
+   :sticker      sticker
+   :globe        globe
+   :compass      compass
+   :chat-bubble  chat-bubble})
 
 (defn resolve-icon
   "Resolves a keyword, string, or hiccup vector into a rendered SVG icon vector.
