@@ -2171,6 +2171,11 @@ file.
   color: #ffffff;
 }
 
+.floating-ctrl-btn.is-settings:hover .animate-spin {
+  animation: spin 2s linear infinite;
+  transform-origin: center;
+}
+
 .floating-ctrl-btn:active {
   transform: scale(0.93);
 }
