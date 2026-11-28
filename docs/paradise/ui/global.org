@@ -57,7 +57,7 @@ enable passing functions through them.
 (defonce !active-modal (r/atom nil))
 (defonce !active-popover (r/atom nil))
 (defonce !long-press-state (atom {}))
-(declare !swipe-drag-data)
+(declare !swipe-drag-data make-swipe-handlers)
 #+end_src
 
 
