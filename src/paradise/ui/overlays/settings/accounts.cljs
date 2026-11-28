@@ -1,9 +1,12 @@
 (ns paradise.ui.overlays.settings.accounts
-  (:require
-   [cljs.core.async :refer [<! go]]
-   [cljs-workers.mesh :as mesh]
-   [re-frame.core :as re-frame]
-   [taoensso.timbre :as log]))
+  (:require [cljs-workers.mesh :as mesh]
+            [cljs.core.async :refer [<! go]]
+            [clojure.string :as str]
+            [paradise.shared.utils.normalize :as norm]
+            [paradise.shared.utils.svg :as icons]
+            [paradise.ui.global :refer [avatar]]
+            [re-frame.core :as re-frame]
+            [taoensso.timbre :as log]))
 
 (re-frame/reg-fx
  :idb/fetch-sessions
@@ -43,16 +46,17 @@
  :settings/load-accounts
  (fn [_ _]
    (go
-     (let [res
-           (<! (mesh/do-with-thread!
-                :engine-pool
-                {:handler :get-available-accounts}))]
+     (let [res (<! (mesh/do-with-thread!
+                    :engine-pool
+                    {:handler :list-all-stored-accounts}))]
        (if (= (:status res) "success")
-         (re-frame/dispatch
-          [:settings/set-accounts (:accounts res)])
-         (log/error
-          "Failed to fetch accounts from worker:"
-          (:msg res)))))
+         (re-frame/dispatch [:settings/set-accounts (:accounts res)])
+         (let [fallback (<! (mesh/do-with-thread!
+                             :engine-pool
+                             {:handler :get-available-accounts}))]
+           (if (= (:status fallback) "success")
+             (re-frame/dispatch [:settings/set-accounts (:accounts fallback)])
+             (log/error "Failed to fetch accounts from worker:" (:msg res)))))))
    {}))
 
 (re-frame/reg-event-db
@@ -67,53 +71,70 @@
 
 (defn ^:ui account-item
   [{:keys [acc is-active?]}]
-  (let [tr @(re-frame/subscribe [:i18n/tr])]
+  (let [tr    @(re-frame/subscribe [:i18n/tr])
+        normd (norm/normalize-account acc)
+        title (or (:label normd) (:user-id normd))
+        sub   (norm/format-account-subtitle acc)]
     [:div.settings-list-item
      {:class (when is-active? "is-active")}
-     [:div.settings-list-main
-      [:div.settings-list-title
-       (:userId acc)]
-      [:div.settings-list-description
-       (:hs_url acc)]]
+     [:div.settings-list-lead
+      [avatar {:id   (:user-id normd)
+               :name (or title "?")
+               :url  (:avatar-url normd)
+               :size 38}]
+      [:div.settings-list-main
+       [:div.settings-list-title title]
+       (when-not (str/blank? sub)
+         [:div.settings-list-description sub])]]
 
      [:div.settings-list-actions
       (if is-active?
         [:div.settings-badge.success
          (tr [:settings.account-item/active-status])]
-        [:button.settings-button.is-compact
+        [:button.settings-button.secondary.is-compact
          {:on-click #(re-frame/dispatch
                       [:auth/switch-account
-                       (:userId acc)])}
+                       (:user-id normd)
+                       (:engine normd)])}
          (tr [:settings.account-item/switch-button])])]]))
 
 (defn ^:ui accounts-tab []
-  (let [tr           @(re-frame/subscribe [:i18n/tr])
-        accounts     @(re-frame/subscribe [:settings/available-accounts])
-        current-user @(re-frame/subscribe [:sdk/profile])]
+  (let [tr             @(re-frame/subscribe [:i18n/tr])
+        accounts       @(re-frame/subscribe [:settings/available-accounts])
+        current-user   @(re-frame/subscribe [:sdk/profile])
+        active-user-id @(re-frame/subscribe [:auth/active-user-id])
+        active-engine  @(re-frame/subscribe [:auth/active-engine])
+        effective-uid  (or active-user-id (:user-id current-user))]
     [:div.settings-tab-content
-     [:div.settings-page-header
-      [:h2.settings-heading
-       (tr [:settings.accounts/title])]
-      [:p.settings-description
-       (tr [:settings.accounts/description])]]
+     [:p.settings-subview-lead
+      (tr [:settings.accounts/description])]
 
-     [:div.settings-section.is-fill
-      [:div.settings-list.is-scrollable
+     [:div.settings-hub-group
+      [:div.settings-hub-group-label
+       (tr [:settings.accounts/title])]
+      [:div.settings-list
        (if (empty? accounts)
          [:div.settings-empty
           (tr [:settings.accounts/empty-state])]
-         (for [acc accounts]
-           ^{:key (:userId acc)}
+         (for [acc accounts
+               :let [acc-eng  (some-> (:engine acc) keyword)
+                     item-key (str (or (:engine acc) "default") ":" (:userId acc))
+                     active?  (and (= (str (:userId acc)) (str effective-uid))
+                                   (or (nil? acc-eng)
+                                       (nil? active-engine)
+                                       (= acc-eng (keyword active-engine))))]]
+           ^{:key item-key}
            [account-item
-            {:acc acc
-             :is-active?
-             (= (:userId acc)
-                (:user-id current-user))}]))]
+            {:acc        acc
+             :is-active? active?}]))]]
 
-      [:div.settings-actions
-       [:button.settings-button
-        {:on-click #(re-frame/dispatch
-                     [:auth/start-login-flow])}
-        (str
-         "+ "
-         (tr [:settings.accounts/add-account]))]]]]))
+     [:div.settings-hub-group
+      [:div.settings-hub-group-card
+       [:button.settings-hub-item
+        {:type     "button"
+         :on-click #(re-frame/dispatch [:auth/start-login-flow])}
+        [:span.settings-hub-icon.accent-indigo [icons/plus]]
+        [:span.settings-hub-item-copy
+         [:span.settings-hub-item-title
+          (tr [:settings.accounts/add-account])]]
+        [:span.settings-hub-chevron [icons/chevron-down]]]]]]))
