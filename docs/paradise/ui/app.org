@@ -99,17 +99,24 @@ This also serves as a good example of where to start with modifying the UI
 
 (def default-db
   {:spaces {}
-   :rooms  {}
+   :spaces-list []
+   :space-children {}
+   :rooms {}
+   :rooms-unfiltered-cache {}
    :active-space-id nil
-   :active-room-id  nil
+   :active-room-id nil
+   :active-filter-id "people"
+   :session/gen 0
+   :session/sync-ready? false
+   :session/pending-restore nil
+   :session/pending-room-select nil
    :auth-status :checking
    :login-error nil
    :client nil
    :config config
    :locale :en
    :dictionary i18n-data
-   :update-available? false}
-   )
+   :update-available? false})
 #+end_src
 
 This is the initializer for the global reframe object
