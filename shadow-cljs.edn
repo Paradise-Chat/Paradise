@@ -17,13 +17,34 @@
                                            virtualizer.worker.engine
                                            virtualizer.worker.pretext
                                            paradise.shared.utils.macros
+                                           paradise.shared.utils.encoding
+                                           paradise.shared.utils.media
+                                           paradise.shared.utils.platform
+                                           paradise.shared.utils.haptics
+                                           paradise.shared.utils.cache
+                                           paradise.shared.utils.normalize
+                                           paradise.shared.utils.audio
+                                           paradise.shared.utils.emotes
+                                           paradise.shared.utils.qr
+                                           paradise.shared.net.auth
+                                           paradise.shared.net.proxy
+                                           paradise.shared.client.idb
+                                           paradise.media.session
+                                           paradise.shared.worker-loader
+                                           paradise.engine.spec
+                                           paradise.engine.binding
+                                           paradise.shared.sci-runner.ui-common
+                                           paradise.shared.client.capacitor-proxy
+                                           paradise.shared.client.cache
                                            paradise.shared.client.registry
                                            paradise.shared.client.state
                                            paradise.shared.client.core
                                            paradise.virtualizer.base
                                            paradise.virtualizer.spec
                                            paradise.virtualizer.parsing
-                                           paradise.ui.container.timeline.hydrator
+                                           paradise.shared.search.crypto
+                                           paradise.shared.search.index
+                                           paradise.shared.search.crawler
                                            re-frame.db
                                            net}}]
                       [build-hooks/include-root-files]
