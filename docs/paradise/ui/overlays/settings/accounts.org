@@ -15,6 +15,7 @@ log into another or swap to another.
   (:require [cljs-workers.mesh :as mesh]
             [cljs.core.async :refer [<! go]]
             [clojure.string :as str]
+            [paradise.shared.utils.normalize :as norm]
             [paradise.shared.utils.svg :as icons]
             [paradise.ui.global :refer [avatar]]
             [re-frame.core :as re-frame]
@@ -104,27 +105,18 @@ Deprecated method.
 ****** Account Item
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/accounts.cljs
-(defn- format-account-subtitle [acc]
-  (let [proto (some-> (:engine acc) clojure.core/name str/capitalize)
-        url   (or (:server-url acc) (:base-url acc) (:server acc) "")]
-    (cond
-      (and proto (not (str/blank? url))) (str proto " · " url)
-      proto                              proto
-      :else                              url)))
-
 (defn ^:ui account-item
   [{:keys [acc is-active?]}]
   (let [tr    @(re-frame/subscribe [:i18n/tr])
-        title (or (not-empty (:label acc))
-                  (not-empty (:display-name acc))
-                  (:userId acc))
-        sub   (format-account-subtitle acc)]
+        normd (norm/normalize-account acc)
+        title (or (:label normd) (:user-id normd))
+        sub   (norm/format-account-subtitle acc)]
     [:div.settings-list-item
      {:class (when is-active? "is-active")}
      [:div.settings-list-lead
-      [avatar {:id   (:userId acc)
+      [avatar {:id   (:user-id normd)
                :name (or title "?")
-               :url  (:avatar-url acc)
+               :url  (:avatar-url normd)
                :size 38}]
       [:div.settings-list-main
        [:div.settings-list-title title]
@@ -138,8 +130,8 @@ Deprecated method.
         [:button.settings-button.secondary.is-compact
          {:on-click #(re-frame/dispatch
                       [:auth/switch-account
-                       (:userId acc)
-                       (:engine acc)])}
+                       (:user-id normd)
+                       (:engine normd)])}
          (tr [:settings.account-item/switch-button])])]]))
 #+end_src
 
