@@ -291,12 +291,9 @@ https://tiptap.dev/docs/editor/core-concepts/extensions
 This determines the 'submit' behavior for the editor.
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/composer.cljs
 (defn- mobile-touch-composer? []
-  (let [platform (when (exists? Capacitor) (.getPlatform Capacitor))]
-    (or (contains? #{"android" "ios"} platform)
-        (and (exists? js/window)
-             (<= (.-innerWidth js/window) 768)
-             (exists? js/window.matchMedia)
-             (.-matches (js/window.matchMedia "(pointer: coarse)"))))))
+  (or (platform/capacitor-mobile?)
+      (and (platform/mobile-viewport?)
+           (platform/coarse-pointer?))))
 
 (def submit-extension
   (.create Extension
