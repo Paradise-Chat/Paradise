@@ -20,6 +20,12 @@
       line-height: 1;
 }
 
+@media (max-width: 768px) {
+    .timeline-container:has(.timeline-input-outer.is-emoji-docked) .followers-indicator {
+        display: none;
+    }
+}
+
 
 
 
