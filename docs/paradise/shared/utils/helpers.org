@@ -77,10 +77,47 @@ throw an error.
 
 (def non-text-tags #{:style :script :textarea :option :noscript :reply-quote :mx-reply})
 
+(defn safe-lower
+  "Nil-safe string lowercasing."
+  [x]
+  (str/lower-case (str (or x ""))))
+
+(defn safe-lower-trim
+  "Nil-safe string trimming and lowercasing."
+  [x]
+  (str/lower-case (str/trim (str (or x "")))))
+
 (defn clean-shortcode [raw]
   (-> (if (keyword? raw) (name raw) (str raw))
       (str/replace #":" "")
       str/trim))
+
+(defn slugify-shortcode
+  "Normalizes an arbitrary string or filename into a valid emote shortcode slug.
+   Options:
+   - `:strip-ext?`  strip trailing file extension before slugifying (default false)
+   - `:lowercase?`  force lower-case output (default false)
+   - `:allow-plus?` keep `+` characters (default false)
+   - `:min-len`     pad short slugs when provided
+   - `:max-len`     truncate long slugs when provided"
+  ([raw]
+   (slugify-shortcode raw nil))
+  ([raw {:keys [strip-ext? lowercase? allow-plus? min-len max-len]}]
+   (let [base     (clean-shortcode (or raw ""))
+         no-ext   (if strip-ext? (str/replace base #"\.[^.]+$" "") base)
+         cased    (if lowercase? (str/lower-case no-ext) no-ext)
+         pat      (if allow-plus? #"[^A-Za-z0-9_+-]+" #"[^A-Za-z0-9_-]+")
+         slug     (-> cased
+                      (str/replace pat "_")
+                      (str/replace #"_+" "_")
+                      (str/replace #"^_+|_+$" ""))
+         bounded  (if (and max-len (> (count slug) max-len))
+                    (subs slug 0 max-len)
+                    slug)]
+     (cond
+       (empty? bounded) ""
+       (and min-len (< (count bounded) min-len)) (str bounded "_emote")
+       :else bounded))))
 
 (defn format-shortcode [raw]
   (let [cleaned (clean-shortcode raw)]
