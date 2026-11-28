@@ -1139,41 +1139,49 @@ read receipts. This prevents any sort of spamming to the home server.
 
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/container/timeline/item.cljs
 (defn ^:ui gallery-cell [entry all-items]
-  [:div.gallery-grid-cell
-   {:style (:cell-style entry)}
-   [:div.message-image-placeholder
-    [:div.spinner]]
-   (if (or (:display-uri entry) (:display-map entry))
-     [media
-      {:uri        (:display-uri entry)
-       :source-map (:display-map entry)
-       :tag-type   "img"
-       :alt        (or (:caption entry) (:filename entry) "media")
-       :mime-type  (:display-mime entry)
-       :room-id    (:room_id entry)
-       :event-id   (:event-id entry)
-       :width      (:crop-size entry)
-       :height     (:crop-size entry)
-       :method     (:crop-method entry)
-       :on-click   (fn [e]
-                     (.stopPropagation e)
-                     (let [live-blob-url (.-src (.-currentTarget e))]
-                       (re-frame/dispatch
-                        [:ui/open-modal :image-lightbox
-                         {:url            live-blob-url
-                          :index          (:idx entry)
-                          :items          all-items
-                          :room-id        (:room_id entry)
-                          :backdrop-props {:class "lightbox-backdrop"}
-                          :window-props   {:style {:background "transparent"
-                                                   :box-shadow "none"}}}])))}]
-     [:div.gallery-video-fallback])
-   (when (:video? entry)
-     [:div.gallery-video-badge
-      [:span.gallery-play-pill "Play"]])
-   (when (pos? (:overflow-count entry))
-     [:div.gallery-overflow-mask
-      (str "+" (:overflow-count entry))])])
+  (let [open-lightbox! (fn [e]
+                         (.stopPropagation e)
+                         (let [cur           (.-currentTarget e)
+                               img-el        (when cur
+                                               (if (= (.-tagName cur) "IMG")
+                                                 cur
+                                                 (.querySelector cur "img")))
+                               live-blob-url (or (when img-el (not-empty (.-src img-el)))
+                                                 (:display-uri entry)
+                                                 (:source entry))]
+                           (re-frame/dispatch
+                            [:ui/open-modal :image-lightbox
+                             {:url            live-blob-url
+                              :index          (:idx entry)
+                              :items          all-items
+                              :room-id        (or (:room_id entry) (:room-id entry))
+                              :backdrop-props {:class "lightbox-backdrop"}
+                              :window-props   {:style {:background "transparent"
+                                                       :box-shadow "none"}}}])))]
+    [:div.gallery-grid-cell
+     {:style    (:cell-style entry)
+      :on-click open-lightbox!}
+     [:div.message-image-placeholder
+      [:div.spinner]]
+     (if (or (:display-uri entry) (:display-map entry))
+       [media
+        {:uri        (:display-uri entry)
+         :source-map (:display-map entry)
+         :tag-type   "img"
+         :alt        (or (:caption entry) (:filename entry) "media")
+         :mime-type  (:display-mime entry)
+         :room-id    (or (:room_id entry) (:room-id entry))
+         :event-id   (:event-id entry)
+         :width      (:crop-size entry)
+         :height     (:crop-size entry)
+         :method     (:crop-method entry)}]
+       [:div.gallery-video-fallback])
+     (when (:video? entry)
+       [:div.gallery-video-badge
+        [:span.gallery-play-pill "Play"]])
+     (when (pos? (:overflow-count entry))
+       [:div.gallery-overflow-mask
+        (str "+" (:overflow-count entry))])]))
 
 (defn- default-gallery-grid-style [total]
   (case total
