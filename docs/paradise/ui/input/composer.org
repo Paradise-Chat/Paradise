@@ -370,6 +370,7 @@ so we stick with what the complex component expects.
                                                                   (when cb (cb files))))})
                                              (.configure custom-emote #js {})
                                              emoji-trigger
+                                             slash-trigger
                                              user-trigger
                                              (.configure Link #js {:openOnClick false
                                                                    :autolink    true
