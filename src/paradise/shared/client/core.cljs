@@ -1,159 +1,236 @@
 (ns paradise.shared.client.core
   (:require
-   [paradise.shared.utils.logger :as logger]
-   [re-frame.core :as re-frame]
-   [goog.object]
-   [paradise.ui.app :as app]
-   ["react" :as react]
-   [re-frame.db :as db]
-   [reagent.core :as r]
-   [promesa.core :as p]
-   [paradise.binding.core :as binding]
-   [paradise.binding.streams :as streams]
-   [paradise.shared.client.state :as state]
-   [paradise.shared.client.session-store :as store]
    [cljs-workers.core :as main]
    [cljs-workers.mesh :as mesh]
-   [paradise.shared.registry :as registry]
+   [cljs.core.async :refer [<! chan go promise-chan put!]]
    [cljs.core.async.interop :refer-macros [<p!]]
-   [cljs.core.async :refer [go <!]]
+   [net :as net]
+   [paradise.binding.core :as binding]
+   [paradise.binding.streams :as streams]
+   [paradise.shared.client.capacitor-proxy :as capacitor-proxy]
+   [paradise.shared.client.session-store :as store]
+   [paradise.shared.client.state :as state]
+   [paradise.shared.registry :as registry]
+   [paradise.shared.utils.helpers :refer [capacitor-mobile? normalize-keyword ok-status?]]
+   [paradise.shared.utils.logger :as logger]
+   [paradise.ui.app :as app]
+   [re-frame.core :as re-frame]
+   [re-frame.db :as db]
+   [service-worker-handler :refer [register-sw!]]
    [taoensso.timbre :as log]))
 
-(defn init-worker! []
+(capacitor-proxy/init!)
+
+(def ^:private media-pool-size 3)
+
+(defonce !retained-channels (atom []))
+(defonce !threads-started? (atom false))
+(defonce !media-pool-ready (promise-chan))
+(defonce !media-broadcast-lock
+  (let [c (chan 1)]
+    (put! c true)
+    c))
+
+(defn- make-channel! []
+  (let [ch (js/MessageChannel.)]
+    (swap! !retained-channels conj ch)
+    ch))
+
+(defn- broadcast-media-pool! [pool make-payload]
   (go
-    (when-not @state/!engine-pool
+    (<! !media-broadcast-lock)
+    (let [workers-ch (:workers pool)
+          pool-n     (or (:count pool) media-pool-size)
+          taken      (loop [i 0 acc []]
+                       (if (< i pool-n)
+                         (recur (inc i) (conj acc (<! workers-ch)))
+                         acc))]
+      (try
+        (let [chs (mapv (fn [idx w]
+                          (main/do-with-worker! w (make-payload idx)))
+                        (range (count taken))
+                        taken)]
+          (loop [rem chs
+                 acc []]
+            (if (empty? rem)
+              acc
+              (recur (rest rem) (conj acc (<! (first rem)))))))
+        (finally
+          (doseq [w taken]
+            (put! workers-ch w))
+          (put! !media-broadcast-lock true))))))
+
+
+(defn init-core-workers! []
+  (when-not @state/!virtualizer-pool
+    (reset! state/!virtualizer-pool
+            (main/create-pool 1 "virtualizer.js"
+                              {:worker-opts #js {:type "module"}
+                               :on-stream   binding/handle-worker-stream!})))
+  (when-not @state/!engine-pool
     (reset! state/!engine-pool
             (main/create-pool 1 "engine.js"
                               {:worker-opts #js {:type "module"}
-                               :on-stream binding/handle-worker-stream!})))
-  (when-not @state/!media-pool
-    (reset! state/!media-pool
-            (main/create-pool 3 "media.js"
-                              {:worker-opts #js {:type "module"}})))
+                               :on-stream   binding/handle-worker-stream!}))))
 
-  (when-not @state/!virtualizer-pool
-    (reset! state/!virtualizer-pool
-             (main/create-pool 1 "virtualizer.js"
-                              {:worker-opts #js {:type "module"}
-                               :on-stream binding/handle-worker-stream!})
-            ))))
+(defn ensure-media-pool! []
+  (or @state/!media-pool
+      (reset! state/!media-pool
+              (main/create-pool media-pool-size "media.js"
+                                {:worker-opts #js {:type "module"}}))))
 
-(defn connect-main-to-pool! [pool pool-id]
-  (let [chan (js/MessageChannel.)]
-    (mesh/register-thread! pool-id (.-port1 chan))
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id :main-thread :port (.-port2 chan)}
-                         :transfer [:port]})))
+(defn- send-port! [pool identity-id port]
+  (main/do-with-pool! pool
+                      {:handler   :register-port
+                       :arguments {:identity-id identity-id :port port}
+                       :transfer  [:port]}))
 
-(defn connect-pools! [pool-a id-a pool-b id-b]
-  (let [chan (js/MessageChannel.)]
-    (main/do-with-pool! pool-a
-                        {:handler :register-port
-                         :arguments {:identity-id id-b :port (.-port1 chan)}
-                         :transfer [:port]})
-    (main/do-with-pool! pool-b
-                        {:handler :register-port
-                         :arguments {:identity-id id-a :port (.-port2 chan)}
-                         :transfer [:port]})))
+(defn bind-workers! [engine-pool virtualizer-pool app-db-payload]
+  (let [main-virt      (make-channel!)
+        main-eng       (make-channel!)
+        main-med-chans (mapv (fn [_] (make-channel!)) (range media-pool-size))
+        med-virt-chans (mapv (fn [_] (make-channel!)) (range media-pool-size))
+        eng-virt       (make-channel!)
+        virt-loop      (make-channel!)
+        eng-loop       (make-channel!)
+        db-chan        (when (nil? app-db-payload) (make-channel!))
+        init-db        (when db-chan
+                         (let [db-port1 (.-port1 db-chan)]
+                           (db/set-async-broadcaster! (fn [payload] (.postMessage db-port1 payload)))
+                           (set! (.-onmessage db-port1) (fn [e] (db/apply-remote-patch! (.-data e))))
+                           (db/get-encoded-state)))]
+    (mesh/register-thread! :virtualizer-pool (.-port1 main-virt))
+    (mesh/register-thread! :engine-pool (.-port1 main-eng))
+    (doseq [ch main-med-chans]
+      (mesh/register-thread! :media-pool (.-port1 ch)))
 
-(defn connect-loopback! [pool id-base loopback-id]
-  (let [chan (js/MessageChannel.)]
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id id-base :port (.-port1 chan)}
-                         :transfer [:port]})
-    (main/do-with-pool! pool
-                        {:handler :register-port
-                         :arguments {:identity-id loopback-id :port (.-port2 chan)}
-                         :transfer [:port]})))
-
-
-(defn bind-workers! [engine-pool media-pool virtualizer-pool app-db-payload]
-  (go
-    (let [db-chan  (js/MessageChannel.)
-          db-port1 (.-port1 db-chan)
-          db-port2 (.-port2 db-chan)]
+    (go
       (if (some? app-db-payload)
-        (main/do-with-pool! virtualizer-pool
-                            {:handler   :bind-app-db
-                             :arguments {:eve-payload app-db-payload}})
-        (do
-          (db/set-async-broadcaster! (fn [payload] (.postMessage db-port1 payload)))
-          (set! (.-onmessage db-port1) (fn [e] (db/apply-remote-patch! (.-data e))))
+        (<! (main/do-with-pool! virtualizer-pool
+                                {:handler   :bind-app-db
+                                 :arguments {:eve-payload app-db-payload}}))
+        (<! (main/do-with-pool! virtualizer-pool
+                                {:handler   :bind-app-db
+                                 :arguments {:eve-payload {:mode          :async
+                                                           :initial-state init-db}
+                                             :port        (.-port2 db-chan)}
+                                 :transfer  [:port]})))
+      (<! (send-port! virtualizer-pool :virtualizer-pool (.-port1 virt-loop)))
+      (<! (send-port! virtualizer-pool :virtualizer-loopback (.-port2 virt-loop)))
+      (doseq [ch med-virt-chans]
+        (<! (send-port! virtualizer-pool :media-pool (.-port2 ch))))
+      (<! (send-port! virtualizer-pool :engine-pool (.-port2 eng-virt)))
+      (<! (send-port! virtualizer-pool :main-thread (.-port2 main-virt)))
 
-          (main/do-with-pool! virtualizer-pool
-                              {:handler   :bind-app-db
-                               :arguments {:eve-payload {:mode :async
-                                                         :initial-state (db/get-encoded-state)}
-                                           :port        db-port2}
-                               :transfer  [:port]}))))
+      (let [media-pool (ensure-media-pool!)]
+        (<! (broadcast-media-pool!
+             media-pool
+             (fn [idx]
+               {:handler   :register-port
+                :arguments {:identity-id :virtualizer-pool
+                            :port        (.-port1 (nth med-virt-chans idx))}
+                :transfer  [:port]})))
+        (<! (broadcast-media-pool!
+             media-pool
+             (fn [idx]
+               {:handler   :register-port
+                :arguments {:identity-id :main-thread
+                            :port        (.-port2 (nth main-med-chans idx))}
+                :transfer  [:port]})))
+        (put! !media-pool-ready media-pool)))
 
-    (connect-pools! engine-pool :engine-pool virtualizer-pool :virtualizer-pool)
-    (connect-pools! media-pool :media-pool virtualizer-pool :virtualizer-pool)
+    (go
+      (<! (send-port! engine-pool :engine-pool (.-port1 eng-loop)))
+      (<! (send-port! engine-pool :engine-loopback (.-port2 eng-loop)))
+      (<! (send-port! engine-pool :virtualizer-pool (.-port1 eng-virt)))
+      (<! (send-port! engine-pool :main-thread (.-port2 main-eng))))))
 
-    (connect-main-to-pool! media-pool :media-pool)
-    (connect-main-to-pool! engine-pool :engine-pool)
-    (connect-main-to-pool! virtualizer-pool :virtualizer-pool)
+(defn boot-threads []
+  (when (compare-and-set! !threads-started? false true)
+    (init-core-workers!)
+    (bind-workers! @state/!engine-pool
+                   @state/!virtualizer-pool
+                   nil)))
 
-    (connect-loopback! virtualizer-pool :virtualizer-pool :virtualizer-loopback)
-    (connect-loopback! engine-pool :engine-pool :engine-loopback)))
+(defn- broadcast-engine-and-media! [handler arguments]
+  (go
+    (let [eng-ch    (mesh/do-with-thread! :engine-pool
+                                          {:handler   handler
+                                           :arguments arguments})
+          mp        (<! !media-pool-ready)
+          media-res (<! (broadcast-media-pool!
+                         mp
+                         (fn [_]
+                           {:handler   handler
+                            :arguments arguments})))
+          eng-res   (<! eng-ch)]
+      {:engine eng-res
+       :media  media-res})))
+
+(defn- dispatch-logged-out! []
+  (net/set-auth-context! nil nil)
+  (net/clear-stream-url!)
+  (net/clear-frame-url!)
+  (re-frame/dispatch [:auth/clear-sw-session {:all? true}])
+  (re-frame/dispatch [:auth/set-status :logged-out])
+  (re-frame/dispatch [:settings/load-accounts]))
 
 (re-frame/reg-event-fx
  :app/thread-boot
- (fn [_]
-   (init-worker!)
-     (let [engine-pool      @state/!engine-pool
-           media-pool       @state/!media-pool
-           virtualizer-pool @state/!virtualizer-pool]
-       (bind-workers! engine-pool media-pool virtualizer-pool nil)
-       )
-   {}
-   ))
-
-(defn boot-threads []
-  (go
-    (<! (init-worker!))
-    (let [engine-pool      @state/!engine-pool
-          media-pool       @state/!media-pool
-          virtualizer-pool @state/!virtualizer-pool]
-      (<! (bind-workers! engine-pool media-pool virtualizer-pool nil)))))
+ (fn [_ _]
+   (boot-threads)
+   {}))
 
 (re-frame/reg-event-fx
  :app/bootstrap
- (fn [_ [_ target-user-id engine-id]]
-   (go
+ (fn [{:keys [db]} [_ target-user-id engine-id expected-gen]]
+   (let [db-engine (:active-engine db)
+         gen       (or expected-gen (:session/gen db))]
+     (go
        (try
-         (let [boot-res  (<! (mesh/do-with-thread! :engine-pool
-                                                 {:handler :bootstrap
-                                                  :arguments {:target-user-id target-user-id}}))
-               status-kw (keyword (:status boot-res))]
+         (let [saved-eng       (when-not (or engine-id db-engine)
+                                 (try
+                                   (<p! (store/get-setting "last-active-engine"))
+                                   (catch :default _ nil)))
+               fallback-engine (or (normalize-keyword engine-id)
+                                   (normalize-keyword db-engine)
+                                   (normalize-keyword saved-eng)
+                                   :matrix)
+               boot-res        (<! (mesh/do-with-thread! :engine-pool
+                                                         {:handler   :bootstrap
+                                                          :arguments {:target-user-id target-user-id}}))
+               status-kw       (keyword (:status boot-res))
+               final-engine    (or (normalize-keyword (:engine-id boot-res))
+                                   fallback-engine)]
            (case status-kw
-             :success (re-frame/dispatch [:auth/login-success (assoc boot-res :engine-id engine-id)])
-             :empty   (re-frame/dispatch [:auth/set-status :logged-out])
-             :error   (log/error "Bootstrap failed:" (or (:msg boot-res) (:message boot-res) boot-res))))
+             :success (re-frame/dispatch [:auth/login-success
+                                          (assoc boot-res
+                                                 :engine-id    final-engine
+                                                 :expected-gen gen)])
+             :empty   (dispatch-logged-out!)
+             :error   (do
+                        (log/error "Bootstrap failed:"
+                                   (or (:msg boot-res) (:message boot-res) (:status boot-res)))
+                        (dispatch-logged-out!))))
          (catch :default e
-           (log/error "Fatal bootstrap error:" e))))
+           (log/error "Fatal bootstrap error:" e)
+           (dispatch-logged-out!)))))
    {}))
 
 (defn register-engine [protocol-id]
   (let [protocol-str (name protocol-id)]
     (go
-      (let [media-ch  (mesh/do-with-thread! :media-pool
-                                            {:handler   :register-engine
-                                             :arguments {:engine-id protocol-str}})
-            engine-ch (mesh/do-with-thread! :engine-pool
-                                            {:handler   :register-engine
-                                             :arguments {:engine-id protocol-str}})
-            media-res (<! media-ch)
-            eng-res   (<! engine-ch)]
-        (if (and (= "success" (:status eng-res))
-                 (= "success" (:status media-res)))
-          (js/console.log "Engine and media worker loaded successfully:" protocol-str)
+      (let [{eng-res :engine media-res :media}
+            (<! (broadcast-engine-and-media! :register-engine
+                                             {:engine-id protocol-str}))]
+        (if (and (ok-status? eng-res)
+                 (every? ok-status? media-res))
+          (do
+            (js/console.log "Engine and media pool loaded successfully:" protocol-str)
+            (re-frame/dispatch [:i18n/load-engine-extensions (keyword protocol-str)]))
           (js/console.error "Failed to load engine:"
                             {:engine (:msg eng-res)
-                             :media  (:msg media-res)}))))))
-
+                             :media  media-res}))))))
 
 (re-frame/reg-event-fx
  :engine/load-protocol
@@ -161,46 +238,38 @@
    (register-engine protocol-str)
    {}))
 
-
 (re-frame/reg-event-fx
  :sdk/start-sync
- (fn [_ _]
-   (go
-     (let [pool @state/!engine-pool
-           res  (<! (main/do-with-pool! pool {:handler :start-sync}))]
-       (if (= (:status res) "success")
-         (log/info "Main sync loop started successfully.")
-         (log/error "Failed to start sync:" (:msg res)))))
-   {}))
-
+ (fn [{:keys [db]} [_ expected-gen]]
+   (let [gen (or expected-gen (:session/gen db))]
+     (go
+       (let [res (<! (mesh/do-with-thread! :engine-pool {:handler :start-sync}))]
+         (if (ok-status? res)
+           (do
+             (log/info "Main sync loop started successfully.")
+             (re-frame/dispatch [:session/on-sync-ready gen])
+             (re-frame/dispatch [:search/refresh-index-status]))
+           (do
+             (log/error "Failed to start sync:" (:msg res))
+             (re-frame/dispatch [:session/on-sync-ready gen]))))))
+   {:db (dissoc db :search/index-status)}))
 
 (defn sync-worker-media-session! [{:keys [user-id server-url token]}]
   (go
-    (let [payload  {:user-id    user-id
-                    :server-url server-url
-                    :token      token}
-          media-ch (mesh/do-with-thread! :media-pool
-                                         {:handler   :set-media-session
-                                          :arguments payload})
-          eng-ch   (mesh/do-with-thread! :engine-pool
-                                         {:handler   :set-media-session
-                                          :arguments payload})
-          m-res    (<! media-ch)
-          e-res    (<! eng-ch)]
-      (or (when (= (:status m-res) "success") m-res)
-          (when (= (:status e-res) "success") e-res)))))
+    (let [{e-res :engine m-res :media}
+          (<! (broadcast-engine-and-media! :set-media-session
+                                           {:user-id    user-id
+                                            :server-url server-url
+                                            :token      token}))
+          m-hit (some #(when (ok-status? %) %) m-res)]
+      (or m-hit
+          (when (ok-status? e-res) e-res)))))
 
 (defn clear-worker-media-session! [opts]
   (go
-    (let [payload  (or opts {:all? true})
-          media-ch (mesh/do-with-thread! :media-pool
-                                         {:handler   :clear-media-session
-                                          :arguments payload})
-          eng-ch   (mesh/do-with-thread! :engine-pool
-                                         {:handler   :clear-media-session
-                                          :arguments payload})]
-      (<! media-ch)
-      (<! eng-ch))))
+    (:engine (<! (broadcast-engine-and-media! :clear-media-session
+                                              (or opts {:all? true}))))))
+
 
 (re-frame/reg-event-fx
  :engine/sync-media-session
@@ -222,54 +291,65 @@
    (clear-worker-media-session! opts)
    {}))
 
+(defn- activate-engine! [engine-kw]
+  (go
+    (<! (register-engine engine-kw))
+    (binding/set-active-engine! engine-kw)
+    (streams/init-engine-streams! engine-kw)))
+
 (re-frame/reg-event-fx
  :engine/switch-account-boot
- (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id]}]]
-   (let [engine-kw (keyword (or engine-id :matrix))]
+ [(state/guard-session-gen #(-> % second :expected-gen))]
+ (fn [{:keys [db]} [_ {:keys [target-user-id engine-id prev-engine-id expected-gen]}]]
+   (let [engine-kw (keyword (or engine-id :matrix))
+         prev-kw   (some-> prev-engine-id keyword)]
      (go
+       (when prev-kw
+         (try
+           (<! (mesh/do-with-thread!
+                :engine-pool
+                {:handler   (keyword (name prev-kw) "suspend-session")
+                 :arguments {}}))
+           (catch :default _ nil)))
        (<! (clear-worker-media-session! {:all? true}))
-       (when (not= engine-kw prev-engine-id)
-         (<! (register-engine engine-kw)))
-       (binding/set-active-engine! engine-kw)
-       (streams/init-engine-streams! engine-kw)
-       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw]))
+       (<! (activate-engine! engine-kw))
+       (re-frame/dispatch [:app/bootstrap target-user-id engine-kw expected-gen]))
      {:db (assoc db :active-engine engine-kw)})))
 
 (re-frame/reg-event-fx
  :app/cold-boot
  (fn [{:keys [db]} [_ target-user-id requested-engine]]
-   (go
-     (let [saved-engine (<p! (store/get-setting "last-active-engine"))
-           engine-id    (when-let [e (or requested-engine saved-engine)]
-                          (keyword e))]
-       (when engine-id
-         (<! (register-engine engine-id))
-         (binding/set-active-engine! engine-id)
-         (streams/init-engine-streams! engine-id))
-       (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
-       (if engine-id
-         (re-frame/dispatch [:app/bootstrap target-user-id engine-id])
-         (re-frame/dispatch [:auth/set-status :logged-out]))))
+   (let [gen (:session/gen db)]
+     (go
+       (let [saved-engine (<p! (store/get-setting "last-active-engine"))
+             engine-id    (when-let [e (or requested-engine saved-engine)]
+                            (keyword e))]
+         (when engine-id
+           (<! (activate-engine! engine-id)))
+         (log/info "Cold boot sequence initiated. Targeting engine:" engine-id)
+         (if engine-id
+           (re-frame/dispatch [:app/bootstrap target-user-id engine-id gen])
+           (dispatch-logged-out!)))))
    (cond-> {}
      requested-engine
      (assoc :db (assoc db :active-engine (keyword requested-engine))))))
 
 (re-frame/reg-event-fx
  :sdk/ignite-session
- (fn [_ _]
-   {:fx [[:dispatch [:sdk/start-sync]]
-         [:dispatch [:sdk/fetch-own-profile]]
-         [:dispatch [:sdk/fetch-all-emotes]]]}))
-
+ (fn [{:keys [db]} [_ expected-gen]]
+   (let [gen (or expected-gen (:session/gen db))]
+     {:fx [[:dispatch [:sdk/start-sync gen]]
+           [:dispatch [:sdk/fetch-own-profile]]
+           [:dispatch [:sdk/fetch-all-emotes]]]})))
 
 (defn ^:export init []
+  (binding/init-middleware!)
+  (boot-threads)
+  (app/init)
+  (logger/init!)
   (go
-
     (<! (registry/ensure-environment!))
-    (re-frame/dispatch [:registry/sync-manifests])
-    (binding/init-middleware!)
     (re-frame/dispatch [:registry/load-success (registry/resolve-engines)])
-
-    (<! (boot-threads))
-    (app/init)
-    (logger/init!)))
+    (re-frame/dispatch [:registry/sync-manifests])
+    (when-not (capacitor-mobile?)
+      (js/setTimeout register-sw! 1000))))
