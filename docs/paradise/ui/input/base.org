@@ -1193,7 +1193,10 @@ Ideally, we should break this apart more later.
                                                        (range (or (.-length files) 0)))]
                                 (reset! !mobile-actions-open? false)
                                 (when (seq file-array)
-                                  (handle-files! active-id file-array))
+                                  (handle-files! active-id file-array)
+                                  (when-not is-mobile?
+                                    (when-let [ed @!editor]
+                                      (js/requestAnimationFrame #(.commands.focus ed)))))
                                 (set! (.-value (.-target e)) "")))
             submit-message! (fn []
                               (when-let [ed @!editor]
