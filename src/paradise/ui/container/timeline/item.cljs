@@ -8,11 +8,18 @@
             [cljs-workers.core :as main]
             [paradise.shared.client.state :as state]
             [cljs.core.async :refer [go <!]]
-            [paradise.shared.utils.helpers :refer [sanitize-custom-html hiccup->text format-divider-date format-time linkify-text truncate-name]]
-            [paradise.media.component :refer [media]]
+            [paradise.shared.utils.helpers :refer [extract-first-url
+                                                   format-divider-date
+                                                   format-duration-seconds
+                                                   format-time
+                                                   hiccup->text
+                                                   linkify-text
+                                                   memoized-sanitize
+                                                   truncate-name]]
+            [paradise.media.component :refer [media media-native]]
             [paradise.ui.global :refer [avatar long-press-props swipe-to-action-wrapper]]
             [paradise.ui.container.members :refer [profile-popover-trigger]]
-            [paradise.ui.container.timeline.hydrator :refer [get-cached-react-tree]]
+            [virtualizer.client.hydrator :as vhydrator :refer [get-cached-react-tree]]
             [paradise.ui.input.base :refer [inline-editor]]
             [paradise.shared.utils.svg :as icons]
             ["react" :as react]
@@ -76,7 +83,6 @@
    {}))
 
 
-
 (re-frame/reg-event-fx
  :msg/edit
  (fn [_ [_ room-id item text html]]
@@ -95,84 +101,324 @@
          (log/info "Edit dispatch result:" res))))
    {:dispatch [:input/clear-context room-id]}))
 
+(defonce ^:private !receipt-debounce-timer (atom nil))
+(defonce ^:private !hidden-visible-queue (atom []))
+
+(defn- page-visible? []
+  (or (not (exists? js/document))
+      (not= (.-visibilityState js/document) "hidden")))
+
+(defn- trackable-event-id? [id]
+  (and (string? id)
+       (not (str/blank? id))
+       (not= id "read-marker")
+       (not (str/starts-with? id "virtual-"))
+       (not (str/starts-with? id "virt-"))
+       (not (str/starts-with? id "date-divider-"))
+       (not (str/starts-with? id "local-"))
+       (not (str/starts-with? id "optimistic-"))
+       (not (str/starts-with? id "tx-"))
+       (not (str/starts-with? id "pending-"))))
+
+(defn- schedule-receipt-flush! []
+  (when-let [t @!receipt-debounce-timer]
+    (js/clearTimeout t))
+  (reset! !receipt-debounce-timer
+          (js/setTimeout
+           (fn []
+             (reset! !receipt-debounce-timer nil)
+             (when (page-visible?)
+               (re-frame/dispatch [:msg/flush-receipts])))
+           350)))
+
+(defn- normalize-receipt-entry [entry]
+  (cond
+    (map? entry)    entry
+    (string? entry) {:event-id entry :ts 0}
+    :else           nil))
+
+(defn- build-live-index-map [room-id]
+  (let [live-items (vhydrator/get-stream room-id :live)]
+    (when (seq live-items)
+      (loop [i   0
+             n   (count live-items)
+             acc (transient {})]
+        (if (< i n)
+          (let [it (nth live-items i)
+                id (:id it)]
+            (recur (inc i) n (if id (assoc! acc id i) acc)))
+          (persistent! acc))))))
+
+(defn- candidate-newer? [idx-map cand prev]
+  (let [prev-norm (normalize-receipt-entry prev)]
+    (cond
+      (nil? cand) false
+      (nil? prev-norm) true
+      (= (:event-id cand) (:event-id prev-norm)) false
+      :else
+      (let [c-idx (when idx-map (get idx-map (:event-id cand)))
+            p-idx (when idx-map (get idx-map (:event-id prev-norm)))]
+        (if (and (some? c-idx) (some? p-idx))
+          (> c-idx p-idx)
+          (> (or (:ts cand) 0) (or (:ts prev-norm) 0)))))))
+
+(defn- pick-newest-candidate [idx-map candidates]
+  (reduce (fn [best cand]
+            (if (candidate-newer? idx-map cand best) cand best))
+          nil
+          candidates))
 
 (re-frame/reg-event-fx
  :room/mark-read
+ (fn [{:keys [db]} [_ room-id event-id]]
+   (when room-id
+     (go
+       (let [res (<! (mesh/do-with-thread!
+                      :engine-pool
+                      {:handler   :mark-read
+                       :arguments (cond-> {:room-id room-id}
+                                    event-id (assoc :event-id event-id))}))]
+         (when (not= (:status res) "success")
+           (log/warn "mark-read failed for" room-id ":" (:msg res))))))
+   {:db (if room-id
+          (-> db
+              (update-in [:read-receipts :pending] dissoc room-id)
+              (update-in [:read-receipts :sent] dissoc room-id))
+          db)}))
+
+(re-frame/reg-event-fx
+ :rooms/mark-read
  (fn [_ [_ room-id event-id]]
-   (mesh/do-with-thread! :engine-pool {:handler :mark-read
-                                            :arguments {:room-id room-id :event-id event-id}})
+   {:dispatch [:room/mark-read room-id event-id]}))
+
+(re-frame/reg-event-fx
+ :msg/cancel-pending
+ (fn [_ [_ room-id item]]
+   (when (and room-id item)
+     (let [target-id (or (:event-or-transaction-id item) (:id item))]
+       (mesh/do-with-thread! :engine-pool
+                             {:handler   :redact-event
+                              :arguments {:room-id  room-id
+                                          :msg-id   target-id
+                                          :event-id (:id item)}})))
+   {}))
+
+(re-frame/reg-event-fx
+ :msg/retry-send
+ (fn [_ [_ room-id item]]
+   (when (and room-id item)
+     (let [target-id (or (:event-or-transaction-id item) (:id item))
+           retry     (:retry-payload item)
+           m-content (get-in item [:content :inner :content])
+           reply-to  (get-in item [:content :in-reply-to :event-id])
+           text      (or (:text retry) (:body m-content) "")
+           html      (or (:html retry) (:html m-content))
+           ctx       (or (:context retry)
+                         (when reply-to {:mode :reply :target reply-to}))]
+       (go
+         (try
+           (<! (mesh/do-with-thread! :engine-pool
+                                     {:handler   :redact-event
+                                      :arguments {:room-id  room-id
+                                                  :msg-id   target-id
+                                                  :event-id (:id item)}}))
+           (when (or (not (str/blank? (str text))) (not (str/blank? (str html))))
+             (<! (mesh/do-with-thread! :engine-pool
+                                       {:handler   :send-message
+                                        :arguments (cond-> {:room-id room-id
+                                                            :text    text
+                                                            :html    html}
+                                                     ctx (assoc :context ctx))})))
+           (catch :default e
+             (log/error "Retry send failed:" e))))))
    {}))
 
 (re-frame/reg-event-fx
  :msg/flush-receipts
- (fn [{:keys [db]} _]
-   (let [pending (get-in db [:read-receipts :pending])]
-     (when (seq pending)
-       (doseq [[room-id event-id] pending]
-         (when (not= (get-in db [:read-receipts :sent room-id]) event-id)
+ (fn [{:keys [db]} [_ force?]]
+   (if (and (not force?) (not (page-visible?)))
+     {}
+     (let [pending   (get-in db [:read-receipts :pending])
+           to-send   (reduce-kv
+                      (fn [acc room-id raw-entry]
+                        (let [entry     (normalize-receipt-entry raw-entry)
+                              event-id  (:event-id entry)
+                              sent      (normalize-receipt-entry (get-in db [:read-receipts :sent room-id]))
+                              in-flight (get-in db [:read-receipts :in-flight room-id])]
+                          (if (and (trackable-event-id? event-id)
+                                   (not= (:event-id sent) event-id)
+                                   (not= in-flight event-id))
+                            (assoc acc room-id entry)
+                            acc)))
+                      {}
+                      pending)]
+       (doseq [[room-id entry] to-send]
+         (let [event-id (:event-id entry)]
            (go
              (try
-               (let [res (<! (mesh/do-with-thread! :engine-pool
-                                                 {:handler :send-receipt
-                                                  :arguments {:room-id room-id :event-id event-id}}))]
+               (let [res (<! (mesh/do-with-thread!
+                              :engine-pool
+                              {:handler   :send-receipt
+                               :arguments {:room-id room-id :event-id event-id}}))]
                  (if (= (:status res) "success")
-                   (re-frame/dispatch [:msg/receipt-sent room-id event-id])
+                   (re-frame/dispatch [:msg/receipt-sent room-id entry])
                    (do
                      (log/error "Receipt flush failed for" room-id ":" (:msg res))
-                     (when-not (str/includes? (str (:msg res)) "Timeline not found")
-                       (re-frame/dispatch [:msg/requeue-receipt room-id event-id])))))
-                 (catch :default e
+                     (if (or (str/includes? (str (:msg res)) "Timeline not found")
+                             (str/includes? (str (:msg res)) "Room not found"))
+                       (re-frame/dispatch [:msg/clear-in-flight room-id])
+                       (re-frame/dispatch [:msg/requeue-receipt room-id entry])))))
+               (catch :default e
                  (log/error "Worker crashed sending receipt:" e)
-                 (re-frame/dispatch [:msg/requeue-receipt room-id event-id])))))))
-     {:db (assoc-in db [:read-receipts :pending] {})})))
+                 (re-frame/dispatch [:msg/requeue-receipt room-id entry]))))))
+       {:db (-> db
+                (assoc-in [:read-receipts :pending] {})
+                (update-in [:read-receipts :in-flight]
+                           (fn [m]
+                             (reduce-kv (fn [acc r entry]
+                                          (assoc acc r (:event-id entry)))
+                                        (or m {})
+                                        to-send))))}))))
+
+(re-frame/reg-event-db
+ :msg/clear-in-flight
+ (fn [db [_ room-id]]
+   (update-in db [:read-receipts :in-flight] dissoc room-id)))
 
 (re-frame/reg-event-db
  :msg/requeue-receipt
- (fn [db [_ room-id event-id]]
-   (assoc-in db [:read-receipts :pending room-id] event-id)))
+ (fn [db [_ room-id entry]]
+   (let [norm      (normalize-receipt-entry entry)
+         existing  (get-in db [:read-receipts :pending room-id])
+         idx-map   (build-live-index-map room-id)
+         cleaned   (update-in db [:read-receipts :in-flight] dissoc room-id)]
+     (if (and norm (candidate-newer? idx-map norm existing))
+       (assoc-in cleaned [:read-receipts :pending room-id] norm)
+       cleaned))))
 
 (re-frame/reg-event-db
  :msg/receipt-sent
- (fn [db [_ room-id event-id]]
-   (assoc-in db [:read-receipts :sent room-id] event-id)))
+ (fn [db [_ room-id entry]]
+   (let [norm     (normalize-receipt-entry entry)
+         prev     (get-in db [:read-receipts :sent room-id])
+         idx-map  (build-live-index-map room-id)
+         cleaned  (update-in db [:read-receipts :in-flight] dissoc room-id)]
+     (if (and norm (candidate-newer? idx-map norm prev))
+       (assoc-in cleaned [:read-receipts :sent room-id] norm)
+       cleaned))))
 
 (defonce receipt-flusher
-  (js/setInterval #(re-frame/dispatch [:msg/flush-receipts]) 2000))
+  (js/setInterval #(when (page-visible?)
+                     (re-frame/dispatch [:msg/flush-receipts]))
+                  2000))
 
 (re-frame/reg-event-db
  :msg/mark-visible
- (fn [db [_ event-id]]
-   (if-let [room-id (:active-room-id db)]
-     (assoc-in db [:read-receipts :pending room-id] event-id)
-     db)))
+ (fn [db [_ event-id room-id ts]]
+   (let [rid (or room-id (:active-room-id db))]
+     (if (and rid (trackable-event-id? event-id))
+       (let [in-focused? (seq (vhydrator/get-stream rid :focused))]
+         (if in-focused?
+           db
+           (let [idx-map (build-live-index-map rid)
+                 cand    {:event-id event-id :ts (or ts 0)}
+                 pending (get-in db [:read-receipts :pending rid])
+                 sent    (get-in db [:read-receipts :sent rid])]
+             (if (and (candidate-newer? idx-map cand pending)
+                      (candidate-newer? idx-map cand sent))
+               (do
+                 (schedule-receipt-flush!)
+                 (assoc-in db [:read-receipts :pending rid] cand))
+               db))))
+       db))))
 
 (re-frame/reg-event-db
  :msg/mark-visible-batch
- (fn [db [_ event-ids]]
-   (if-let [room-id (:active-room-id db)]
-     (reduce (fn [d id] (assoc-in d [:read-receipts :pending room-id] id)) db event-ids)
-     db)))
+ (fn [db [_ entries]]
+   (let [fallback-room (:active-room-id db)
+         grouped       (reduce
+                        (fn [acc item]
+                          (let [cand (cond
+                                       (map? item)    item
+                                       (string? item) {:room-id fallback-room :event-id item :ts 0}
+                                       :else          nil)
+                                rid  (or (:room-id cand) fallback-room)
+                                eid  (:event-id cand)]
+                            (if (and rid (trackable-event-id? eid))
+                              (update acc rid (fnil conj []) {:event-id eid :ts (or (:ts cand) 0)})
+                              acc)))
+                        {}
+                        entries)]
+     (reduce-kv
+      (fn [d rid cands]
+        (if (seq (vhydrator/get-stream rid :focused))
+          d
+          (let [idx-map (build-live-index-map rid)
+                newest  (pick-newest-candidate idx-map cands)
+                pending (get-in d [:read-receipts :pending rid])
+                sent    (get-in d [:read-receipts :sent rid])]
+            (if (and newest
+                     (candidate-newer? idx-map newest pending)
+                     (candidate-newer? idx-map newest sent))
+              (do
+                (schedule-receipt-flush!)
+                (assoc-in d [:read-receipts :pending rid] newest))
+              d))))
+      db
+      grouped))))
+
+(defn- drain-hidden-visible! []
+  (when (and (page-visible?) (seq @!hidden-visible-queue))
+    (let [queued @!hidden-visible-queue]
+      (reset! !hidden-visible-queue [])
+      (re-frame/dispatch [:msg/mark-visible-batch queued])
+      (re-frame/dispatch [:msg/flush-receipts]))))
+
+(defonce ^:private visibility-resume-listener
+  (when (exists? js/document)
+    (.addEventListener js/document "visibilitychange"
+                       (fn []
+                         (when (page-visible?)
+                           (drain-hidden-visible!)
+                           (re-frame/dispatch [:msg/flush-receipts]))))
+    (when (exists? js/window)
+      (.addEventListener js/window "focus"
+                         (fn []
+                           (when (page-visible?)
+                             (drain-hidden-visible!)
+                             (re-frame/dispatch [:msg/flush-receipts])))))
+    true))
 
 (defonce visibility-observer
   (delay
     (js/IntersectionObserver.
-    (fn [entries observer]
-       (let [visible-ids (reduce
+     (fn [entries observer]
+       (let [visible?    (page-visible?)
+             visible-evs (reduce
                           (fn [acc entry]
                             (if (.-isIntersecting entry)
                               (let [target   (.-target entry)
-                                    event-id (.getAttribute target "data-event-id")]
-                                (if (and event-id (str/starts-with? event-id "$"))
+                                    event-id (.getAttribute target "data-event-id")
+                                    room-id  (.getAttribute target "data-room-id")
+                                    raw-ts   (.getAttribute target "data-ts")
+                                    ts-num   (let [n (js/Number raw-ts)]
+                                               (if (js/isNaN n) 0 n))]
+                                (if (trackable-event-id? event-id)
                                   (do
-                                    (.unobserve observer target)
-                                    (conj acc event-id))
+                                    (when visible?
+                                      (.unobserve observer target))
+                                    (conj acc {:room-id  (when (seq room-id) room-id)
+                                               :event-id event-id
+                                               :ts       ts-num}))
                                   acc))
                               acc))
                           []
                           entries)]
-         (when (seq visible-ids)
-           (re-frame/dispatch [:msg/mark-visible-batch visible-ids]))))
-     #js {:threshold 0.5})))
+         (when (seq visible-evs)
+           (if visible?
+             (re-frame/dispatch [:msg/mark-visible-batch visible-evs])
+             (swap! !hidden-visible-queue into visible-evs)))))
+     #js {:threshold 0.1})))
 
 (defn ^:ui translated-label [k]
   (let [tr @(re-frame/subscribe [:i18n/tr])]
@@ -185,73 +431,95 @@
     {:x mx :y my :item (js->clj current-item :keywordize-keys true) :active-room active-room :my-id my-id}]))
 
 (defn ^:ui message-hover-toolbar [item active-room current-user-id]
-  (let [tr @(re-frame/subscribe [:i18n/tr])
-        react-str (tr [:container.timeline.item/react])
-        reply-str (tr [:container.timeline.item/reply])
-        edit-str  (tr [:container.timeline.item/edit-message])
-        more-str  (tr [:container.timeline.item/more])]
-    (fn [item active-room current-user-id tr]
-      (let [msg-id (:id item)
-            e-t-id (:event-or-transaction-id item)
-            ]
-        [:div.message-hover-toolbar
-         [:div.toolbar-btn
-          {:title    react-str
-           :on-click (fn [e]
-                       (.preventDefault e)
-                       (.stopPropagation e)
-                       (re-frame/dispatch
-                        [:ui/open-popover :reaction-picker
-                         {:room-id active-room
-                          :msg-id  e-t-id
-                          :x       (.-clientX e)
-                          :y       (.-clientY e)
-                          :width   320
-                          :height  380}]))}
-          [icons/smiley]]
-         [:div.toolbar-btn
-          {:title reply-str
-           :on-click #(re-frame/dispatch
-                       [:input/set-context active-room :reply item])}
-          [icons/reply]]
-         (when (:is-own? item)
-           [:div.toolbar-btn
-            {:title edit-str
-             :on-click #(re-frame/dispatch
-                         [:input/set-context active-room :edit
-                          item])}
-            [icons/edit]])
-         [:div.toolbar-btn
-          {:title more-str
-           :on-click (fn [e]
-                       (.stopPropagation e)
-                       (let [mx (.-clientX e)
-                             my (.-clientY e)]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        react-str   (tr [:container.timeline.item/react])
+        reply-str   (tr [:container.timeline.item/reply])
+        thread-str  (tr [:container.timeline.item/start-thread])
+        edit-str    (tr [:container.timeline.item/edit-message])
+        more-str    (tr [:container.timeline.item/more])
+        msg-id      (:id item)
+        e-t-id      (or (:event-or-transaction-id item) msg-id)
+        action-room (or (:action-room-id item) active-room)
+        input-scope (or (:input-scope-id item) active-room)
+        in-thread?  (boolean (:in-thread-view? item))
+        th-summary  (:thread-summary item)]
+    [:div.message-hover-toolbar
+     [:div.toolbar-btn
+      {:title    react-str
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch
+                    [:ui/open-popover :reaction-picker
+                     {:room-id action-room
+                      :msg-id  e-t-id
+                      :x       (.-clientX e)
+                      :y       (.-clientY e)
+                      :width   320
+                      :height  380}]))}
+      [icons/smiley]]
+     [:div.toolbar-btn
+      {:title    reply-str
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch
+                    [:input/set-context input-scope :reply item]))}
+      [icons/reply]]
+     (when-not in-thread?
+       [:div.toolbar-btn
+        {:title    thread-str
+         :on-click (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (re-frame/dispatch
+                      [:msg/thread active-room msg-id th-summary item]))}
+        [icons/thread]])
+     (when (and (:is-own? item)
+                (= (get-in item [:content :tag]) "Message")
+                (contains? #{"Text" "Notice" "Emote"}
+                           (get-in item [:content :inner :tag])))
+       [:div.toolbar-btn
+        {:title    edit-str
+         :on-click (fn [e]
+                     (.preventDefault e)
+                     (.stopPropagation e)
+                     (re-frame/dispatch
+                      [:input/set-context action-room :edit item]))}
+        [icons/edit]])
+     [:div.toolbar-btn
+      {:title    more-str
+       :on-click (fn [e]
+                   (.stopPropagation e)
+                   (let [mx (.-clientX e)
+                         my (.-clientY e)]
+                     (event-menu mx my item active-room current-user-id)))}
+      [icons/more]]]))
 
-                         (event-menu mx my item active-room current-user-id)))}
-          [icons/more]]]))))
 
 
 
+(defn- hydrate-sanitized-nodes [nodes]
+  (mapv (fn [node]
+          (if (vector? node)
+            (let [tag      (first node)
+                  has-map? (map? (second node))
+                  attrs    (when has-map? (second node))
+                  children (if has-map? (subvec node 2) (subvec node 1))
+                  next-tag (if (= tag "comp:paradise.media.component/media-native")
+                             media-native
+                             tag)
+                  kids     (hydrate-sanitized-nodes children)]
+              (if has-map?
+                (into [next-tag attrs] kids)
+                (into [next-tag] kids)))
+            node))
+        nodes))
 
-(def sanitize-cache (atom {}))
-
-(defn memoized-sanitize [html]
-  (if-let [hit (get @sanitize-cache html)]
-    hit
-    (let [res (sanitize-custom-html html)]
-      (swap! sanitize-cache (fn [m]
-                              (let [m' (assoc m html res)]
-                                (if (> (count m') 300)
-                                  (dissoc m' (first (keys m')))
-                                  m'))))
-      res)))
-
-
-(defn ^:ui message-text [{:keys [body html]}]
-   (if (seq html)
-    (into [:span.body.formatted] (memoized-sanitize html))
-     [:span.body (linkify-text body)]))
+(defn ^:ui message-text [{:keys [body caption html]}]
+  (if (seq html)
+    (into [:span.body.formatted] (hydrate-sanitized-nodes (memoized-sanitize html)))
+    (into [:span.body] (linkify-text (or body caption "")))))
 
 
 (defn ^:ui async-media-wrapper [event content {:keys [class default-ratio tag-type on-click controls style]}]
@@ -299,7 +567,13 @@
      :on-click (fn [e]
                  (let [live-blob-url (.-src (.-currentTarget e))]
                    (re-frame/dispatch [:ui/open-modal :image-lightbox
-                                       {:url live-blob-url
+                                       {:url            live-blob-url
+                                        :source         (:source content)
+                                        :source-map     (:source-map content)
+                                        :filename       (or (:filename content) (:caption content))
+                                        :mime-type      (get-in content [:info :mimetype])
+                                        :room-id        (or (:room-id event) (:room_id event))
+                                        :event-id       (:id event)
                                         :backdrop-props {:class "lightbox-backdrop"}
                                         :window-props   {:style {:background "transparent"
                                                                  :box-shadow "none"}}}])))}]
@@ -327,7 +601,8 @@
     :tag-type "img"}])
 
 (defn ^:ui file-message [event content tr]
-  (let [{:keys [caption source source-map info]} content]
+  (let [{:keys [caption filename source source-map info]} content
+        label (or filename caption (tr [:container.timeline.status/file-download]))]
     [:div.file-attachment-container
      [:div.file-attachment
       [:a {:href      "#"
@@ -337,22 +612,509 @@
                         (re-frame/dispatch
                          [:media/download {:uri        source
                                            :source-map source-map
-                                           :filename   caption
+                                           :filename   label
                                            :mime-type  (:mimetype info)
-                                           :room-id    (:room_id event)
+                                           :room-id    (or (:room-id event) (:room_id event))
                                            :event-id   (:id event)}]))}
        [:span.file-icon [icons/file]]
-       [:span.file-name (or caption (tr [:container.timeline.status/file-download]))]
+       [:span.file-name label]
        (when-let [size (:size info)]
          [:span.file-size (str "(" (quot size 1024) " KB)")])]]
-     (when (seq (:caption content))
+     (when (and (seq caption) (not= caption filename))
        [:div.media-caption
         [message-text content]])]))
 
-(defn extract-first-url [text]
-  (when text
-    (when-let [match (re-find #"https?://[^\s\"'<>]+" text)]
-      (clojure.string/replace match #"[.,:;!?]$" ""))))
+(defn- normalize-waveform-bars [raw-wf seed-str bar-count]
+  (let [nums (when (sequential? raw-wf)
+               (vec (keep #(when (and (number? %) (not (js/isNaN %)))
+                             (max 0.0 (min 1.0 (double %))))
+                          raw-wf)))]
+    (if (seq nums)
+      (let [src-len (count nums)
+            peak    (max 0.01 (apply max nums))]
+        (mapv (fn [idx]
+                (let [pos (/ (* idx (max 0 (dec src-len))) (max 1 (dec bar-count)))
+                      lo  (int (js/Math.floor pos))
+                      hi  (min (dec src-len) (inc lo))
+                      t   (- pos lo)
+                      v   (+ (* (- 1.0 t) (nth nums lo))
+                             (* t (nth nums hi)))]
+                  (max 0.14 (min 1.0 (/ v peak)))))
+              (range bar-count)))
+      (let [base-h (abs (hash (or seed-str "audio")))]
+        (mapv (fn [idx]
+                (let [mix (bit-xor (* (inc idx) 2654435761) base-h)
+                      n   (/ (double (mod (abs mix) 1000)) 1000.0)]
+                  (+ 0.2 (* 0.68 n))))
+              (range bar-count))))))
+
+(defn ^:react audio-player-card [{:keys [event content active-room]}]
+  (r/with-let [!audio-el (r/atom nil)
+               !playing? (r/atom false)
+               !cur-sec  (r/atom 0.0)
+               !dur-sec  (r/atom 0.0)
+               !rate     (r/atom 1.0)]
+    (let [tr         @(re-frame/subscribe [:i18n/tr])
+          el         @!audio-el
+          playing?   @!playing?
+          cur-sec    @!cur-sec
+          meta-dur   (/ (double (or (get-in content [:info :duration]) 0)) 1000.0)
+          dur-sec    (if (pos? @!dur-sec) @!dur-sec meta-dur)
+          rate       @!rate
+          {:keys [source source-map filename caption info is-voice? waveform]} content
+          clean-mime (or (some-> (:mimetype info) str (str/split #";") first str/trim not-empty)
+                         "audio/ogg")
+          room-id    (or (:room-id event) (:room_id event) active-room)
+          event-id   (:id event)
+          bars       (normalize-waveform-bars waveform (or event-id filename) 42)
+          bar-cnt    (count bars)
+          progress   (if (pos? dur-sec) (max 0.0 (min 1.0 (/ cur-sec dur-sec))) 0.0)
+          title-lbl  (if is-voice?
+                       (tr [:container.timeline.status.audio/voice-message])
+                       (or (not-empty filename)
+                           (not-empty caption)
+                           (tr [:container.timeline.status.audio/audio-file])))
+          toggle!    (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (when-let [node @!audio-el]
+                         (if (.-paused node)
+                           (do
+                             (doseq [other (array-seq (.querySelectorAll js/document "audio"))]
+                               (when (and other (not= other node) (not (.-paused other)))
+                                 (.pause other)))
+                             (-> (.play node)
+                                 (.catch #(js/console.warn "Audio playback failed:" %))))
+                           (.pause node))))
+          seek!      (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (when (and el (pos? dur-sec))
+                         (let [rect  (.getBoundingClientRect (.-currentTarget e))
+                               ratio (max 0.0 (min 1.0 (/ (- (.-clientX e) (.-left rect))
+                                                          (max 1.0 (.-width rect)))))
+                               tgt   (* ratio dur-sec)]
+                           (try
+                             (set! (.-currentTime el) tgt)
+                             (reset! !cur-sec tgt)
+                             (catch :default _ nil)))))
+          cycle-rt!  (fn [e]
+                       (.preventDefault e)
+                       (.stopPropagation e)
+                       (let [nxt (cond (< rate 1.2) 1.5 (< rate 1.8) 2.0 :else 1.0)]
+                         (reset! !rate nxt)
+                         (when el (set! (.-playbackRate el) nxt))))]
+      [:div.audio-message-card
+       [media {:tag-type           "audio"
+               :uri                source
+               :source-map         source-map
+               :mime-type          clean-mime
+               :room-id            room-id
+               :event-id           event-id
+               :style              {:display "none"}
+               :on-node            #(reset! !audio-el %)
+               :on-loaded-metadata (fn [e]
+                                     (let [d (.-duration (.-currentTarget e))]
+                                       (when (and (number? d) (js/isFinite d) (pos? d))
+                                         (reset! !dur-sec d))))
+               :on-time-update     (fn [e]
+                                     (let [target (.-currentTarget e)
+                                           t      (or (.-currentTime target) 0.0)
+                                           d      (.-duration target)]
+                                       (reset! !cur-sec t)
+                                       (when (and (number? d) (js/isFinite d) (pos? d))
+                                         (reset! !dur-sec d))))
+               :on-play            #(reset! !playing? true)
+               :on-pause           #(reset! !playing? false)
+               :on-ended           (fn [_]
+                                     (when (and (pos? @!cur-sec) (zero? @!dur-sec))
+                                       (reset! !dur-sec @!cur-sec))
+                                     (reset! !playing? false)
+                                     (reset! !cur-sec 0.0))}]
+       [:button.audio-play-btn
+        {:type     "button"
+         :title    (tr (if playing?
+                         [:container.timeline.status.audio/pause]
+                         [:container.timeline.status.audio/play]))
+         :on-click toggle!}
+        (if playing?
+          [icons/pause {:width "16px" :height "16px"}]
+          [icons/play {:width "16px" :height "16px"}])]
+
+       [:div.audio-main-col
+        [:div.audio-top-meta
+         [:span.audio-title-label
+          (if is-voice?
+            [icons/mic {:width "12px" :height "12px"}]
+            [icons/music-note {:width "12px" :height "12px"}])
+          [:span (truncate-name title-lbl 36)]]
+         [:span.audio-time-label
+          (str (format-duration-seconds (if (or playing? (pos? cur-sec)) cur-sec dur-sec))
+               (when (and (pos? dur-sec) (or playing? (pos? cur-sec)))
+                 (str " / " (format-duration-seconds dur-sec))))]]
+
+        (into
+         [:div.audio-waveform-track {:on-click seek!}]
+         (map-indexed
+          (fn [idx amp]
+            (let [bar-pct (/ (double idx) (max 1 bar-cnt))
+                  played? (and (or playing? (pos? cur-sec)) (<= bar-pct progress))]
+              ^{:key idx}
+              [:span.audio-waveform-bar
+               {:class (when played? "is-played")
+                :style {:height (str (max 16 (int (js/Math.round (* amp 100)))) "%")}}]))
+          bars))]
+
+       [:div.audio-actions-col
+        [:button.audio-speed-btn
+         {:type     "button"
+          :on-click cycle-rt!}
+         (str rate "x")]
+        (when-not is-voice?
+          [:button.audio-download-btn
+           {:type     "button"
+            :title    (tr [:container.timeline.status/file-download])
+            :on-click (fn [e]
+                        (.preventDefault e)
+                        (.stopPropagation e)
+                        (re-frame/dispatch
+                         [:media/download {:uri        source
+                                           :source-map source-map
+                                           :filename   (or filename caption "audio")
+                                           :mime-type  (:mimetype info)
+                                           :room-id    room-id
+                                           :event-id   event-id}]))}
+           [icons/download {:width "14px" :height "14px"}]])]])))
+
+(defn ^:ui audio-message [event content active-room]
+  (let [{:keys [caption filename is-voice?]} content]
+    [:div.audio-attachment-container
+     [audio-player-card {:event       event
+                         :content     content
+                         :active-room active-room}]
+     (when (and (seq caption) (not is-voice?) (not= caption filename))
+       [:div.media-caption
+        [message-text content]])]))
+
+(defn ^:ui location-message [content tr]
+  (let [geo-uri (or (:geo-uri content) (:uri content) "")
+        body    (or (not-empty (:description content))
+                    (not-empty (:body content))
+                    (not-empty geo-uri)
+                    (tr [:container.timeline.status/open-location]))
+        coords  (when-let [[_ lat lon] (re-find #"geo:([+-]?[0-9.]+),([+-]?[0-9.]+)" (str geo-uri))]
+                  {:lat lat :lon lon})
+        map-url (if coords
+                  (str "https://www.openstreetmap.org/?mlat=" (:lat coords)
+                       "&mlon=" (:lon coords) "#map=15/" (:lat coords) "/" (:lon coords))
+                  nil)]
+    (if map-url
+      [:a.location-message-card
+       {:href map-url :target "_blank" :rel "noopener noreferrer"}
+       [icons/map-pin {:width "18px" :height "18px"}]
+       [:span.location-message-label body]]
+      [:div.location-message-card
+       [icons/map-pin {:width "18px" :height "18px"}]
+       [:span.location-message-label body]])))
+
+(re-frame/reg-event-fx
+ :sdk/vote-poll
+ (fn [_ [_ room-id poll-id answer-ids]]
+   (when (and room-id poll-id @state/!engine-pool)
+     (main/do-with-pool! @state/!engine-pool
+                         {:handler   :vote-poll
+                          :arguments {:room-id    room-id
+                                      :poll-id    poll-id
+                                      :answer-ids (vec answer-ids)}}))
+   {}))
+
+(re-frame/reg-event-fx
+ :sdk/end-poll
+ (fn [_ [_ room-id poll-id]]
+   (when (and room-id poll-id @state/!engine-pool)
+     (main/do-with-pool! @state/!engine-pool
+                         {:handler   :end-poll
+                          :arguments {:room-id room-id
+                                      :poll-id poll-id}}))
+   {}))
+
+(defn ^:ui poll-message [item poll-inner active-room]
+  (let [tr           @(re-frame/subscribe [:i18n/tr])
+        my-profile   @(re-frame/subscribe [:sdk/profile])
+        my-id        (some-> (:user-id my-profile) str)
+        poll-id      (:id item)
+        question     (:question poll-inner "")
+        answers      (vec (:answers poll-inner []))
+        max-sel      (max 1 (int (or (:max-selections poll-inner) 1)))
+        multi?       (> max-sel 1)
+        undisclosed? (= (keyword (or (:kind poll-inner) :disclosed)) :undisclosed)
+        end-ts       (:end-ts poll-inner)
+        ended?       (or (boolean (:ended? poll-inner))
+                         (boolean (and (number? end-ts) (pos? end-ts) (<= end-ts (js/Date.now)))))
+        show-res?    (or (not undisclosed?) ended?)
+        votes-map    (:votes poll-inner {})
+        counts-map   (:vote-counts poll-inner {})
+        derived-mine (keep (fn [[oid uids]]
+                             (when (and my-id (contains? (set (map str uids)) my-id))
+                               (str oid)))
+                           votes-map)
+        my-votes-set (into (set (map str (:my-votes poll-inner []))) derived-mine)
+        opt-count    (fn [oid]
+                       (int (or (get counts-map oid)
+                                (get counts-map (keyword oid))
+                                (when-let [vs (or (get votes-map oid)
+                                                  (get votes-map (keyword oid)))]
+                                  (count vs))
+                                0)))
+        total-votes  (int (or (:total-votes poll-inner)
+                              (reduce + 0 (map #(opt-count (str (:id %))) answers))))
+        max-votes    (if (and ended? (pos? total-votes) (seq answers))
+                       (apply max 0 (map #(opt-count (str (:id %))) answers))
+                       0)
+        subtitle     (cond
+                       ended?
+                       (tr [:container.timeline.status.poll/ended])
+
+                       undisclosed?
+                       (tr [:container.timeline.status.poll/undisclosed-hint])
+
+                       multi?
+                       (if (>= max-sel (count answers))
+                         (tr [:container.timeline.status.poll/multi-any])
+                         (tr [:container.timeline.status.poll/multi-choice] [max-sel]))
+
+                       :else
+                       (tr [:container.timeline.status.poll/single-choice]))
+        vote-label   (if (= total-votes 1)
+                       (tr [:container.timeline.status.poll/one-vote])
+                       (tr [:container.timeline.status.poll/many-votes] [total-votes]))]
+    [:div.poll-card
+     {:class (when ended? "is-ended")}
+     [:div.poll-card-header
+      [:div.poll-question-row
+       [:span.poll-icon-badge [icons/poll {:width "16px" :height "16px"}]]
+       [:span.poll-question-text question]]
+      [:div.poll-subtitle subtitle]]
+
+     (into
+      [:div.poll-options-list]
+      (mapv
+       (fn [{:keys [id text]}]
+         (let [oid       (str id)
+               selected? (contains? my-votes-set oid)
+               cnt       (opt-count oid)
+               winner?   (and ended? (pos? max-votes) (= cnt max-votes))
+               pct       (if (and show-res? (pos? total-votes))
+                           (int (js/Math.round (* 100.0 (/ (double cnt) (double total-votes)))))
+                           0)]
+           ^{:key oid}
+           [:button.poll-option-row
+            {:type     "button"
+             :disabled ended?
+             :class    (str (when selected? "is-selected ")
+                            (when winner? "is-winner ")
+                            (when ended? "is-ended"))
+             :on-click (fn [e]
+                         (.preventDefault e)
+                         (.stopPropagation e)
+                         (when-not ended?
+                           (let [next-set (if multi?
+                                            (if selected?
+                                              (disj my-votes-set oid)
+                                              (if (< (count my-votes-set) max-sel)
+                                                (conj my-votes-set oid)
+                                                my-votes-set))
+                                            (if selected?
+                                              #{}
+                                              #{oid}))]
+                             (re-frame/dispatch
+                              [:sdk/vote-poll active-room poll-id (vec next-set)]))))}
+            (when show-res?
+              [:span.poll-option-fill
+               {:style {:width (str pct "%")}}])
+            [:span.poll-option-check
+             {:class (str (if multi? "is-checkbox " "is-radio ")
+                          (when selected? "is-checked ")
+                          (when winner? "is-winner"))}
+             (when (or selected? winner?)
+               [icons/check {:width "11px" :height "11px"}])]
+            [:span.poll-option-label text]
+            (when show-res?
+              [:span.poll-option-stats
+               [:span.poll-option-pct (str pct "%")]
+               [:span.poll-option-cnt (str "(" cnt ")")]])]))
+       answers))
+
+     [:div.poll-card-footer
+      [:span.poll-total-votes vote-label]
+      (when (and (not ended?) (:is-own? item))
+        [:button.poll-end-btn
+         {:type     "button"
+          :on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch [:sdk/end-poll active-room poll-id]))}
+         (tr [:container.timeline.status.poll/end-poll])])]]))
+
+(defn ^:ui poll-result-message [item result-inner active-room]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        room-id     (or (:room-id item) active-room)
+        question    (or (not-empty (str/trim (str (:question result-inner))))
+                        (tr [:container.timeline.status.poll/result-fallback]))
+        poll-id     (some-> (:poll-id result-inner) str not-empty)
+        total-votes (max 0 (int (or (:total-votes result-inner) 0)))
+        winners     (vec (or (:winners result-inner) []))
+        is-tie?     (or (boolean (:is-tie? result-inner))
+                        (> (count winners) 1))
+        vote-label  (if (= total-votes 1)
+                      (tr [:container.timeline.status.poll/one-vote])
+                      (tr [:container.timeline.status.poll/many-votes] [total-votes]))
+        badge-label (cond
+                      (and is-tie? (pos? total-votes))
+                      (str (tr [:container.timeline.status.poll/ended-badge])
+                           " · "
+                           (tr [:container.timeline.status.poll/winners-tie]))
+
+                      (seq winners)
+                      (str (tr [:container.timeline.status.poll/ended-badge])
+                           " · "
+                           (tr [:container.timeline.status.poll/winner]))
+
+                      :else
+                      (tr [:container.timeline.status.poll/ended-badge]))]
+    [:div.poll-card.poll-result-card.is-ended
+     [:div.poll-card-header
+      [:div.poll-question-row
+       [:span.poll-icon-badge [icons/poll {:width "16px" :height "16px"}]]
+       [:span.poll-question-text question]]
+      [:div.poll-subtitle badge-label]]
+
+     (cond
+       (seq winners)
+       (into
+        [:div.poll-options-list]
+        (map-indexed
+         (fn [idx {:keys [id text votes emoji-name emoji-url]}]
+           (let [cnt (max 0 (int (or votes 0)))
+                 pct (if (pos? total-votes)
+                       (int (js/Math.round (* 100.0 (/ (double cnt) (double total-votes)))))
+                       0)]
+             ^{:key (str (or id idx))}
+             [:div.poll-option-row.is-ended.is-winner.poll-result-winner-row
+              [:span.poll-option-fill
+               {:style {:width (str pct "%")}}]
+              [:span.poll-option-check.is-radio.is-winner
+               [icons/check {:width "11px" :height "11px"}]]
+              (cond
+                (not-empty emoji-url)
+                [:img.poll-result-emoji {:src emoji-url :alt (or emoji-name "")}]
+
+                (not-empty emoji-name)
+                [:span.poll-result-emoji-text emoji-name])
+              [:span.poll-option-label (or (not-empty text) (tr [:container.timeline.status.poll/winner]))]
+              (when (pos? total-votes)
+                [:span.poll-option-stats
+                 [:span.poll-option-pct (str pct "%")]
+                 [:span.poll-option-cnt (str "(" cnt ")")]])]))
+         winners))
+
+       (and is-tie? (pos? total-votes))
+       [:div.poll-result-empty
+        (tr [:container.timeline.status.poll/winners-tie])]
+
+       :else
+       [:div.poll-result-empty
+        (tr [:container.timeline.status.poll/no-votes])])
+
+     [:div.poll-card-footer
+      [:span.poll-total-votes vote-label]
+      (when (and poll-id room-id)
+        [:button.poll-end-btn.poll-view-btn
+         {:type     "button"
+          :on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch [:room/pretty-jump room-id {:event-id poll-id}]))}
+         (tr [:container.timeline.status.poll/view-poll])])]]))
+
+(defn ^:ui gallery-cell [entry all-items]
+  (let [open-lightbox! (fn [e]
+                         (.stopPropagation e)
+                         (let [cur           (.-currentTarget e)
+                               img-el        (when cur
+                                               (if (= (.-tagName cur) "IMG")
+                                                 cur
+                                                 (.querySelector cur "img")))
+                               live-blob-url (or (when img-el (not-empty (.-src img-el)))
+                                                 (:display-uri entry)
+                                                 (:source entry))]
+                           (re-frame/dispatch
+                            [:ui/open-modal :image-lightbox
+                             {:url            live-blob-url
+                              :index          (:idx entry)
+                              :items          all-items
+                              :room-id        (or (:room_id entry) (:room-id entry))
+                              :backdrop-props {:class "lightbox-backdrop"}
+                              :window-props   {:style {:background "transparent"
+                                                       :box-shadow "none"}}}])))]
+    [:div.gallery-grid-cell
+     {:style    (:cell-style entry)
+      :on-click open-lightbox!}
+     [:div.message-image-placeholder
+      [:div.spinner]]
+     (if (or (:display-uri entry) (:display-map entry))
+       [media
+        {:uri        (:display-uri entry)
+         :source-map (:display-map entry)
+         :tag-type   "img"
+         :alt        (or (:caption entry) (:filename entry) "media")
+         :mime-type  (:display-mime entry)
+         :room-id    (or (:room_id entry) (:room-id entry))
+         :event-id   (:event-id entry)
+         :width      (:crop-size entry)
+         :height     (:crop-size entry)
+         :method     (:crop-method entry)}]
+       [:div.gallery-video-fallback])
+     (when (:video? entry)
+       [:div.gallery-video-badge
+        [:span.gallery-play-pill "Play"]])
+     (when (pos? (:overflow-count entry))
+       [:div.gallery-overflow-mask
+        (str "+" (:overflow-count entry))])]))
+
+(defn- default-gallery-grid-style [total]
+  (case total
+    1 {:height                "240px"
+       :grid-template-columns "minmax(0, 1fr)"
+       :grid-template-rows    "minmax(0, 1fr)"}
+    2 {:height                "210px"
+       :grid-template-columns "repeat(2, minmax(0, 1fr))"
+       :grid-template-rows    "minmax(0, 1fr)"}
+    3 {:height                "260px"
+       :grid-template-columns "minmax(0, 2fr) minmax(0, 1fr)"
+       :grid-template-rows    "repeat(2, minmax(0, 1fr))"}
+    4 {:height                "280px"
+       :grid-template-columns "repeat(2, minmax(0, 1fr))"
+       :grid-template-rows    "repeat(2, minmax(0, 1fr))"}
+    {:height                "280px"
+     :grid-template-columns "repeat(6, minmax(0, 1fr))"
+     :grid-template-rows    "144px 132px"}))
+
+(defn ^:ui gallery-message [_event content]
+  (let [all-items  (:items content)
+        visible    (or (:visible-items content) (vec (take 5 all-items)))
+        total      (max (count all-items) (count visible))
+        grid-style (merge (default-gallery-grid-style total)
+                          (:grid-style content))]
+    [:div.gallery-attachment-container
+     [:div.media-gallery-grid
+      {:style grid-style}
+      (for [entry visible]
+        ^{:key (:internal-id entry)}
+        [gallery-cell entry all-items])]
+     (when (seq (:caption content))
+       [:div.media-caption
+        [message-text content]])]))
 
 
 (re-frame/reg-event-fx
@@ -499,11 +1261,18 @@
    [:span.system-icon icon]
    [:span.system-text text]])
 
-(defn ^:ui date-divider [ts]
-  [:div.timeline-date-separator
-   [:div.separator-line]
-   [:span.separator-text (format-divider-date ts)]
-   [:div.separator-line]])
+(defn ^:ui date-divider [arg]
+  (let [ts       (if (map? arg) (:ts arg) arg)
+        preview? (and (map? arg) (= (:variant arg) :preview))]
+    (if preview?
+      [:div.preview-date-separator
+       [:div.preview-date-line]
+       [:span.preview-date-text (format-divider-date ts)]
+       [:div.preview-date-line]]
+      [:div.timeline-date-separator
+       [:div.separator-line]
+       [:span.separator-text (format-divider-date ts)]
+       [:div.separator-line]])))
 
 
 (defn ^:ui new-message []
@@ -538,10 +1307,13 @@
 (defn ^:ui timeline-avatar [content-tag merge-with-prev? popover-member custom-tags active-room]
   [:div.timeline-avatar-wrapper
    {:class (when merge-with-prev? "is-merged")}
-  (when (and (= content-tag "MsgLike") (not merge-with-prev?))
-    [profile-popover-trigger popover-member custom-tags active-room nil
-     [avatar {:id (:user-id popover-member) :name (:display-name popover-member)
-              :url (:avatar-url popover-member) :size 36 :status :online :shape :circle}]])])
+   (when (and (= content-tag "MsgLike") (not merge-with-prev?))
+     [profile-popover-trigger popover-member custom-tags active-room nil
+      [avatar {:id    (:user-id popover-member)
+               :name  (:display-name popover-member)
+               :url   (:avatar-url popover-member)
+               :size  36
+               :shape :circle}]])])
 
 
 (defn ^:ui timeline-header [ts merge-with-prev? popover-member custom-tags active-room]
@@ -610,102 +1382,216 @@
 
           [:span.reply-preview (tr [:container.timeline.status/reply-loading])])]])))
 
-(defn render-message-content [tr msg-type-tag content-map in-reply-to event]
-  (let [is-edited? (:is-edited? content-map)
-        raw-body   (:body content-map)
-        room-id    (:room-id event)]
-    [:div.message-render-container
-     [reply-container tr in-reply-to room-id]
-     (case msg-type-tag
-       "Text"    [message-text content-map]
-       "Notice"  [message-text content-map]
-       "Image"   [image-message event content-map]
-       "Video"   [video-message event content-map]
-       "Sticker" [sticker-message event content-map]
-       "File"    [file-message event content-map tr]
-       [:span.body (tr [:container.timeline.status/unsupported] [msg-type-tag])])
-     (when is-edited?
-       [:span.timeline-edited-label (tr [:container.timeline.status/edited])])
-     [message-link-preview msg-type-tag raw-body]]))
-
+(defn render-message-content
+  ([tr msg-type-tag content-map in-reply-to event]
+   (render-message-content tr msg-type-tag content-map in-reply-to event (:room-id event)))
+  ([tr msg-type-tag content-map in-reply-to event active-room]
+   (let [is-edited? (:is-edited? content-map)
+         raw-body   (:body content-map)
+         room-id    (or (:room-id event) active-room)]
+     [:div.message-render-container
+      [reply-container tr in-reply-to room-id]
+      (case msg-type-tag
+        "Text"     [message-text content-map]
+        "Notice"   [message-text content-map]
+        "Emote"    [:div.timeline-emote-line
+                    [:span.emote-prefix (str "* " (:sender-name event) " ")]
+                    [message-text content-map]]
+        "Image"    [image-message event content-map]
+        "Video"    [video-message event content-map]
+        "Audio"    [audio-message event content-map room-id]
+        "Location" [location-message content-map tr]
+        "Sticker"  [sticker-message event content-map]
+        "Gallery"  [gallery-message event content-map]
+        "File"     [file-message event content-map tr]
+        [:span.body (tr [:container.timeline.status/unsupported] [msg-type-tag])])
+      (when is-edited?
+        [:span.timeline-edited-label (tr [:container.timeline.status/edited])])
+      [message-link-preview msg-type-tag raw-body room-id]])))
 
 (defn ^:ui timeline-body [item content active-room is-editing-this?]
   (let [{:keys [tag inner in-reply-to]} content
-        tr               @(re-frame/subscribe [:i18n/tr])]
-
+        tr @(re-frame/subscribe [:i18n/tr])]
     [:div.timeline-body
      (cond
        is-editing-this?
        [inline-editor item active-room]
-       (= tag "Sticker") [render-message-content tr "Sticker" inner in-reply-to item]
-       (= tag "Redacted") [:span.redacted (tr [:container.timeline.status/redacted])]
-       (= tag "UnableToDecrypt") [:span.decryption-error (tr [:container.timeline.status/decryption-error])]
+
+       (= tag "Poll")
+       [:div.message-render-container
+        [reply-container tr in-reply-to (or (:room-id item) active-room)]
+        [poll-message item inner active-room]]
+
+       (= tag "PollResult")
+       [:div.message-render-container
+        [reply-container tr in-reply-to (or (:room-id item) active-room)]
+        [poll-result-message item inner active-room]]
+
+       (= tag "Sticker")
+       [render-message-content tr "Sticker" inner in-reply-to item active-room]
+
+       (= tag "Redacted")
+       [:span.redacted (tr [:container.timeline.status/redacted])]
+
+       (= tag "UnableToDecrypt")
+       [:span.decryption-error (tr [:container.timeline.status/decryption-error])]
+
        (or (= tag "Message") (= tag "Notice") (= tag "Emote"))
        (let [{m-tag :tag m-content :content} (if (= tag "Message") inner content)]
-         [render-message-content tr (or m-tag "Text") m-content in-reply-to item])
-       :else [:span.unknown (tr [:container.timeline.status/unknown-kind] [tag]) (str "Unknown message kind: " tag)])]))
+         [render-message-content tr (or m-tag tag "Text") m-content in-reply-to item active-room])
 
+       :else
+       [:span.unknown (tr [:container.timeline.status/unknown-kind] [tag])])]))
+
+
+(defn ^:ui thread-summary-pill [active-room item]
+  (let [tr          @(re-frame/subscribe [:i18n/tr])
+        summary     (:thread-summary item)
+        reply-count (or (:reply-count summary) 0)]
+    (when (and (map? summary)
+               (not (:in-thread-view? item))
+               (or (pos? reply-count)
+                   (not-empty (:title summary))
+                   (not-empty (str (:thread-id summary "")))))
+      (let [count-label (cond
+                          (= reply-count 1) (tr [:container.threads/one-reply])
+                          (pos? reply-count) (tr [:container.threads/many-replies] [reply-count])
+                          :else (or (not-empty (:title summary))
+                                    (tr [:container.threads/view-thread])))
+            snippet     (or (when-let [lb (not-empty (:latest-body summary))]
+                              (if-let [ls (not-empty (:latest-sender summary))]
+                                (str (truncate-name ls 14) ": " lb)
+                                lb))
+                            (when (pos? reply-count)
+                              (not-empty (:title summary))))]
+        [:div.timeline-thread-summary-pill
+         {:on-click (fn [e]
+                      (.preventDefault e)
+                      (.stopPropagation e)
+                      (re-frame/dispatch
+                       [:msg/thread active-room (:id item) summary item]))}
+         [icons/thread {:width "14px" :height "14px"}]
+         [:span.timeline-thread-summary-count count-label]
+         (when snippet
+           [:span.timeline-thread-summary-snippet snippet])]))))
+
+(defn ^:ui message-send-failed-bar [action-room item]
+  (let [err-msg (:send-error item)]
+    [:div.message-send-failed-bar
+     [:span.message-send-failed-text
+      {:title (or err-msg "Failed to send message")}
+      "Failed to send"]
+     [:button.message-send-failed-btn.is-retry
+      {:type     "button"
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch [:msg/retry-send action-room item]))}
+      "Retry"]
+     [:button.message-send-failed-btn.is-cancel
+      {:type     "button"
+       :on-click (fn [e]
+                   (.preventDefault e)
+                   (.stopPropagation e)
+                   (re-frame/dispatch [:msg/cancel-pending action-room item]))}
+      "Dismiss"]]))
 
 (defn ^:ui event-tile-render [item]
-  (let [active-room  @(re-frame/subscribe [:rooms/active-id])
-        hs-url       @(re-frame/subscribe [:sdk/homeserver-url])
-        is-mobile?   @(re-frame/subscribe [:ui/mobile?])
-        my-profile   @(re-frame/subscribe [:sdk/profile])
-        my-id        (:user-id my-profile)]
-    (fn [item]
-      (let [{:keys [id sender-id sender-name sender-avatar content-tag content type reactions ts is-own? merge-with-prev?]} item
-            is-editing-this? @(re-frame/subscribe [:input/is-editing-event? active-room id])
-            custom-tags      @(re-frame/subscribe [:room/power-level-tags active-room])
-            members-map      @(re-frame/subscribe [:room/members-map active-room])
-            member-data      (get members-map sender-id)
-            popover-member   {:user-id sender-id
-                              :display-name (or (:display-name member-data) sender-name)
-                              :avatar-url (or (:avatar-url member-data) sender-avatar)
-                              :power-level (or (:power-level member-data) 0)}]
-        (if (= type :virtual)
-          [virtual-item item]
-          (if (= content-tag "MsgLike")
-            [swipe-to-action-wrapper
-             {:can-edit? is-own?
-              :enabled? is-mobile?
-              :on-action (fn [action]
-                           (re-frame/dispatch [:input/set-context active-room action item]))
-              :wrapper-props (merge (long-press-props
-                                     #(event-menu %1 %2 item active-room my-id))
-                                    {:class (str "timeline-message is-message"
-                                                 (when merge-with-prev? " is-merged"))})}
+  (let [active-room      @(re-frame/subscribe [:rooms/active-id])
+        is-mobile?       @(re-frame/subscribe [:ui/mobile?])
+        my-profile       @(re-frame/subscribe [:sdk/profile])
+        my-id            (:user-id my-profile)
+        {:keys [id sender-id sender-name sender-avatar content-tag content type reactions ts is-own? merge-with-prev? send-state]} item
+        norm-send-state  (when send-state
+                           (if (keyword? send-state) send-state (keyword (str send-state))))
+        is-pending?      (= norm-send-state :pending)
+        is-failed?       (= norm-send-state :failed)
+        action-room      (or (:action-room-id item) active-room)
+        input-scope      (or (:input-scope-id item) active-room)
+        is-editing-this? @(re-frame/subscribe [:input/is-editing-event? action-room id])
+        custom-tags      @(re-frame/subscribe [:room/power-level-tags active-room])
+        members-map      @(re-frame/subscribe [:room/members-map active-room])
+        member-data      (get members-map sender-id)
+        popover-member   {:user-id sender-id
+                          :display-name (or (:display-name member-data) sender-name)
+                          :avatar-url (or (:avatar-url member-data) sender-avatar)
+                          :power-level (or (:power-level member-data) 0)}]
+    (if (= type :virtual)
+      [virtual-item item]
+      (if (= content-tag "MsgLike")
+        [swipe-to-action-wrapper
+         {:can-edit? (and is-own? (not is-pending?) (not is-failed?))
+          :enabled? (and is-mobile? (not is-pending?) (not is-failed?) (not is-editing-this?))
+          :on-action (fn [action]
+                       (re-frame/dispatch
+                        [:input/set-context
+                         (if (= action :edit) action-room input-scope)
+                         action
+                         item]))
+          :wrapper-props (merge (long-press-props
+                                 #(event-menu %1 %2 item active-room my-id))
+                                {:class (str "timeline-message is-message"
+                                             (when merge-with-prev? " is-merged")
+                                             (when is-editing-this? " is-editing")
+                                             (when is-pending? " is-pending")
+                                             (when is-failed? " is-send-failed"))})}
 
-             [timeline-avatar content-tag merge-with-prev? popover-member custom-tags active-room]
-             [:div.timeline-content-wrapper
-              [message-hover-toolbar item active-room my-id]
-              (when-not merge-with-prev?
-                [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
-              [timeline-body item content active-room is-editing-this?]
-              (when (seq reactions)
-                [reaction-row {:reactions reactions
-                               :my-id my-id
-                               :members-map members-map
-                               :active-room active-room
-                               :event-id (:event-or-transaction-id item)}])]]
-            [:<>
-             [sub-virtual-items content-tag item sender-name]]))))))
+         [timeline-avatar content-tag merge-with-prev? popover-member custom-tags active-room]
+         [:div.timeline-content-wrapper
+          (when-not (or is-pending? is-failed? is-editing-this?)
+            [message-hover-toolbar item active-room my-id])
+          (when-not merge-with-prev?
+            [timeline-header ts merge-with-prev? popover-member custom-tags active-room])
+          [:div.timeline-body-row
+           [timeline-body item content action-room is-editing-this?]
+           (when is-pending?
+             [:span.timeline-sending-label "Sending…"])]
+          (when is-failed?
+            [message-send-failed-bar action-room item])
+          (when (seq reactions)
+            [reaction-row {:reactions reactions
+                           :my-id my-id
+                           :members-map members-map
+                           :active-room action-room
+                           :event-id (or (:event-or-transaction-id item) id)}])
+          [thread-summary-pill active-room item]]]
+        [:<>
+         [sub-virtual-items content-tag item sender-name]]))))
 
 
 
-(defn event-tile [layout-node]
-  (let [id         (:id layout-node)
-        unread?    (:unread? layout-node)
-        pojo       (:worker-data layout-node)
-        react-tree (get-cached-react-tree id pojo)]
-
-    (react/createElement "div"
-                         #js {:key id
-                              :data-event-id id
-                              :style #js {:width "100%"}
-                              :ref (fn [node]
-                                     (when @visibility-observer
-                                       (if (and node unread?)
-                                         (.observe @visibility-observer node)
-                                         (when node
-                                           (.unobserve @visibility-observer node)))))}
-                         react-tree)))
+(defn event-tile
+  ([layout-node]
+   (event-tile layout-node nil))
+  ([layout-node room-id]
+   (let [id          (:id layout-node)
+         ts          (:ts layout-node)
+         item-type   (:type layout-node)
+         is-local?   (boolean (:is-local? layout-node))
+         send-state  (:send-state layout-node)
+         unsent?     (or is-local?
+                         (#{:pending :failed "pending" "failed"} send-state))
+         pojo        (:worker-data layout-node)
+         react-tree  (get-cached-react-tree id pojo)
+         eff-room-id (or room-id (:active-room-id @db/app-db))
+         trackable?  (and (not unsent?)
+                          (trackable-event-id? id)
+                          (not= item-type :virtual)
+                          (not= item-type "virtual"))
+         obs-key     (when trackable? (str (or eff-room-id "") "|" id))]
+     (react/createElement "div"
+                          #js {:key           id
+                               :data-event-id id
+                               :data-room-id  (or eff-room-id "")
+                               :data-ts       (if (some? ts) (str ts) "0")
+                               :style         #js {:width "100%"}
+                               :ref           (fn [node]
+                                                (when-let [^js obs @visibility-observer]
+                                                  (if (and node trackable?)
+                                                    (when (not= (goog.object/get node "__paradiseObservedKey") obs-key)
+                                                      (goog.object/set node "__paradiseObservedKey" obs-key)
+                                                      (.observe obs node))
+                                                    (when node
+                                                      (goog.object/set node "__paradiseObservedKey" nil)
+                                                      (.unobserve obs node)))))}
+                          react-tree))))
