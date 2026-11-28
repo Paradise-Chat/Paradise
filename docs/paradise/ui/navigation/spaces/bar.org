@@ -2311,6 +2311,35 @@ folder, top/bottom halves reorder within that folder.
     color: #ffffff;
 }
 
+.sidebar-spaces-bottom {
+    width: 100%;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 0 calc(var(--floating-dock-clearance, 76px) + var(--app-bottom-cushion, 0px) + 6px) 0;
+    gap: 4px;
+}
+
+.discover-icon-container {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #313338;
+    color: #23a55a;
+    border-radius: 50%;
+    transition: border-radius 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.space-icon-wrapper:hover .discover-icon-container,
+.space-icon-wrapper.active .discover-icon-container {
+    border-radius: 16px;
+    background-color: #23a55a;
+    color: #ffffff;
+}
+
 .home-icon-container:hover .animate-sun-pulse {
     animation: sun-breathe 2s ease-in-out infinite;
 }
