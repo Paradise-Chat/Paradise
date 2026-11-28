@@ -25,11 +25,11 @@ Not entirely important to read, but certainly interesting.
 #+begin_src clojurescript :tangle ../../../../../src/paradise/ui/overlays/settings/base.cljs
 (ns paradise.ui.overlays.settings.base
   (:require
-   ["@capacitor/core" :refer [Capacitor]]
    [clojure.string :as str]
    [re-frame.core :as re-frame]
    [reagent.core :as r]
    [paradise.shared.utils.helpers :refer [mobile-runtime?]]
+   [paradise.shared.utils.platform :as platform]
    [paradise.shared.utils.svg :as icons]
    [paradise.ui.global :refer [avatar]]
    [paradise.ui.overlays.base :refer [modal-component]]
