@@ -82,20 +82,282 @@ We'll need a way to generically upload to Matrix for anything from updating avat
    (if file
      (let [mime (.-type file)]
        (if-let [pool @state/!engine-pool]
-         (go
-           (try
-             (let [ab  (<p! (file->array-buffer file))
-                   res (<! (main/do-with-pool! pool {:handler   :upload-media
-                                                     :arguments {:mime mime :buffer ab}}))]
-               (if (= (:status res) "success")
-                 (let [media-uri (or (:uri res) (:url res))]
-                   (re-frame/dispatch (conj on-success-event media-uri)))
-                 (log/error "Worker upload failed:" (:msg res))))
-             (catch :default e
-               (log/error "Exception generating arrayBuffer or worker:" (str e)))))
-         (log/error "No engine pool for upload"))
-       {:db (assoc db :uploading-files? true)})
+         (do
+           (go
+             (try
+               (let [ab  (<p! (file->array-buffer file))
+                     res (<! (main/do-with-pool! pool {:handler   :upload-media
+                                                       :arguments {:mime mime :buffer ab}}))]
+                 (if (= (:status res) "success")
+                   (let [media-uri (or (:uri res) (:url res))]
+                     (re-frame/dispatch (conj on-success-event media-uri)))
+                   (log/error "Worker upload failed:" (:msg res))))
+               (catch :default e
+                 (log/error "Exception generating arrayBuffer or worker:" (str e)))
+               (finally
+                 (re-frame/dispatch [:sdk/upload-complete]))))
+           {:db (assoc db :uploading-files? true)})
+         (do
+           (log/error "No engine pool for upload")
+           {})))
      (do (log/warn "Missing file for upload") {}))))
+#+end_src
+
+
+**** Slash Command Execution & Notice Helpers
+
+#+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
+(defn- escape-html [s]
+  (-> (str (or s ""))
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")
+      (str/replace "\"" "&quot;")))
+
+(defn- text->p-html [s]
+  (str "<p>" (str/replace (escape-html s) #"\r?\n" "<br>") "</p>"))
+
+(defn- split-first-token [s]
+  (let [trimmed (str/trim (str (or s "")))]
+    (if (str/blank? trimmed)
+      ["" ""]
+      (let [[_ head tail] (re-matches #"^(\S+)(?:\s+([\s\S]*))?$" trimmed)]
+        [(or head "") (str/trim (str (or tail "")))]))))
+
+(defn- resolve-member-id [db room-id raw-target]
+  (let [target  (str/trim (str (or raw-target "")))
+        clean   (if (and (str/starts-with? target "@")
+                         (not (str/includes? target ":")))
+                  (subs target 1)
+                  target)
+        members (vals (get-in db [:room-members room-id :data] {}))]
+    (if (or (str/blank? target)
+            (and (str/starts-with? target "@") (str/includes? target ":")))
+      target
+      (let [q (str/lower-case clean)]
+        (or (some (fn [m]
+                    (let [uid   (or (:id m) (:user-id m))
+                          dname (some-> (or (:display-name m) (:name m)) str/lower-case)]
+                      (when (or (= (some-> uid str/lower-case) (str/lower-case target))
+                                (= dname q))
+                        uid)))
+                  members)
+            (some (fn [m]
+                    (let [uid   (or (:id m) (:user-id m))
+                          dname (some-> (or (:display-name m) (:name m)) str/lower-case)]
+                      (when (and dname (str/starts-with? dname q))
+                        uid)))
+                  members)
+            target)))))
+
+(defonce ^:private !notice-timer (atom nil))
+
+(re-frame/reg-event-fx
+ :composer/show-notice
+ (fn [{:keys [db]} [_ room-id {:keys [level key args text]}]]
+   (when-let [t @!notice-timer]
+     (js/clearTimeout t))
+   (reset! !notice-timer
+           (js/setTimeout #(re-frame/dispatch [:composer/clear-notice room-id]) 4800))
+   {:db (assoc-in db [:composer/notice room-id]
+                  {:level (or level :info)
+                   :key   key
+                   :args  (vec (or args []))
+                   :text  text})}))
+
+(re-frame/reg-event-db
+ :composer/clear-notice
+ (fn [db [_ room-id]]
+   (update db :composer/notice dissoc room-id)))
+
+(re-frame/reg-sub
+ :composer/notice
+ (fn [db [_ room-id]]
+   (get-in db [:composer/notice room-id])))
+
+(defn- execute-slash-command
+  "Evaluates a parsed slash command. Returns either:
+   - `{:send {:text ... :html ... :msgtype ...}}` to send a transformed message,
+   - `{:fx [...]}` to run local/RPC actions without sending a chat message."
+  [db room-id {:keys [command args]}]
+  (let [notice (fn [level i18n-key & fmt-args]
+                 {:fx [[:dispatch [:composer/show-notice room-id
+                                   {:level level
+                                    :key   i18n-key
+                                    :args  (vec fmt-args)}]]]})
+        append-kaomoji (fn [kaomoji]
+                         (let [msg (if (str/blank? args) kaomoji (str args " " kaomoji))]
+                           {:send {:text msg :html (text->p-html msg)}}))]
+    (case command
+      "me"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-me)
+        {:send {:text    args
+                :html    (text->p-html args)
+                :msgtype :emote}})
+
+      "shrug"     (append-kaomoji "¯\\_(ツ)_/¯")
+      "tableflip" (append-kaomoji "(╯°□°)╯︵ ┻━┻")
+      "unflip"    (append-kaomoji "┬─┬ノ( º _ ºノ)")
+      "lenny"     (append-kaomoji "( ͡° ͜ʖ ͡°)")
+
+      "plain"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-plain)
+        {:send {:text args :html (text->p-html args)}})
+
+      "spoiler"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-spoiler)
+        {:send {:text (str "[Spoiler] " args)
+                :html (str "<p><span data-mx-spoiler=\"\">" (escape-html args) "</span></p>")}})
+
+      "nick"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-nick)
+        {:fx [[:dispatch [:sdk/update-own-profile {:display-name args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-nick
+                           :args  [args]}]]]})
+
+      "topic"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-topic)
+        {:fx [[:dispatch [:room-settings/save-overview {:room-id room-id :topic args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-topic}]]]})
+
+      "roomname"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-roomname)
+        {:fx [[:dispatch [:room-settings/save-overview {:room-id room-id :name args}]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :success
+                           :key   :composer.commands/status-roomname
+                           :args  [args]}]]]})
+
+      "join"
+      (if (str/blank? args)
+        (notice :error :composer.commands/usage-join)
+        {:fx [[:dispatch [:rooms/join args]]
+              [:dispatch [:composer/show-notice room-id
+                          {:level :info
+                           :key   :composer.commands/status-join
+                           :args  [args]}]]]})
+
+      ("leave" "part")
+      {:fx [[:dispatch [:rooms/leave room-id]]]}
+
+      "invite"
+      (if (str/blank? args)
+        {:fx [[:dispatch [:ui/open-modal :invite-user {:room-id room-id}]]]}
+        (let [[target _] (split-first-token args)
+              uid        (resolve-member-id db room-id target)]
+          {:fx [[:dispatch [:rooms/invite-user room-id uid]]
+                [:dispatch [:composer/show-notice room-id
+                            {:level :success
+                             :key   :composer.commands/status-invite
+                             :args  [uid]}]]]}))
+
+      "kick"
+      (let [[target reason] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-kick)
+          (let [uid (resolve-member-id db room-id target)]
+            {:fx [[:dispatch [:room-perms/kick-member
+                              {:room-id room-id
+                               :user-id uid
+                               :reason  (not-empty reason)}]]
+                  [:dispatch [:composer/show-notice room-id
+                              {:level :info
+                               :key   :composer.commands/status-kick
+                               :args  [uid]}]]]})))
+
+      "ban"
+      (let [[target reason] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-ban)
+          (let [uid (resolve-member-id db room-id target)]
+            {:fx [[:dispatch [:room-perms/ban-member
+                              {:room-id room-id
+                               :user-id uid
+                               :reason  (not-empty reason)}]]
+                  [:dispatch [:composer/show-notice room-id
+                              {:level :info
+                               :key   :composer.commands/status-ban
+                               :args  [uid]}]]]})))
+
+      "unban"
+      (let [[target _] (split-first-token args)]
+        (if (str/blank? target)
+          (notice :error :composer.commands/usage-unban)
+          {:fx [[:dispatch [:room-perms/unban-member
+                            {:room-id room-id
+                             :user-id target}]]
+                [:dispatch [:composer/show-notice room-id
+                            {:level :info
+                             :key   :composer.commands/status-unban
+                             :args  [target]}]]]}))
+
+      "poll"
+      {:fx [[:dispatch [:ui/open-modal :create-poll {:room-id room-id}]]]}
+
+      "search"
+      {:fx (cond-> [[:dispatch [:container/set-side-panel :search]]]
+             (not (str/blank? args))
+             (conj [:dispatch [:room/execute-search room-id args]]))}
+
+      "pins"
+      (let [cur (:side-panel db)]
+        {:fx (cond-> [[:dispatch [:container/set-side-panel (if (= cur :pins) nil :pins)]]]
+               (not= cur :pins)
+               (conj [:dispatch [:room/fetch-pins room-id]]))})
+
+      "members"
+      (let [cur (:side-panel db)]
+        {:fx [[:dispatch [:container/set-side-panel (if (= cur :members) nil :members)]]]})
+
+      "settings"
+      (if (= (str/lower-case args) "app")
+        {:fx [[:dispatch [:settings/open :my-account]]]}
+        {:fx [[:dispatch [:rooms/open-settings room-id]]]})
+
+      "help"
+      {:fx [[:dispatch [:ui/open-modal :slash-help {}]]]}
+
+      (notice :error :composer.commands/unknown command))))
+
+(defn ^:ui slash-help-modal-content [_]
+  (let [close-fn #(re-frame/dispatch [:ui/close-modal])
+        tr       @(re-frame/subscribe [:i18n/tr])]
+    [:div.slash-help-modal
+     [:div.slash-help-header
+      [:h3 (tr [:composer.commands/help-title])]
+      [:button.slash-help-close
+       {:type "button" :on-click close-fn :title (tr [:composer.commands/help-close])}
+       [icons/exit]]]
+     [:p.slash-help-hint
+      (tr [:composer.commands/help-hint-prefix])
+      [:code "/"]
+      (tr [:composer.commands/help-hint-middle])
+      [:code "//"]
+      (tr [:composer.commands/help-hint-suffix])]
+     [:div.slash-help-list
+      (for [{:keys [name args-key desc-key aliases]} slash-commands]
+        ^{:key name}
+        [:div.slash-help-row
+         [:div.slash-help-cmd
+          [:code (str "/" name (when args-key (str " " (tr [args-key]))))]
+          (when (seq aliases)
+            [:span.slash-help-aliases
+             (str " (" (str/join ", " (map #(str "/" %) aliases)) ")")])]
+         (when desc-key
+           [:span.slash-help-desc (tr [desc-key])])])]]))
+
+(defmethod modal-component :slash-help [_]
+  slash-help-modal-content)
 #+end_src
 
 
@@ -103,6 +365,13 @@ We'll need a way to generically upload to Matrix for anything from updating avat
 
 
 #+begin_src clojurescript :tangle ../../../../src/paradise/ui/input/base.cljs
+(defn- build-reply-context [raw-context]
+  (when (= (:mode raw-context) :reply)
+    {:mode        :reply
+     :target      (get-in raw-context [:target :id])
+     :msg-tag     (get-in raw-context [:target :content :inner :tag])
+     :ffi-content (get-in raw-context [:target :content :inner :content :ffi-content])}))
+
 (re-frame/reg-event-fx
  :composer/submit
  (fn [{:keys [db]} [_ room-id payload-or-text maybe-html]]
